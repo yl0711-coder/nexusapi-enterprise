@@ -1,0 +1,26 @@
+# 镜像方式跑真机契约测试:拉起一次性 rc.4 + 在容器内编译跑 adapter 契约测试。
+# 全程不依赖本机 Go 工具链(不本机编译);跑完即弃。
+#
+#   docker compose -f test/docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from tests
+#   docker compose -f test/docker-compose.test.yml down -v
+name: nexusapi-enterprise-test
+
+services:
+  newapi:
+    image: calciumion/new-api:v1.0.0-rc.4
+    # 一次性 SQLite 实例,不暴露到宿主、不持久化(测试完 down -v 清掉)。
+    expose:
+      - "3000"
+    tmpfs:
+      - /data
+
+  tests:
+    build:
+      context: ..
+      dockerfile: Dockerfile.test
+    depends_on:
+      - newapi
+    environment:
+      NEWAPI_CONTRACT_BASE_URL: http://newapi:3000
+      NEWAPI_CONTRACT_AUTO_SETUP: "1"
+    command: ["sh", "/src/test/contract-entrypoint.sh"]

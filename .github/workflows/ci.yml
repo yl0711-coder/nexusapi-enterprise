@@ -1,0 +1,73 @@
+name: CI
+
+# 沿用 Git 协作与发版规范:
+#   - push dev / 向 main|dev 提 PR → 跑 vet + 单测(mock)+ 真机契约(rc.4 服务容器)
+#   - push dev → 构建并推 :dev 测试镜像到 GHCR
+#   - 打 v* tag → 构建并推正式镜像到 GHCR
+on:
+  push:
+    branches: [dev]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      newapi:
+        image: calciumion/new-api:v1.0.0-rc.4
+        ports:
+          - "3000:3000"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: vet
+        run: go vet ./...
+      - name: 单元/契约(mock-rc.4)
+        run: go test -race ./...
+      - name: 等待 new-api 就绪
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:3000/api/status >/dev/null 2>&1 && exit 0
+            sleep 2
+          done
+          echo "new-api 未就绪" >&2; exit 1
+      - name: 真机契约测试(对 rc.4)
+        env:
+          NEWAPI_CONTRACT_BASE_URL: http://localhost:3000
+          NEWAPI_CONTRACT_AUTO_SETUP: "1"
+        run: go test ./adapter/newapi/ -run Contract -v
+
+  image:
+    needs: test
+    # dev 分支或 v* tag 才构建镜像。
+    if: github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: 计算镜像 tag
+        id: meta
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=dev" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/yl0711-coder/nexusapi-enterprise:${{ steps.meta.outputs.tag }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.tag }}

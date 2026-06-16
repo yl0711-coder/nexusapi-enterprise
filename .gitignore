@@ -2,6 +2,7 @@
 /bin/
 /dist/
 *.test
+!Dockerfile.test
 *.out
 coverage.*
 

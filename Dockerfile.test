@@ -1,0 +1,11 @@
+# 在容器内跑测试(不依赖本机 Go 工具链;"镜像方式"测试)。
+# 用法见 test/docker-compose.test.yml。默认跑全量;契约测试由环境变量驱动。
+FROM golang:1.23-alpine
+RUN apk add --no-cache git
+WORKDIR /src
+COPY go.mod ./
+RUN go mod download
+COPY . .
+# 默认入口:跑全部单测(mock-rc.4)。alpine 无 gcc,-race 需 cgo,故默认不带 -race;
+# 竞态检测在 CI(ubuntu/glibc)跑。compose 里会覆盖 command 来跑真机契约。
+CMD ["go", "test", "./..."]

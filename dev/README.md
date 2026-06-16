@@ -51,6 +51,20 @@ bash dev/reset.sh
   `docker compose -f dev/docker-compose.dev.yml exec mysql mysql -uroot -pdevroot -e "CREATE DATABASE IF NOT EXISTS nexus CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;"`
   然后平台 DSN 指 `root:devroot@tcp(127.0.0.1:13306)/nexus?parseTime=true&loc=UTC`。
 
+## 联调平台 server(把后端接到这套 dev 栈上)
+
+```bash
+bash dev/run-server.sh   # 建平台库 nexus + 自动取 new-api 管理员 token + 跑 server(容器,端口 18080)
+bash dev/smoke.sh        # 里程碑1 接口走查:登录→建组织/团队/层级→开通成员(真机代发key)→列表脱敏→轮换→RBAC(403/404/401)
+```
+
+- 联调入口:http://localhost:18080 ;运营方账号 `ops@nexus.local` / `OpsPass123`(dev 引导账号)。
+- server 容器名 `nexus-ent-dev`,停:`docker rm -f nexus-ent-dev`;看日志:`docker logs nexus-ent-dev`。
+- dev 主密钥/会话密钥是脚本里写死的固定值,**仅 dev**(稳定才能让重启后旧密文仍可解);生产经环境变量注入真密钥,绝不入库。
+- 手动戳接口示例:
+  `TOK=$(curl -s -XPOST localhost:18080/api/v1/auth/login -d '{"email":"ops@nexus.local","password":"OpsPass123"}' | grep -oE '"token":"[^"]+"' | cut -d'"' -f4)`
+  然后 `curl -s localhost:18080/api/v1/organizations -H "Authorization: Bearer $TOK"`。
+
 ## 改 mock 数据
 
 直接改 `dev/seed.sh`(加模型倍率 / 改分组 / 加渠道)→ `bash dev/reset.sh` 回空基线前先 `down -v` 重来,或在现有库上重跑 `seed.sh`(option 覆盖、渠道按名去重)→ 满意后 `bash dev/snapshot.sh` 重新快照。

@@ -121,7 +121,11 @@ func userAuth(cred MemberCred) authMode {
 	return authMode{bearer: cred.AccessToken, newAPIUser: strconv.Itoa(cred.NewapiUserID)}
 }
 
-func sessionAuth(cookie string) authMode { return authMode{cookie: cookie} }
+// sessionAuth 用于 login 后的 GET /api/user/token:rc.4 即使带 session cookie
+// 也强制要 New-Api-User 头(05 §1.2 实证),故两者都带。
+func sessionAuth(cookie string, userID int) authMode {
+	return authMode{cookie: cookie, newAPIUser: strconv.Itoa(userID)}
+}
 
 func noAuth() authMode { return authMode{none: true} }
 

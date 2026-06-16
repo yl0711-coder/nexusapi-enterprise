@@ -1,7 +1,13 @@
 package newapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/cookiejar"
 	"os"
 	"strconv"
 	"testing"
@@ -33,8 +39,17 @@ func TestContract_AgainstRealRC4(t *testing.T) {
 	}
 	adminToken := os.Getenv("NEWAPI_CONTRACT_ADMIN_TOKEN")
 	adminUserID, _ := strconv.Atoi(os.Getenv("NEWAPI_CONTRACT_ADMIN_USER_ID"))
+	// 容器化跑法:对全新 rc.4 自动 setup root 并取管理员 access_token,免手填 token。
+	if adminToken == "" && os.Getenv("NEWAPI_CONTRACT_AUTO_SETUP") == "1" {
+		tok, uid, err := autoSetupRC4(base)
+		if err != nil {
+			t.Fatalf("rc.4 自动 setup 失败: %v", err)
+		}
+		adminToken, adminUserID = tok, uid
+		t.Logf("自动 setup 完成:admin user_id=%d", uid)
+	}
 	if adminToken == "" || adminUserID == 0 {
-		t.Fatal("需提供 NEWAPI_CONTRACT_ADMIN_TOKEN 与 NEWAPI_CONTRACT_ADMIN_USER_ID")
+		t.Fatal("需提供 NEWAPI_CONTRACT_ADMIN_TOKEN + NEWAPI_CONTRACT_ADMIN_USER_ID,或设 NEWAPI_CONTRACT_AUTO_SETUP=1")
 	}
 
 	a := New(Config{
@@ -47,12 +62,13 @@ func TestContract_AgainstRealRC4(t *testing.T) {
 	defer cancel()
 
 	// 唯一成员(避免与历史残留冲突);用纳秒戳派生确定性 username。
-	uniq := time.Now().UnixNano()
+	// rc.4 约束:username<=20、password 8-20。用短唯一后缀派生,避免超长。
+	uniq := time.Now().UnixNano() % 1_000_000
 	in := BootstrapInput{
 		OrgID:       9001,
-		MemberID:    uniq % 1_000_000,
-		Username:    "ct_org9001_m" + strconv.FormatInt(uniq, 36),
-		Password:    "Ct!" + strconv.FormatInt(uniq, 36) + "x9",
+		MemberID:    uniq,
+		Username:    fmt.Sprintf("ct_m%06d", uniq), // <=10 字符
+		Password:    fmt.Sprintf("CtPw%06d!!", uniq), // 12 字符,含字母/数字/特殊
 		DisplayName: "契约测试成员",
 	}
 
@@ -74,21 +90,33 @@ func TestContract_AgainstRealRC4(t *testing.T) {
 		}
 	}()
 
-	// 2) 幂等重开 → 接管。
-	if again, err := a.BootstrapMember(ctx, in); err != nil {
+	// 2) 刚 bootstrap 的凭证应有效(在任何重开/旋转之前探测)。
+	if valid, err := a.ProbeAccessToken(ctx, cred); err != nil || !valid {
+		t.Fatalf("ProbeAccessToken(新凭证): valid=%v err=%v", valid, err)
+	}
+
+	// 3) 调额 override 绝对值(管理员身份,不动 token)。
+	if err := a.ManageUserQuota(ctx, res.NewapiUserID, QuotaOverride, 1_000_000); err != nil {
+		t.Fatalf("ManageUserQuota override 失败: %v", err)
+	}
+
+	// 4) 幂等重开 → 接管同一用户。注意:重开会重新 login+GET token → **旋转 access_token**,
+	//    旧 cred 随即失效(这是 rc.4 既定行为,§2.6)。生产中 service 凭 bootstrap_state=done
+	//    短路、不会重跑;这里重开后必须改用 again 返回的新 token。
+	again, err := a.BootstrapMember(ctx, in)
+	if err != nil {
 		t.Fatalf("幂等重开失败: %v", err)
-	} else if !again.AdoptedExisting || again.NewapiUserID != res.NewapiUserID {
+	}
+	if !again.AdoptedExisting || again.NewapiUserID != res.NewapiUserID {
 		t.Errorf("幂等重开应接管同一用户: %+v", again)
 	}
-
-	// 3) 调额 override 绝对值。
-	if err := a.ManageUserQuota(ctx, res.NewapiUserID, QuotaOverride, 1_000_000); err != nil {
-		t.Fatalf("ManageUserQuota override 失败(检查真机契约假设 #1): %v", err)
+	// 旧 cred 应已因旋转失效;新 cred 有效。
+	if valid, _ := a.ProbeAccessToken(ctx, cred); valid {
+		t.Errorf("重开旋转后旧 access_token 应失效")
 	}
-
-	// 4) ProbeAccessToken 应有效。
+	cred = MemberCred{NewapiUserID: again.NewapiUserID, AccessToken: again.AccessToken}
 	if valid, err := a.ProbeAccessToken(ctx, cred); err != nil || !valid {
-		t.Fatalf("ProbeAccessToken: valid=%v err=%v", valid, err)
+		t.Fatalf("重开后新凭证应有效: valid=%v err=%v", valid, err)
 	}
 
 	// 5) 轮换令牌(删旧建新)拿到新 key。
@@ -105,4 +133,71 @@ func TestContract_AgainstRealRC4(t *testing.T) {
 	if err := a.DeleteToken(ctx, cred, newID); err != nil {
 		t.Errorf("DeleteToken 失败: %v", err)
 	}
+}
+
+// autoSetupRC4 对全新 rc.4 实例完成初始化并取得管理员 access_token + user_id。
+// new-api 首次启动通常自动创建 root/123456;若需显式 setup 则补一次 POST /api/setup。
+// 返回的 token 用作 AdminAuth 的 Bearer,user_id 作 New-Api-User 头。
+func autoSetupRC4(base string) (string, int, error) {
+	jar, _ := cookiejar.New(nil)
+	hc := &http.Client{Timeout: 15 * time.Second, Jar: jar}
+
+	login := func(user, pass string) (int, bool) {
+		body, _ := json.Marshal(map[string]string{"username": user, "password": pass})
+		resp, err := hc.Post(base+"/api/user/login", "application/json", bytes.NewReader(body))
+		if err != nil {
+			return 0, false
+		}
+		defer resp.Body.Close()
+		var env struct {
+			Success bool `json:"success"`
+			Data    struct {
+				ID int `json:"id"`
+			} `json:"data"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&env)
+		return env.Data.ID, env.Success
+	}
+
+	// rc.4 实证契约:setup 字段 confirmPassword(驼峰),密码 >=8 字符。
+	const rootPass = "RootPass123"
+	uid, ok := login("root", rootPass)
+	if !ok {
+		body, _ := json.Marshal(map[string]string{"username": "root", "password": rootPass, "confirmPassword": rootPass})
+		resp, err := hc.Post(base+"/api/setup", "application/json", bytes.NewReader(body))
+		if err != nil {
+			return "", 0, fmt.Errorf("setup 请求失败: %w", err)
+		}
+		resp.Body.Close()
+		uid, ok = login("root", rootPass)
+		if !ok {
+			return "", 0, fmt.Errorf("setup 后仍无法以 root 登录(检查 rc.4 初始化契约)")
+		}
+	}
+	if uid == 0 {
+		uid = 1 // root 通常为 id=1
+	}
+
+	// 取管理员 access_token:cookie + New-Api-User 头(双头,rc.4 强制)。
+	req, _ := http.NewRequest("GET", base+"/api/user/token", nil)
+	req.Header.Set("New-Api-User", strconv.Itoa(uid))
+	resp, err := hc.Do(req)
+	if err != nil {
+		return "", 0, fmt.Errorf("取 access_token 失败: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	var env struct {
+		Success bool            `json:"success"`
+		Data    json.RawMessage `json:"data"`
+	}
+	_ = json.Unmarshal(raw, &env)
+	token := parseAccessToken(env.Data)
+	if token == "" {
+		return "", 0, fmt.Errorf("未取到管理员 access_token,原始返回: %s", string(raw))
+	}
+	if uid == 0 {
+		uid = 1 // root 通常为 id=1
+	}
+	return token, uid, nil
 }

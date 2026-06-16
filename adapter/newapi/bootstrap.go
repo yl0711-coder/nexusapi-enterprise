@@ -23,6 +23,14 @@ func (a *Adapter) BootstrapMember(ctx context.Context, in BootstrapInput) (Boots
 	if in.Username == "" || in.Password == "" {
 		return BootstrapResult{}, &UpstreamError{Step: stepCreateUser, PlatformCode: CodeInternal, Message: "缺少确定性 username/password", class: classNonRetryable}
 	}
+	// rc.4 校验约束(源码核实):username<=20、password 8-20 字符。提前挡掉,
+	// 避免拿到上游不可读的 50201,并提示 service 层修正确定性派生口径(§2.5)。
+	if len(in.Username) > 20 {
+		return BootstrapResult{}, &UpstreamError{Step: stepCreateUser, PlatformCode: CodeInternal, Message: "用户名超过 new-api 上限(<=20 字符)", class: classNonRetryable}
+	}
+	if len(in.Password) < 8 || len(in.Password) > 20 {
+		return BootstrapResult{}, &UpstreamError{Step: stepCreateUser, PlatformCode: CodeInternal, Message: "密码不满足 new-api 约束(8-20 字符)", class: classNonRetryable}
+	}
 
 	release, err := a.locker.Acquire(ctx, bootstrapLockKey(in.OrgID, in.MemberID))
 	if err != nil {
@@ -35,7 +43,7 @@ func (a *Adapter) BootstrapMember(ctx context.Context, in BootstrapInput) (Boots
 	_, cerr := a.c.do(ctx, stepCreateUser, "POST", "/api/user/", adminAuth(a.c.cfg), map[string]any{
 		"username":     in.Username,
 		"password":     in.Password,
-		"display_name": in.DisplayName,
+		"display_name": truncateRunes(in.DisplayName, 20), // rc.4 display_name max=20
 		"role":         roleValue(in.Role),
 	})
 	if cerr != nil {
@@ -125,8 +133,13 @@ func (a *Adapter) loginAndGetToken(ctx context.Context, username, password strin
 	if cookie == "" {
 		return "", &UpstreamError{Step: stepLogin, PlatformCode: CodeUpstreamAuth, Message: "登录未返回会话", class: classNonRetryable}
 	}
+	// 登录响应里带成员 user_id;GET token 需要它作 New-Api-User 头(双头,05 §1.2)。
+	loginUserID := parseLoginUserID(loginRes.data)
+	if loginUserID == 0 {
+		return "", &UpstreamError{Step: stepLogin, PlatformCode: CodeUpstreamAuth, Message: "登录未返回用户标识", class: classNonRetryable}
+	}
 
-	tokRes, err := a.c.do(ctx, stepGetToken, "GET", "/api/user/token", sessionAuth(cookie), nil)
+	tokRes, err := a.c.do(ctx, stepGetToken, "GET", "/api/user/token", sessionAuth(cookie, loginUserID), nil)
 	if err != nil {
 		return "", err
 	}
@@ -168,6 +181,15 @@ func deriveTokenName(memberID int64, rotation int) string {
 	return fmt.Sprintf("nexus_m%d_v%d", memberID, rotation)
 }
 
+// truncateRunes 按 rune 截断到 n(rc.4 校验按字符数,中文 display_name 安全)。
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
 func roleValue(role string) any {
 	// new-api role 为整型(普通用户=1);允许调用方传字符串语义,这里收敛为默认普通用户。
 	if role == "" {
@@ -176,7 +198,18 @@ func roleValue(role string) any {
 	return role
 }
 
-// parseAccessToken 解析 GET /api/user/token 返回:可能是裸字符串或 {access_token}/{key}。
+// parseLoginUserID 从 POST /api/user/login 的 data 中取 user id。
+func parseLoginUserID(data json.RawMessage) int {
+	var obj struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal(data, &obj); err == nil {
+		return obj.ID
+	}
+	return 0
+}
+
+// parseAccessToken 解析 GET /api/user/token 返回:rc.4 实证为裸字符串;兼容 {access_token}/{key}。
 func parseAccessToken(data json.RawMessage) string {
 	var s string
 	if err := json.Unmarshal(data, &s); err == nil && s != "" {

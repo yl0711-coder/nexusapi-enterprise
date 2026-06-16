@@ -105,10 +105,12 @@ func (a *Adapter) DeleteToken(ctx context.Context, cred MemberCred, tokenID int)
 
 // ManageUserQuota 调成员额度。override 写绝对值(到 0 即硬停),天然幂等。
 //
-// 线格式按 05 §1.1(rc.4 已验证):POST /api/user/manage {id, action:"add_quota", mode, quota}。
-// 【真机契约清单 #1】此 payload 与 add_quota/mode 语义须在真实 rc.4 上首验(见 contract_test.go)。
+// 线格式(rc.4 源码核实 + 真机验证 2026-06-16):POST /api/user/manage
+// {id, action:"add_quota", mode:"override"|"add"|"subtract", value:N}。
+// 关键:额度字段名是 **value**(不是 quota);override 写绝对值(到 0 即硬停)。
+// ManageRequest.Value 在 rc.4 是 Go int(64 位平台即 int64),大额度安全。
 func (a *Adapter) ManageUserQuota(ctx context.Context, userID int, mode QuotaMode, quota int64) error {
-	body := map[string]any{"id": userID, "action": "add_quota", "mode": string(mode), "quota": quota}
+	body := map[string]any{"id": userID, "action": "add_quota", "mode": string(mode), "value": quota}
 	// 注意:do 返回的是 *UpstreamError;直接 `return err` 会把 nil 指针装进非 nil 的
 	// error 接口(Go typed-nil 陷阱),故先做指针判空再返回。
 	if _, err := a.c.do(ctx, stepManageUser, "POST", "/api/user/manage", adminAuth(a.c.cfg), body); err != nil {

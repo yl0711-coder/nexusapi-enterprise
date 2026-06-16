@@ -47,6 +47,28 @@ func TestBootstrapMember_HappyPath(t *testing.T) {
 	}
 }
 
+// rc.4 约束:username<=20、password 8-20。超限应在打上游前就被挡(清晰错误,非 50201)。
+func TestBootstrapMember_RejectsInvalidCredLength(t *testing.T) {
+	f := newFakeNewapi()
+	defer f.close()
+	a := New(f.config(), nil)
+
+	long := testInput()
+	long.Username = "org1_member_with_way_too_long_name" // >20
+	if _, err := a.BootstrapMember(context.Background(), long); err == nil {
+		t.Errorf("over-long username should be rejected")
+	}
+	if f.callCount(stepCreateUser) != 0 {
+		t.Errorf("invalid creds must not hit upstream, got %d CreateUser calls", f.callCount(stepCreateUser))
+	}
+
+	shortPw := testInput()
+	shortPw.Password = "short" // <8
+	if _, err := a.BootstrapMember(context.Background(), shortPw); err == nil {
+		t.Errorf("too-short password should be rejected")
+	}
+}
+
 // §2.5:确定性 username 幂等 —— 重复开通同一成员,接管已存在用户/令牌,绝不重复建。
 func TestBootstrapMember_IdempotentAdopt(t *testing.T) {
 	f := newFakeNewapi()

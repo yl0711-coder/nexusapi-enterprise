@@ -177,6 +177,15 @@ func (f *fakeNewapi) handleUser(w http.ResponseWriter, r *http.Request) {
 		bizFail(w, "用户名不能为空")
 		return
 	}
+	// rc.4 校验约束:username<=20、password 8-20。
+	if len([]rune(body.Username)) > 20 {
+		bizFail(w, "input is invalid: username max=20")
+		return
+	}
+	if len(body.Password) < 8 || len(body.Password) > 20 {
+		bizFail(w, "input is invalid: password 8-20")
+		return
+	}
 	if _, exists := f.users[body.Username]; exists {
 		bizFail(w, "用户名已存在")
 		return
@@ -202,7 +211,8 @@ func (f *fakeNewapi) handleSearch(w http.ResponseWriter, r *http.Request) {
 			list = append(list, map[string]any{"id": u.id, "username": u.username})
 		}
 	}
-	ok(w, list)
+	// rc.4 用分页包装:data = {items, total, page, page_size}。
+	ok(w, map[string]any{"items": list, "total": len(list), "page": 1, "page_size": 10})
 }
 
 func (f *fakeNewapi) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -236,6 +246,11 @@ func (f *fakeNewapi) handleGetToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"success": false, "message": "bad gateway"})
 		return
 	}
+	// rc.4 即使带 cookie 也强制要 New-Api-User 头(05 §1.2)。缺则拒。
+	if r.Header.Get("New-Api-User") == "" {
+		bizFail(w, "Unauthorized, New-Api-User header not provided")
+		return
+	}
 	c, err := r.Cookie("session")
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "message": "no session"})
@@ -262,11 +277,12 @@ func (f *fakeNewapi) handleManage(w http.ResponseWriter, r *http.Request) {
 	if !f.requireAdmin(w, r) {
 		return
 	}
+	// rc.4 ManageRequest:额度字段是 value(不是 quota)。
 	var body struct {
 		ID     int    `json:"id"`
 		Action string `json:"action"`
 		Mode   string `json:"mode"`
-		Quota  int64  `json:"quota"`
+		Value  int64  `json:"value"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	u := f.byID[body.ID]
@@ -279,11 +295,11 @@ func (f *fakeNewapi) handleManage(w http.ResponseWriter, r *http.Request) {
 		f.bump(stepManageUser)
 		switch body.Mode {
 		case "override":
-			u.quota = body.Quota
+			u.quota = body.Value
 		case "add":
-			u.quota += body.Quota
+			u.quota += body.Value
 		case "subtract":
-			u.quota -= body.Quota
+			u.quota -= body.Value
 		default:
 			bizFail(w, "未知 mode")
 			return

@@ -1,0 +1,50 @@
+# 常驻本地联调栈(不是自动化测试用的一次性栈)。
+#
+#   - new-api(rc.4)+ MySQL,数据落命名卷,可 stop/start 不丢。
+#   - new-api 端口 13000(沿用习惯)、MySQL 端口 13306(供平台 server / 本机连)。
+#   - MySQL 同时建 newapi(new-api 自己的库)+ nexus(平台自有库)两个 database。
+#
+# 用法:
+#   docker compose -f dev/docker-compose.dev.yml up -d      # 首次起来(空库)
+#   bash dev/seed.sh                                        # 灌 mock 线上配置(走官方 API)
+#   bash dev/snapshot.sh                                    # 把当前 newapi 库快照成黄金基准 base.sql
+#   ... 联调 ...
+#   bash dev/reset.sh                                       # 污染后从 base.sql 一键还原(容器保留)
+#   docker compose -f dev/docker-compose.dev.yml stop       # 不用时停掉(数据还在)
+#   docker compose -f dev/docker-compose.dev.yml start      # 用时再起
+#
+# 注意:这是 MOCK 数据,渠道 key 全是占位假串,绝无任何真实密钥/客户数据。
+services:
+  mysql:
+    image: mysql:8.0
+    command: --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_ROOT_PASSWORD: devroot
+      MYSQL_DATABASE: newapi   # new-api 自己的库;平台库 nexus 在接入 server 时另建(见 dev/README.md)
+    volumes:
+      - nexus_dev_mysql:/var/lib/mysql
+    ports:
+      - "13306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pdevroot"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  newapi:
+    image: calciumion/new-api:v1.0.0-rc.4
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      SQL_DSN: "root:devroot@tcp(mysql:3306)/newapi"
+      TZ: "Asia/Shanghai"
+    volumes:
+      - nexus_dev_newapi_data:/data
+    ports:
+      - "13000:3000"
+    restart: unless-stopped
+
+volumes:
+  nexus_dev_mysql:
+  nexus_dev_newapi_data:

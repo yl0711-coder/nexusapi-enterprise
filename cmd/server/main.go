@@ -1,68 +1,149 @@
 // Command server 是企业管理平台后端入口。
 //
-// 里程碑 0 阶段:业务路由尚未接入(adapter/newapi 已完成,见仓库 README)。
-// 本进程当前只提供健康检查,用以打通"镜像构建 → 推 GHCR → 生产 pull + up"的
-// 部署管道(四条铁律 §3:绝不在生产机 build)。里程碑 1 起在此挂载 handler/service。
+// 里程碑 1:identity + org + RBAC + 开通成员(US-01)。在此接 MySQL + 代发 key adapter
+// + REST 路由。配置全经环境变量注入(主密钥/会话密钥/DSN/上游凭证绝不入镜像,10 §3.2)。
+//
+// 四条铁律:对 new-api 零数据侵入(只走官方 HTTP API,adapter 收口);平台不可用绝不拖垮
+// new-api(独立进程,出事 docker stop 即摘);绝不在生产机 build(镜像 pull+up);涉钱先讲风险。
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
+
+	"github.com/nexusapi-platform/enterprise/adapter/newapi"
+	"github.com/nexusapi-platform/enterprise/handler"
+	"github.com/nexusapi-platform/enterprise/pkg/crypto"
+	"github.com/nexusapi-platform/enterprise/pkg/session"
+	"github.com/nexusapi-platform/enterprise/repo"
+	"github.com/nexusapi-platform/enterprise/service"
 )
 
-// version 由构建时 -ldflags "-X main.version=..." 注入;默认标记里程碑 0。
-var version = "0.0.0-m0"
+// version 由构建时 -ldflags "-X main.version=..." 注入。
+var version = "1.0.0-m1"
 
 func main() {
-	addr := os.Getenv("LISTEN_ADDR")
-	if addr == "" {
-		addr = ":8080"
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	slog.SetDefault(log)
+
+	if err := run(log); err != nil {
+		log.Error("启动失败", "err", err)
+		os.Exit(1)
+	}
+}
+
+func run(log *slog.Logger) error {
+	addr := envOr("LISTEN_ADDR", ":8080")
+
+	// —— 必需配置(缺失即拒启动,绝不裸奔)——
+	dsn := os.Getenv("NEXUS_DB_DSN")
+	if dsn == "" {
+		return errors.New("缺少 NEXUS_DB_DSN(MySQL 连接串)")
+	}
+	masterKey := os.Getenv("NEXUS_MASTER_KEY")
+	if masterKey == "" {
+		return errors.New("缺少 NEXUS_MASTER_KEY(base64 的 32 字节主密钥,10 §3.2)")
+	}
+	sessionKey := os.Getenv("NEXUS_SESSION_KEY")
+	if len(sessionKey) < 16 {
+		return errors.New("缺少 NEXUS_SESSION_KEY(会话签名密钥,>=16 字节)")
 	}
 
-	mux := http.NewServeMux()
-	// 存活探针:进程在即 200。
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": version})
-	})
-	// 就绪探针:里程碑 0 无下游强依赖(平台不可用绝不拖垮 new-api,§铁律2),恒就绪。
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "milestone": "0-adapter-only"})
+	keyring, err := crypto.NewKeyringFromBase64(envOr("NEXUS_MASTER_KEY_ID", "v1"), masterKey)
+	if err != nil {
+		return err
+	}
+	ttl := time.Duration(atoiOr("NEXUS_SESSION_TTL_HOURS", 12)) * time.Hour
+	signer, err := session.NewSigner([]byte(sessionKey), ttl)
+	if err != nil {
+		return err
+	}
+
+	bootCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	store, err := repo.Open(bootCtx, dsn)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if err := store.Migrate(bootCtx); err != nil {
+		return err
+	}
+	log.Info("数据库已连接并完成迁移")
+
+	// 代发 key adapter:指向 new-api 官方管理 API(零数据侵入)。
+	upstream := newapi.New(newapi.Config{
+		BaseURL:     os.Getenv("NEWAPI_BASE_URL"),
+		AdminToken:  os.Getenv("NEWAPI_ADMIN_TOKEN"),
+		AdminUserID: atoiOr("NEWAPI_ADMIN_USER_ID", 1),
+		Logger: func(level, event string, kv map[string]any) {
+			log.Info("upstream", append([]any{"event", event, "level", level}, flatten(kv)...)...)
+		},
+	}, nil)
+
+	svc := service.New(service.Deps{
+		Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log,
 	})
 
+	// 运营方引导账号(首启种子,幂等)。
+	if email := os.Getenv("NEXUS_BOOTSTRAP_OPERATOR_EMAIL"); email != "" {
+		if err := svc.SeedOperator(bootCtx, email, os.Getenv("NEXUS_BOOTSTRAP_OPERATOR_PASSWORD")); err != nil {
+			return err
+		}
+	}
+
+	h := handler.New(svc, signer, log, version)
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           h.Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	go func() {
-		log.Printf("企业管理平台后端启动 version=%s addr=%s", version, addr)
+		log.Info("企业管理平台后端启动", "version", version, "addr", addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("服务异常退出: %v", err)
+			log.Error("服务异常退出", "err", err)
+			os.Exit(1)
 		}
 	}()
 
-	// 优雅退出:收到信号先停接新请求,给在途请求 10s 收尾。
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
-	log.Print("收到退出信号,优雅关闭中...")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("关闭超时: %v", err)
-	}
+	log.Info("收到退出信号,优雅关闭中...")
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutCancel()
+	return srv.Shutdown(shutCtx)
 }
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func atoiOr(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func flatten(kv map[string]any) []any {
+	out := make([]any, 0, len(kv)*2)
+	for k, v := range kv {
+		out = append(out, k, v)
+	}
+	return out
 }

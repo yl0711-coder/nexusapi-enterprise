@@ -37,7 +37,14 @@ pkg/       crypto / log / idemp / lock 等横切。
 
 ## 当前进度
 
-- **里程碑 0 · 打通代发 key adapter**(进行中):`adapter/newapi` 全链路 + 失败矩阵 + 补偿 + 并发互斥 + 自愈 + 契约测试。这是全项目最大不确定性,先消除。
+- **里程碑 0 · 打通代发 key adapter**(已完成):`adapter/newapi` 全链路 + 失败矩阵 + 补偿 + 并发互斥 + 自愈 + 契约测试。真机契约对真实 rc.4 跑通(本地 + CI),全项目最大不确定性已消除。
+- **里程碑 1 · 账号与组织**(已完成):identity + org + RBAC + 开通成员(US-01)+ 代发 key 展示。
+  - `pkg/crypto`(AES-256-GCM 密文 `v1:<key_id>:...`,10 §3)、`pkg/session`(HMAC 会话 token)、`pkg/apperr`(错误码体系 10 §4.1)。
+  - `migrations/`(09 的 organization/team/tier/member/audit_log + 平台 idempotency 表;建库即建,幂等)。
+  - `repo/`(MySQL,强制 org_id 谓词 + 乐观锁)、`service/`(RBAC + US-01 编排 + 加密落库)、`handler/`(统一信封 + 鉴权/RBAC 中间件 + `/api/v1` 端点)。
+  - e2e 集成测试对**真实 MySQL + 真实 rc.4** 跑通:登录 → 建组织/团队/层级 → 开通成员(真机代发 key)→ 列表脱敏 → 轮换 key → RBAC 越权(403/404/401)。
+
+> **对 09 的两处落地补充(待回填 09)**:① `member.platform_password_hash`(bcrypt)——09 未给平台账号登录密码列,而 MVP=平台自有账号登录(决策 §5);② `member.newapi_user_id` 放宽为 NULL——provisioning 中间态尚无 new-api 用户,唯一键允许多 NULL。两处均在迁移与代码注释中标注。
 
 ## 测试
 
@@ -54,4 +61,9 @@ NEWAPI_CONTRACT_ADMIN_TOKEN=<admin_access_token> \
 NEWAPI_CONTRACT_ADMIN_USER_ID=1 \
   go test ./adapter/newapi/ -run Contract -v
 # 未设环境变量时该用例自动 skip(无 Docker 也能全绿)。
+
+# 里程碑 1 e2e 集成测试(真实 MySQL + 真实 rc.4,全程容器内,不碰本机 Go):
+docker compose -f test/docker-compose.integration.yml up --build \
+    --abort-on-container-exit --exit-code-from tests
+# 未设 NEXUS_IT_DSN / NEXUS_IT_NEWAPI_URL 时该用例自动 skip。
 ```

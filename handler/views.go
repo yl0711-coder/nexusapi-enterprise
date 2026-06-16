@@ -1,0 +1,137 @@
+package handler
+
+import (
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/nexusapi-platform/enterprise/model"
+	"github.com/nexusapi-platform/enterprise/pkg/apperr"
+)
+
+// 视图层 DTO:只暴露可对外字段,绝不含密文凭证 / 哈希 / 明文 key(10 §3.4)。
+
+type orgView struct {
+	ID            int64  `json:"id"`
+	Name          string `json:"name"`
+	Slug          string `json:"slug"`
+	Status        string `json:"status"`
+	Timezone      string `json:"timezone"`
+	DefaultTierID *int64 `json:"default_tier_id"`
+	BillingMode   string `json:"billing_mode"`
+	CreatedAt     string `json:"created_at"`
+}
+
+func toOrgView(o *model.Organization) orgView {
+	return orgView{
+		ID: o.ID, Name: o.Name, Slug: o.Slug, Status: o.Status, Timezone: o.Timezone,
+		DefaultTierID: o.DefaultTierID, BillingMode: o.BillingMode, CreatedAt: o.CreatedAt.Format(time.RFC3339),
+	}
+}
+
+type teamView struct {
+	ID            int64  `json:"id"`
+	OrgID         int64  `json:"org_id"`
+	Name          string `json:"name"`
+	DefaultTierID *int64 `json:"default_tier_id"`
+	Status        string `json:"status"`
+}
+
+func toTeamView(t *model.Team) teamView {
+	return teamView{ID: t.ID, OrgID: t.OrgID, Name: t.Name, DefaultTierID: t.DefaultTierID, Status: t.Status}
+}
+
+type tierView struct {
+	ID         int64    `json:"id"`
+	OrgID      int64    `json:"org_id"`
+	Name       string   `json:"name"`
+	ModelSet   []string `json:"model_set"`
+	IsDefault  bool     `json:"is_default"`
+	Status     string   `json:"status"`
+}
+
+func toTierView(t *model.Tier) tierView {
+	return tierView{ID: t.ID, OrgID: t.OrgID, Name: t.Name, ModelSet: t.ModelSet, IsDefault: t.IsDefault, Status: t.Status}
+}
+
+// memberView 脱敏成员视图:key 只回显 key_masked,绝不含 access_token/password。
+type memberView struct {
+	ID             int64   `json:"id"`
+	OrgID          int64   `json:"org_id"`
+	TeamID         *int64  `json:"team_id"`
+	NewapiUserID   int64   `json:"newapi_user_id"`
+	LoginEmail     string  `json:"login_email"`
+	DisplayName    *string `json:"display_name"`
+	Role           string  `json:"role"`
+	TierID         *int64  `json:"tier_id"`
+	Status         string  `json:"status"`
+	KeyMasked      *string `json:"key_masked"`
+	BootstrapState string  `json:"bootstrap_state"`
+	CreatedAt      string  `json:"created_at"`
+}
+
+func toMemberView(m *model.Member) memberView {
+	return memberView{
+		ID: m.ID, OrgID: m.OrgID, TeamID: m.TeamID, NewapiUserID: m.NewapiUserID,
+		LoginEmail: m.LoginEmail, DisplayName: m.DisplayName, Role: m.Role, TierID: m.TierID,
+		Status: m.Status, KeyMasked: m.KeyMasked, BootstrapState: m.BootstrapState,
+		CreatedAt: m.CreatedAt.Format(time.RFC3339),
+	}
+}
+
+// pageMeta 是列表分页元信息(10 §1.5)。
+type pageMeta struct {
+	Page       int `json:"page"`
+	PageSize   int `json:"page_size"`
+	Total      int `json:"total"`
+	TotalPages int `json:"total_pages"`
+}
+
+type listResp struct {
+	List       any      `json:"list"`
+	Pagination pageMeta `json:"pagination"`
+}
+
+func makePageMeta(page, pageSize, total int) pageMeta {
+	tp := (total + pageSize - 1) / pageSize
+	if tp < 1 {
+		tp = 1
+	}
+	return pageMeta{Page: page, PageSize: pageSize, Total: total, TotalPages: tp}
+}
+
+// parsePaging 解析 page/page_size(10 §1.5:page 从 1 起,默认 size,上限 100)。
+func parsePaging(r *http.Request, defaultSize int) (page, size, offset int) {
+	page = atoiDefault(r.URL.Query().Get("page"), 1)
+	if page < 1 {
+		page = 1
+	}
+	size = atoiDefault(r.URL.Query().Get("page_size"), defaultSize)
+	if size < 1 {
+		size = defaultSize
+	}
+	if size > 100 {
+		size = 100
+	}
+	return page, size, (page - 1) * size
+}
+
+func atoiDefault(s string, def int) int {
+	if s == "" {
+		return def
+	}
+	if n, err := strconv.Atoi(s); err == nil {
+		return n
+	}
+	return def
+}
+
+// pathInt64 解析路径参数为 int64;非法 → 400。
+func pathInt64(r *http.Request, name string) (int64, error) {
+	v := r.PathValue(name)
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, apperr.InvalidParam("路径参数 " + name + " 非法")
+	}
+	return n, nil
+}

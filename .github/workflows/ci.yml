@@ -19,6 +19,16 @@ jobs:
         image: calciumion/new-api:v1.0.0-rc.4
         ports:
           - "3000:3000"
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: rootpw
+          MYSQL_DATABASE: nexus
+        ports:
+          - "3306:3306"
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -prootpw"
+          --health-interval=5s --health-timeout=5s --health-retries=20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -40,6 +50,11 @@ jobs:
           NEWAPI_CONTRACT_BASE_URL: http://localhost:3000
           NEWAPI_CONTRACT_AUTO_SETUP: "1"
         run: go test ./adapter/newapi/ -run Contract -v
+      - name: 集成测试 e2e(MySQL + rc.4,US-01 开通成员)
+        env:
+          NEXUS_IT_DSN: "root:rootpw@tcp(127.0.0.1:3306)/nexus?parseTime=true&loc=UTC&charset=utf8mb4"
+          NEXUS_IT_NEWAPI_URL: "http://localhost:3000"
+        run: go test ./test/integration/ -run Integration -v -count=1 -timeout 240s
 
   image:
     needs: test

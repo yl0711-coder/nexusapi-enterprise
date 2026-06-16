@@ -1,0 +1,9 @@
+# 开发辅助:在容器内 go mod tidy 生成/更新 go.sum,不碰本机 Go(铁律 §3)。
+# 用法:docker build -f Dockerfile.tidy -t nexus-tidy . && \
+#       cid=$(docker create nexus-tidy) && docker cp "$cid:/src/go.mod" ./ && \
+#       docker cp "$cid:/src/go.sum" ./ && docker rm "$cid"
+FROM golang:1.23-alpine
+RUN apk add --no-cache git
+WORKDIR /src
+COPY . .
+RUN go mod tidy

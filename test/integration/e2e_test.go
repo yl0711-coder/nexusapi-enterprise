@@ -1,0 +1,421 @@
+// Package integration 是里程碑 1 的端到端集成测试:对**真实 MySQL + 真实 rc.4**
+// in-process 接好 repo/adapter/service/handler,经平台 REST API 走通 US-01(开通成员代发 key)
+// 全链路 + RBAC 越权判定。未设环境变量时自动 skip(无 infra 也能 go test ./... 全绿)。
+//
+// 跑法见 test/docker-compose.integration.yml:
+//
+//	docker compose -f test/docker-compose.integration.yml up --build --abort-on-container-exit --exit-code-from tests
+package integration
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/cookiejar"
+	"net/http/httptest"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/nexusapi-platform/enterprise/adapter/newapi"
+	"github.com/nexusapi-platform/enterprise/handler"
+	"github.com/nexusapi-platform/enterprise/pkg/crypto"
+	"github.com/nexusapi-platform/enterprise/pkg/session"
+	"github.com/nexusapi-platform/enterprise/repo"
+	"github.com/nexusapi-platform/enterprise/service"
+)
+
+const (
+	opEmail    = "ops@nexus.local"
+	opPassword = "OpsPass123"
+)
+
+func TestIntegration_OpenMember_E2E(t *testing.T) {
+	dsn := os.Getenv("NEXUS_IT_DSN")
+	newapiURL := os.Getenv("NEXUS_IT_NEWAPI_URL")
+	if dsn == "" || newapiURL == "" {
+		t.Skip("跳过集成测试:未设 NEXUS_IT_DSN / NEXUS_IT_NEWAPI_URL(见 docker-compose.integration.yml)")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	// 1) 连 MySQL(带重试,等容器就绪)+ 迁移。
+	store := openWithRetry(t, ctx, dsn)
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("迁移失败: %v", err)
+	}
+
+	// 2) 初始化 rc.4,取管理员 access_token + uid。
+	adminToken, adminUID := setupRC4(t, newapiURL)
+
+	// 3) in-process 接好 adapter + service + handler。
+	keyring := mustKeyring(t)
+	signer, err := session.NewSigner([]byte("integration-test-session-key-32b!!"), time.Hour)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	upstream := newapi.New(newapi.Config{BaseURL: newapiURL, AdminToken: adminToken, AdminUserID: adminUID, Timeout: 15 * time.Second}, nil)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log})
+
+	if err := svc.SeedOperator(ctx, opEmail, opPassword); err != nil {
+		t.Fatalf("种子运营方失败: %v", err)
+	}
+
+	ts := httptest.NewServer(handler.New(svc, signer, log, "it").Routes())
+	defer ts.Close()
+	api := &apiClient{t: t, base: ts.URL}
+
+	// 4) 运营方登录。
+	opTok := login(api, opEmail, opPassword)
+
+	// 5) 运营方建客户组织(连带建组织管理员)。slug 唯一(带随机后缀防重跑撞)。
+	slug := "acme-" + randSuffix()
+	var orgResp struct {
+		Org                  struct{ ID int64 `json:"id"` } `json:"org"`
+		AdminEmail           string                         `json:"admin_email"`
+		AdminInitialPassword string                         `json:"admin_initial_password"`
+	}
+	st := api.do("POST", "/api/v1/organizations", opTok, map[string]any{
+		"name": "Acme 公司", "slug": slug, "admin_email": "admin@" + slug + ".com",
+	}, &orgResp)
+	if st != http.StatusCreated {
+		t.Fatalf("建组织 HTTP=%d", st)
+	}
+	orgID := orgResp.Org.ID
+	if orgID == 0 || orgResp.AdminInitialPassword == "" {
+		t.Fatalf("建组织返回异常: %+v", orgResp)
+	}
+	t.Logf("建组织 ok: org_id=%d admin=%s", orgID, orgResp.AdminEmail)
+
+	// 6) 组织管理员登录。
+	adminTok := login(api, orgResp.AdminEmail, orgResp.AdminInitialPassword)
+
+	// 7) 管理员建团队 + 层级,设默认层级。
+	var teamResp struct{ ID int64 `json:"id"` }
+	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/teams", orgID), adminTok,
+		map[string]any{"name": "研发一组"}, &teamResp); st != http.StatusCreated {
+		t.Fatalf("建团队 HTTP=%d", st)
+	}
+	var tierResp struct{ ID int64 `json:"id"` }
+	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/tiers", orgID), adminTok,
+		map[string]any{"name": "标准档", "model_set": []string{"gpt-5.4", "claude-sonnet-4-6"}}, &tierResp); st != http.StatusCreated {
+		t.Fatalf("建层级 HTTP=%d", st)
+	}
+	if st := api.do("POST", fmt.Sprintf("/api/v1/tiers/%d/default", tierResp.ID), adminTok, nil, nil); st != http.StatusOK {
+		t.Fatalf("设默认层级 HTTP=%d", st)
+	}
+
+	// 8) US-01:管理员开通成员(真机代发 key)。
+	var openResp struct {
+		MemberID     int64    `json:"member_id"`
+		NewapiUserID int64    `json:"newapi_user_id"`
+		APIKey       string   `json:"api_key"`
+		KeyMasked    string   `json:"key_masked"`
+		Models       []string `json:"models"`
+	}
+	st = api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/members", orgID), adminTok,
+		map[string]any{"name": "钱晨", "team_id": teamResp.ID, "tier_id": tierResp.ID}, &openResp)
+	if st != http.StatusCreated {
+		t.Fatalf("开通成员 HTTP=%d", st)
+	}
+	if openResp.APIKey == "" || openResp.NewapiUserID == 0 || openResp.MemberID == 0 {
+		t.Fatalf("开通成员返回缺字段: %+v", openResp)
+	}
+	if !strings.Contains(openResp.KeyMasked, "••••") {
+		t.Errorf("key_masked 应脱敏: %q", openResp.KeyMasked)
+	}
+	t.Logf("开通成员 ok: member_id=%d newapi_user_id=%d key=%s...", openResp.MemberID, openResp.NewapiUserID, openResp.APIKey[:min(10, len(openResp.APIKey))])
+	originalKey := openResp.APIKey
+
+	// 9) 列表脱敏:明文 key 绝不出现在列表里,只见 key_masked。
+	var listResp struct {
+		List []struct {
+			ID        int64  `json:"id"`
+			KeyMasked string `json:"key_masked"`
+			Status    string `json:"status"`
+		} `json:"list"`
+		Pagination struct{ Total int `json:"total"` } `json:"pagination"`
+	}
+	rawList := api.doRaw("GET", fmt.Sprintf("/api/v1/organizations/%d/members?page=1&page_size=20", orgID), adminTok, nil)
+	if strings.Contains(rawList, originalKey) {
+		t.Fatal("成员列表泄露了明文 key —— 违反红线(只能脱敏回显)")
+	}
+	_ = json.Unmarshal([]byte(extractData(t, rawList)), &listResp)
+	foundActive := false
+	for _, m := range listResp.List {
+		if m.ID == openResp.MemberID {
+			foundActive = m.Status == "active"
+			if !strings.Contains(m.KeyMasked, "••••") {
+				t.Errorf("列表 key 未脱敏: %q", m.KeyMasked)
+			}
+		}
+	}
+	if !foundActive {
+		t.Errorf("新成员未出现在列表或非 active")
+	}
+
+	// 10) 轮换 key(成员本人):签发成员会话,调 :rotate,得新 key,旧 key 应不同。
+	memberTok, _ := signer.Issue(session.Claims{MemberID: openResp.MemberID, OrgID: orgID, Role: session.RoleMember, TeamID: teamResp.ID})
+	var rotResp struct {
+		APIKey    string `json:"api_key"`
+		KeyMasked string `json:"key_masked"`
+	}
+	if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/key:rotate", openResp.MemberID), memberTok, nil, &rotResp); st != http.StatusOK {
+		t.Fatalf("轮换 key HTTP=%d", st)
+	}
+	if rotResp.APIKey == "" || rotResp.APIKey == originalKey {
+		t.Errorf("轮换应得不同的新 key:old=%s new=%s", mask(originalKey), mask(rotResp.APIKey))
+	}
+	t.Logf("轮换 key ok: 新 masked=%s", rotResp.KeyMasked)
+
+	// ===== RBAC 越权判定(08 §2)=====
+
+	// (a) 运营方直接开通成员 → 403(E05:运营方拒,需经支持会话)。
+	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/members", orgID), opTok,
+		map[string]any{"name": "x", "tier_id": tierResp.ID}, nil); st != http.StatusForbidden {
+		t.Errorf("运营方开通成员应 403,得 %d", st)
+	}
+
+	// (b) 成员开通成员 → 403。
+	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/members", orgID), memberTok,
+		map[string]any{"name": "x", "tier_id": tierResp.ID}, nil); st != http.StatusForbidden {
+		t.Errorf("成员开通成员应 403,得 %d", st)
+	}
+
+	// (c) 跨 org:另建一个组织,用其管理员访问本 org 成员列表 → 404(不暴露存在性)。
+	slug2 := "beta-" + randSuffix()
+	var org2 struct {
+		Org                  struct{ ID int64 `json:"id"` } `json:"org"`
+		AdminEmail           string                         `json:"admin_email"`
+		AdminInitialPassword string                         `json:"admin_initial_password"`
+	}
+	api.do("POST", "/api/v1/organizations", opTok, map[string]any{
+		"name": "Beta 公司", "slug": slug2, "admin_email": "admin@" + slug2 + ".com",
+	}, &org2)
+	admin2Tok := login(api, org2.AdminEmail, org2.AdminInitialPassword)
+	if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/members", orgID), admin2Tok, nil, nil); st != http.StatusNotFound {
+		t.Errorf("跨 org 访问应 404,得 %d", st)
+	}
+
+	// (d) 跨 team:团队负责人(T1)开通到别的团队 → 403。
+	tlTok, _ := signer.Issue(session.Claims{MemberID: openResp.MemberID, OrgID: orgID, Role: session.RoleTeamLeader, TeamID: teamResp.ID})
+	otherTeam := teamResp.ID + 999
+	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/members", orgID), tlTok,
+		map[string]any{"name": "x", "team_id": otherTeam, "tier_id": tierResp.ID}, nil); st != http.StatusForbidden {
+		t.Errorf("团队负责人跨团队开通应 403,得 %d", st)
+	}
+
+	// (e) 未带 token → 401。
+	if st := api.do("GET", "/api/v1/me", "", nil, nil); st != http.StatusUnauthorized {
+		t.Errorf("无 token 应 401,得 %d", st)
+	}
+
+	t.Log("里程碑 1 e2e 全通过:US-01 开通成员(真机代发 key)+ 列表脱敏 + 轮换 + RBAC(403/404/401)")
+}
+
+// ---- helpers ----
+
+type apiClient struct {
+	t    *testing.T
+	base string
+}
+
+// do 发请求并(可选)反序列化 data 字段,返回 HTTP 状态码。
+func (a *apiClient) do(method, path, token string, body any, out any) int {
+	raw, status := a.doStatus(method, path, token, body)
+	if out != nil && status >= 200 && status < 300 {
+		if err := json.Unmarshal([]byte(extractData(a.t, raw)), out); err != nil {
+			a.t.Fatalf("%s %s 解析 data 失败: %v\n原始: %s", method, path, err, raw)
+		}
+	}
+	return status
+}
+
+func (a *apiClient) doRaw(method, path, token string, body any) string {
+	raw, _ := a.doStatus(method, path, token, body)
+	return raw
+}
+
+func (a *apiClient) doStatus(method, path, token string, body any) (string, int) {
+	var rdr io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		rdr = bytes.NewReader(b)
+	}
+	req, err := http.NewRequest(method, a.base+path, rdr)
+	if err != nil {
+		a.t.Fatalf("构造请求失败: %v", err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		a.t.Fatalf("%s %s 请求失败: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	return string(raw), resp.StatusCode
+}
+
+func login(api *apiClient, email, password string) string {
+	var resp struct {
+		Token string `json:"token"`
+	}
+	st := api.do("POST", "/api/v1/auth/login", "", map[string]any{"email": email, "password": password}, &resp)
+	if st != http.StatusOK || resp.Token == "" {
+		api.t.Fatalf("登录失败 email=%s HTTP=%d", email, st)
+	}
+	return resp.Token
+}
+
+// extractData 从信封里取出 data 字段的原始 JSON。
+func extractData(t *testing.T, raw string) string {
+	var env struct {
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(raw), &env); err != nil {
+		t.Fatalf("信封解析失败: %v\n原始: %s", err, raw)
+	}
+	return string(env.Data)
+}
+
+func openWithRetry(t *testing.T, ctx context.Context, dsn string) *repo.Store {
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		store, err := repo.Open(ctx, dsn)
+		if err == nil {
+			return store
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("连 MySQL 超时: %v", err)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func mustKeyring(t *testing.T) *crypto.Keyring {
+	key := make([]byte, crypto.KeySize)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatal(err)
+	}
+	kr, err := crypto.NewKeyring("v1", map[string][]byte{"v1": key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return kr
+}
+
+// setupRC4 初始化全新 rc.4,返回管理员 access_token + uid(双头鉴权,里程碑 0 实证契约)。
+func setupRC4(t *testing.T, base string) (string, int) {
+	jar, _ := cookiejar.New(nil)
+	hc := &http.Client{Timeout: 15 * time.Second, Jar: jar}
+	const rootPass = "RootPass123"
+
+	loginRoot := func() (int, bool) {
+		body, _ := json.Marshal(map[string]string{"username": "root", "password": rootPass})
+		resp, err := hc.Post(base+"/api/user/login", "application/json", bytes.NewReader(body))
+		if err != nil {
+			return 0, false
+		}
+		defer resp.Body.Close()
+		var env struct {
+			Success bool `json:"success"`
+			Data    struct{ ID int `json:"id"` } `json:"data"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&env)
+		return env.Data.ID, env.Success
+	}
+
+	// 等 rc.4 起来 + setup(带重试)。
+	deadline := time.Now().Add(90 * time.Second)
+	var uid int
+	for {
+		id, ok := loginRoot()
+		if ok {
+			uid = id
+			break
+		}
+		body, _ := json.Marshal(map[string]string{"username": "root", "password": rootPass, "confirmPassword": rootPass})
+		resp, err := hc.Post(base+"/api/setup", "application/json", bytes.NewReader(body))
+		if err == nil {
+			resp.Body.Close()
+		}
+		if id, ok := loginRoot(); ok {
+			uid = id
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("rc.4 setup/login 超时")
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if uid == 0 {
+		uid = 1
+	}
+
+	req, _ := http.NewRequest("GET", base+"/api/user/token", nil)
+	req.Header.Set("New-Api-User", strconv.Itoa(uid))
+	resp, err := hc.Do(req)
+	if err != nil {
+		t.Fatalf("取管理员 access_token 失败: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	var env struct {
+		Data json.RawMessage `json:"data"`
+	}
+	_ = json.Unmarshal(raw, &env)
+	var token string
+	if err := json.Unmarshal(env.Data, &token); err != nil || token == "" {
+		var obj struct {
+			AccessToken string `json:"access_token"`
+			Key         string `json:"key"`
+		}
+		_ = json.Unmarshal(env.Data, &obj)
+		token = obj.AccessToken
+		if token == "" {
+			token = obj.Key
+		}
+	}
+	if token == "" {
+		t.Fatalf("未取到管理员 access_token,原始: %s", raw)
+	}
+	return token, uid
+}
+
+func randSuffix() string {
+	b := make([]byte, 5)
+	_, _ = rand.Read(b)
+	return strings.ToLower(base64.RawURLEncoding.EncodeToString(b))
+}
+
+func mask(s string) string {
+	if len(s) <= 6 {
+		return "***"
+	}
+	return s[:6] + "..."
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

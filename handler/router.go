@@ -64,6 +64,13 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/grants/{id}", h.requireAuth(h.handleRevokeGrant))
 	mux.HandleFunc("POST /api/v1/members/{id}/status", h.requireAuth(h.handleSetMemberStatus))
 
+	// 计费(里程碑3a):余额 / 入账 / 申请充值(钱进 + 只读 + 告警;扣费 3b 下一轮)。
+	mux.HandleFunc("GET /api/v1/organizations/{id}/balance", h.requireAuth(h.handleGetBalance))
+	mux.HandleFunc("GET /api/v1/organizations/{id}/recharges", h.requireAuth(h.handleListRecharges))
+	mux.HandleFunc("POST /api/v1/organizations/{id}/recharges", h.requireAuth(h.handleRecharge))
+	mux.HandleFunc("GET /api/v1/organizations/{id}/recharge-requests", h.requireAuth(h.handleListRechargeRequests))
+	mux.HandleFunc("POST /api/v1/organizations/{id}/recharge-requests", h.requireAuth(h.handleRequestRecharge))
+
 	// 中间件链:request_id → recover → mux。
 	return withRequestID(h.recoverPanic(mux))
 }
@@ -73,7 +80,7 @@ func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
-	writeRaw(w, http.StatusOK, map[string]string{"status": "ready", "milestone": "2-quota-execution"})
+	writeRaw(w, http.StatusOK, map[string]string{"status": "ready", "milestone": "3a-billing-recharge"})
 }
 
 // writeRaw 写裸 JSON(健康检查不用业务信封,沿用里程碑 0 探针格式)。

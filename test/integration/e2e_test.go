@@ -290,6 +290,91 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	}
 
 	t.Log("里程碑 2 e2e 全通过:调额(new-api quota 实变)+ 撤销回退 + account_ttl 到期 worker 反向 + 停用/恢复")
+
+	// ===== 里程碑 3a:充值入账 / 余额 / 申请 / 低位告警(钱进 + 只读 + 告警,不动客户服务)=====
+	// US-08 运营方入账。
+	var rc struct {
+		BalanceAfter int64 `json:"balance_quota_after"`
+	}
+	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/recharges", orgID), opTok,
+		map[string]any{"amount_quota": 10000000, "transfer_no": "TR-" + randSuffix(), "note": "Q2 预付"}, &rc); st != http.StatusCreated {
+		t.Fatalf("入账 HTTP=%d", st)
+	}
+	if rc.BalanceAfter != 10000000 {
+		t.Errorf("入账后余额应=1e7, 得 %d", rc.BalanceAfter)
+	} else {
+		t.Logf("US-08 入账 ok: balance_after=%d", rc.BalanceAfter)
+	}
+
+	// 余额查询。
+	var bal struct {
+		Balance int64 `json:"balance_quota"`
+	}
+	api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/balance", orgID), adminTok, nil, &bal)
+	if bal.Balance != 10000000 {
+		t.Errorf("余额查询应=1e7, 得 %d", bal.Balance)
+	}
+
+	// 入账幂等:同 transfer_no 不重复加。
+	fixedTR := "TR-FIX-" + randSuffix()
+	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/recharges", orgID), opTok,
+		map[string]any{"amount_quota": 3000000, "transfer_no": fixedTR}, nil); st != http.StatusCreated {
+		t.Fatalf("首次入账 HTTP=%d", st)
+	}
+	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/recharges", orgID), opTok,
+		map[string]any{"amount_quota": 3000000, "transfer_no": fixedTR}, nil); st != http.StatusConflict {
+		t.Errorf("重复 transfer_no 应 409(幂等),得 %d", st)
+	} else {
+		t.Log("入账幂等 ok: 重复 transfer_no → 409")
+	}
+
+	// 动钱红线:组织管理员入账 → 403。
+	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/recharges", orgID), adminTok,
+		map[string]any{"amount_quota": 1, "transfer_no": "X"}, nil); st != http.StatusForbidden {
+		t.Errorf("组织管理员入账应 403(动钱红线),得 %d", st)
+	} else {
+		t.Log("动钱红线 ok: 组织管理员入账 → 403")
+	}
+
+	// US-09 组织管理员申请充值(不改余额)。
+	balBefore := bal.Balance + 3000000 // 上面又入账了 3e6
+	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/recharge-requests", orgID), adminTok,
+		map[string]any{"type": "topup", "amount_quota": 5000000, "note": "需补预付"}, nil); st != http.StatusCreated {
+		t.Fatalf("申请充值 HTTP=%d", st)
+	}
+	var bal2 struct {
+		Balance int64 `json:"balance_quota"`
+	}
+	api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/balance", orgID), adminTok, nil, &bal2)
+	if bal2.Balance != balBefore {
+		t.Errorf("申请充值不应改余额: before=%d after=%d", balBefore, bal2.Balance)
+	} else {
+		t.Logf("US-09 申请充值 ok: 余额未变=%d", bal2.Balance)
+	}
+
+	// 成员申请充值 → 403(计费子集仅组织管理员)。
+	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/recharge-requests", orgID), memberTok,
+		map[string]any{"type": "topup", "amount_quota": 1}, nil); st != http.StatusForbidden {
+		t.Errorf("成员申请充值应 403,得 %d", st)
+	}
+
+	// 低位告警:把阈值设到当前余额之上,再入账触发 recompute → 组织状态 low。
+	if err := store.SetLowWatermark(ctx, orgID, bal2.Balance+50000000); err != nil {
+		t.Fatalf("设低位阈值: %v", err)
+	}
+	api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/recharges", orgID), opTok,
+		map[string]any{"amount_quota": 1000000, "transfer_no": "TR-LOW-" + randSuffix()}, nil)
+	var orgv struct {
+		Status string `json:"status"`
+	}
+	api.do("GET", fmt.Sprintf("/api/v1/organizations/%d", orgID), opTok, nil, &orgv)
+	if orgv.Status != "low" {
+		t.Errorf("余额低于阈值后组织状态应 low,得 %q", orgv.Status)
+	} else {
+		t.Log("US-11 低位告警 ok: 组织状态翻 low(硬停默认关,未切断服务)")
+	}
+
+	t.Log("里程碑 3a e2e 全通过:入账(余额增/幂等)+ 查询 + 申请充值(不改余额)+ 动钱红线 403 + 低位告警状态翻转")
 }
 
 // ---- helpers ----

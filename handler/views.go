@@ -105,6 +105,56 @@ func toGrantView(g *model.Grant) grantView {
 	return v
 }
 
+type balanceView struct {
+	OrgID          int64 `json:"org_id"`
+	TotalRecharged int64 `json:"total_recharged_quota"`
+	TotalConsumed  int64 `json:"total_consumed_quota"`
+	Balance        int64 `json:"balance_quota"`
+	LowWatermark   int64 `json:"low_watermark_quota"`
+}
+
+func toBalanceView(b *model.Balance) balanceView {
+	return balanceView{
+		OrgID: b.OrgID, TotalRecharged: b.TotalRecharged, TotalConsumed: b.TotalConsumed,
+		Balance: b.Balance, LowWatermark: b.LowWatermark,
+	}
+}
+
+type rechargeView struct {
+	ID          int64  `json:"id"`
+	AmountQuota int64  `json:"amount_quota"`
+	TransferNo  string `json:"transfer_no"`
+	Operator    string `json:"operator"`
+	Note        string `json:"note,omitempty"`
+	RechargedAt string `json:"recharged_at"`
+}
+
+func toRechargeView(r *model.Recharge) rechargeView {
+	v := rechargeView{ID: r.ID, AmountQuota: r.Amount, TransferNo: r.TransferNo, Operator: r.Operator, RechargedAt: r.RechargedAt.Format(time.RFC3339)}
+	if r.Note != nil {
+		v.Note = *r.Note
+	}
+	return v
+}
+
+type rechargeReqView struct {
+	ID          int64  `json:"id"`
+	RequestType string `json:"request_type"`
+	AmountQuota int64  `json:"amount_quota"`
+	Applicant   string `json:"applicant"`
+	Status      string `json:"status"`
+	Note        string `json:"note,omitempty"`
+	CreatedAt   string `json:"created_at"`
+}
+
+func toRechargeReqView(rq *model.RechargeRequest) rechargeReqView {
+	v := rechargeReqView{ID: rq.ID, RequestType: rq.RequestType, AmountQuota: rq.Amount, Applicant: rq.Applicant, Status: rq.Status, CreatedAt: rq.CreatedAt.Format(time.RFC3339)}
+	if rq.Note != nil {
+		v.Note = *rq.Note
+	}
+	return v
+}
+
 // pageMeta 是列表分页元信息(10 §1.5)。
 type pageMeta struct {
 	Page       int `json:"page"`

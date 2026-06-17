@@ -73,6 +73,13 @@ func (s *Store) ListOrganizations(ctx context.Context, limit, offset int) ([]*mo
 	return out, total, rows.Err()
 }
 
+// UpdateOrgStatus 改组织服务状态(active/low/stopped,余额水位驱动,09 §14)。
+func (s *Store) UpdateOrgStatus(ctx context.Context, orgID int64, status string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE organization SET status = ? WHERE id = ? AND deleted_at IS NULL`, status, orgID)
+	return err
+}
+
 // SetOrgDefaultTier 设组织默认层级(US-01 套默认层级用)。
 func (s *Store) SetOrgDefaultTier(ctx context.Context, orgID, tierID int64) error {
 	_, err := s.db.ExecContext(ctx,

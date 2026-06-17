@@ -116,8 +116,26 @@ hdr "14) RBAC:成员自己调额 → 403(只有管理员/团队负责人可调)"
 req POST "/api/v1/members/$MEMBER_ID/quota:adjust" "$M_TOK" "{\"delta_quota\":1,\"duration\":\"today\"}"
 [ "$CODE" = 403 ] && ok "成员调额 → 403" || bad "应 403 得 $CODE"
 
+hdr "15) 里程碑3a 计费:充值入账(US-08,运营方)"
+TR="TR-$(date +%s)-$RANDOM"
+req POST "/api/v1/organizations/$ORG_ID/recharges" "$OP_TOK" "{\"amount_quota\":10000000,\"transfer_no\":\"$TR\",\"note\":\"Q2预付\"}"
+BAL_AFTER="$(field balance_quota_after)"
+[ "$CODE" = 201 ] && [ "$BAL_AFTER" = 10000000 ] && ok "入账 201,balance_after=$BAL_AFTER" || bad "入账 CODE=$CODE BODY=$BODY"
+req GET "/api/v1/organizations/$ORG_ID/balance" "$AD_TOK" ""
+[ "$CODE" = 200 ] && ok "余额查询 200 balance_quota=$(field balance_quota)" || bad "余额查询 CODE=$CODE"
+req POST "/api/v1/organizations/$ORG_ID/recharges" "$OP_TOK" "{\"amount_quota\":10000000,\"transfer_no\":\"$TR\"}"
+[ "$CODE" = 409 ] && ok "入账幂等:重复 transfer_no → 409" || bad "应 409 得 $CODE"
+req POST "/api/v1/organizations/$ORG_ID/recharges" "$AD_TOK" "{\"amount_quota\":1,\"transfer_no\":\"X\"}"
+[ "$CODE" = 403 ] && ok "动钱红线:组织管理员入账 → 403" || bad "应 403 得 $CODE"
+
+hdr "16) 申请充值(US-09,组织管理员,不改余额)"
+req POST "/api/v1/organizations/$ORG_ID/recharge-requests" "$AD_TOK" "{\"type\":\"topup\",\"amount_quota\":5000000,\"note\":\"补预付\"}"
+[ "$CODE" = 201 ] && ok "申请充值 201 status=$(field status)" || bad "申请充值 CODE=$CODE BODY=$BODY"
+req POST "/api/v1/organizations/$ORG_ID/recharge-requests" "$M_TOK" "{\"type\":\"topup\",\"amount_quota\":1}"
+[ "$CODE" = 403 ] && ok "成员申请充值 → 403(计费子集仅组织管理员)" || bad "应 403 得 $CODE"
+
 # 放最后:此步会调 GET /api/user/token 旋转 root token,放末尾避免作废 server 持有的管理员 token。
-hdr "15) 零侵入核对:new-api 侧真建了该用户"
+hdr "17) 零侵入核对:new-api 侧真建了该用户"
 NU="$(curl -s "http://localhost:13000/api/user/search?keyword=o${ORG_ID}m${MEMBER_ID}" \
   -H "Authorization: Bearer $(curl -s -c /tmp/j -X POST http://localhost:13000/api/user/login -H 'Content-Type: application/json' -d '{"username":"root","password":"RootPass123"}' >/dev/null; curl -s -b /tmp/j -H 'New-Api-User: 1' http://localhost:13000/api/user/token | grep -oE '"data":"[^"]+"' | sed -E 's/.*:"([^"]+)"/\1/')" \
   -H 'New-Api-User: 1' 2>/dev/null | grep -oE "\"username\":\"o${ORG_ID}m${MEMBER_ID}\"" | head -1)"

@@ -28,7 +28,7 @@ import (
 )
 
 // version 由构建时 -ldflags "-X main.version=..." 注入。
-var version = "2.0.0-m2"
+var version = "3.0.0-m3a"
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))

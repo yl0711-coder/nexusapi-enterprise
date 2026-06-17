@@ -138,6 +138,51 @@ type GrantPayload struct {
 	Model    string `json:"model,omitempty"`    // model_add:放开的模型名
 }
 
+// Balance 对应 company_balance 表(09 §7)。balance = total_recharged - total_consumed。
+type Balance struct {
+	OrgID          int64
+	TotalRecharged int64
+	TotalConsumed  int64
+	Balance        int64
+	LowWatermark   int64
+	Version        int64
+}
+
+// Recharge 对应 recharge 表(09 §8)。transfer_no 唯一 = 入账幂等。
+type Recharge struct {
+	ID          int64
+	OrgID       int64
+	Amount      int64
+	AmountCNY   *int64
+	TransferNo  string
+	Operator    string
+	Note        *string
+	RechargedAt time.Time
+}
+
+// 申请类型 / 状态。
+const (
+	RechargeReqTopup     = "topup"
+	RechargeReqRefund    = "refund"
+	RechargeReqPending   = "pending"
+	RechargeReqProcessed = "processed"
+	RechargeReqRejected  = "rejected"
+)
+
+// RechargeRequest 对应 recharge_request 表(补 09)。只发起申请、不改余额。
+type RechargeRequest struct {
+	ID          int64
+	OrgID       int64
+	RequestType string
+	Amount      int64
+	Note        *string
+	Applicant   string
+	Status      string
+	ProcessedBy *string
+	ProcessedAt *time.Time
+	CreatedAt   time.Time
+}
+
 // AuditEntry 对应 audit_log 表(09 §13)。Detail 为已脱敏 JSON(绝不含明文 key/密文)。
 type AuditEntry struct {
 	OrgID            int64

@@ -94,6 +94,11 @@ type NewapiAdapter interface {
 	ReadConsumptionLogs(ctx context.Context, sinceUnix, untilUnix int64, page, pageSize int) ([]LogEntry, int, error)
 
 	// 计价/折扣联动(03 §3.5.1,单向写入 new-api、只读回显):
+	// 平台只写 GroupGroupRatio(分组特殊倍率,覆盖式);GroupRatio 只读(取基础倍率快照)。
 	GetGroupRatio(ctx context.Context, group string) (ratio float64, configured bool, err error)
-	SetGroupRatio(ctx context.Context, group string, ratio float64) error
+	GetGroupGroupRatio(ctx context.Context, userGroup, tokenGroup string) (ratio float64, configured bool, err error)
+	SetGroupGroupRatio(ctx context.Context, userGroup, tokenGroup string, ratio float64) error
+
+	// SetUserGroup 设 new-api 用户分组(读-改-写,quota 不丢);折扣按用户分组归属(A2)。
+	SetUserGroup(ctx context.Context, userID int, group string) error
 }

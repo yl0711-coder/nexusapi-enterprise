@@ -168,6 +168,11 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 		return nil, apperr.Internal("").WithCause(err)
 	}
 
+	// 设 new-api 用户分组 = org_{id}(A2:折扣按用户分组归属,GroupGroupRatio 按此查)。best-effort。
+	if err := s.upstream.SetUserGroup(ctx, res.NewapiUserID, orgUserGroup(orgID)); err != nil {
+		s.log.Warn("设成员 new-api 用户分组失败(可后续补)", "member_id", memberID, "err", err)
+	}
+
 	// 下发初始 quota = 解析基线(tier 链 + 显式覆盖,B1)。失败不回滚开通(key 是主交付物),仅告警。
 	final.TierID = prov.TierID
 	final.TeamID = in.TeamID

@@ -145,11 +145,11 @@ req PATCH "/api/v1/organizations/$ORG_ID/billing-settings" "$AD_TOK" "{\"billing
 req PATCH "/api/v1/organizations/$ORG_ID/billing-settings" "$OP_TOK" "{\"billing_enabled\":false}" >/dev/null
 
 hdr "18) 里程碑3c 计价/折扣联动(总折扣,仅运营方)"
-req PUT "/api/v1/organizations/$ORG_ID/pricing" "$OP_TOK" "{\"mode\":\"total\",\"newapi_group\":\"org$ORG_ID\",\"group_ratio\":0.8}"
-[ "$CODE" = 200 ] && ok "配总折扣 200 回显 upstream=$(field group_ratio_upstream)" || bad "配折扣 CODE=$CODE BODY=$BODY"
+req PUT "/api/v1/organizations/$ORG_ID/pricing" "$OP_TOK" "{\"mode\":\"total\",\"discount_pct\":0.8}"
+[ "$CODE" = 200 ] && ok "配总折扣 200(写 new-api 分组特殊倍率 GroupGroupRatio)" || bad "配折扣 CODE=$CODE BODY=$BODY"
 req GET "/api/v1/organizations/$ORG_ID/pricing" "$AD_TOK" ""
 [ "$CODE" = 200 ] && ok "组织管理员只读折扣 200" || bad "读折扣 CODE=$CODE"
-req PUT "/api/v1/organizations/$ORG_ID/pricing" "$AD_TOK" "{\"mode\":\"total\",\"group_ratio\":0.5}"
+req PUT "/api/v1/organizations/$ORG_ID/pricing" "$AD_TOK" "{\"mode\":\"total\",\"discount_pct\":0.5}"
 [ "$CODE" = 403 ] && ok "组织管理员配折扣 → 403(客户只读,仅运营方可配)" || bad "应 403 得 $CODE"
 
 hdr "19) 里程碑4 申请-审批 + 通知(成员自助)"

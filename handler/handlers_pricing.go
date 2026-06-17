@@ -8,11 +8,10 @@ import (
 
 func pricingView(v *service.PricingView) map[string]any {
 	return map[string]any{
-		"mode":                 v.Mode,
-		"newapi_group":         v.NewapiGroup,
-		"group_ratio_config":   v.GroupRatioConfig,
-		"group_ratio_upstream": v.GroupRatioUpstream, // new-api 当前实际值(只读回显)
-		"special_ratios":       v.SpecialRatios,
+		"mode":                  v.Mode,
+		"user_group":            v.UserGroup,
+		"entries":               v.Entries,   // 平台镜像:每令牌分组 {pct, base, abs}
+		"upstream_special_ratio": v.Upstream, // new-api 当前实际特殊倍率(只读回显)
 	}
 }
 
@@ -32,12 +31,11 @@ func (h *Handler) handleGetPricing(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, r, http.StatusOK, pricingView(v))
 }
 
-// PUT /organizations/{id}/pricing — 配置折扣(仅运营方,单向写入 new-api)。
+// PUT /organizations/{id}/pricing — 配置折扣(仅运营方,写 new-api 分组特殊倍率)。
 type pricingReq struct {
-	Mode          string             `json:"mode"`
-	NewapiGroup   string             `json:"newapi_group"`
-	GroupRatio    *float64           `json:"group_ratio"`
-	SpecialRatios map[string]float64 `json:"special_ratios"`
+	Mode        string   `json:"mode"`         // none/total/per_group
+	DiscountPct float64  `json:"discount_pct"` // 0.9 = 9 折
+	TokenGroups []string `json:"token_groups"` // total 留空默认 default;per_group 指定
 }
 
 func (h *Handler) handleConfigureDiscount(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +51,7 @@ func (h *Handler) handleConfigureDiscount(w http.ResponseWriter, r *http.Request
 		return
 	}
 	v, err := h.svc.ConfigureDiscount(r.Context(), c, orgID, service.ConfigureDiscountInput{
-		Mode: in.Mode, NewapiGroup: in.NewapiGroup, GroupRatio: in.GroupRatio, SpecialRatios: in.SpecialRatios,
+		Mode: in.Mode, DiscountPct: in.DiscountPct, TokenGroups: in.TokenGroups,
 	})
 	if err != nil {
 		writeErr(w, r, err)

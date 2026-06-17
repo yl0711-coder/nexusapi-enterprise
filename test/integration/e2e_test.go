@@ -392,24 +392,24 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		t.Log("计费开关 RBAC ok: 组织管理员改 → 403")
 	}
 
-	// ===== 里程碑 3c:计价/折扣联动(总折扣单向写入 new-api GroupRatio + 只读回显)=====
-	discGroup := "org" + strconv.FormatInt(orgID, 10)
+	// ===== 里程碑 3c:计价/折扣联动(写 new-api 分组特殊倍率 GroupGroupRatio + 只读回显)=====
+	// 整体 8 折:base(default,未配=1)× 0.8 = 0.8,写 GroupGroupRatio[org_{id}][default]。
 	if st := api.do("PUT", fmt.Sprintf("/api/v1/organizations/%d/pricing", orgID), opTok,
-		map[string]any{"mode": "total", "newapi_group": discGroup, "group_ratio": 0.8}, nil); st != http.StatusOK {
+		map[string]any{"mode": "total", "discount_pct": 0.8}, nil); st != http.StatusOK {
 		t.Fatalf("配置折扣 HTTP=%d", st)
 	}
 	var pv struct {
-		Mode               string   `json:"mode"`
-		GroupRatioUpstream *float64 `json:"group_ratio_upstream"`
+		Mode     string             `json:"mode"`
+		Upstream map[string]float64 `json:"upstream_special_ratio"`
 	}
 	api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/pricing", orgID), adminTok, nil, &pv)
-	if pv.Mode != "total" || pv.GroupRatioUpstream == nil || *pv.GroupRatioUpstream != 0.8 {
-		t.Errorf("折扣回显应为 total + new-api 分组倍率 0.8: %+v", pv)
+	if pv.Mode != "total" || pv.Upstream["default"] != 0.8 {
+		t.Errorf("折扣回显应 total + GroupGroupRatio[org][default]=0.8: %+v", pv)
 	} else {
-		t.Log("3c 折扣联动 ok: 总折扣单向写入 new-api GroupRatio=0.8 且只读回显一致")
+		t.Log("3c 折扣联动 ok: 写 new-api 分组特殊倍率 GroupGroupRatio=0.8(base 1×0.8)且只读回显一致")
 	}
 	if st := api.do("PUT", fmt.Sprintf("/api/v1/organizations/%d/pricing", orgID), adminTok,
-		map[string]any{"mode": "total", "group_ratio": 0.5}, nil); st != http.StatusForbidden {
+		map[string]any{"mode": "total", "discount_pct": 0.5}, nil); st != http.StatusForbidden {
 		t.Errorf("组织管理员配折扣应 403(客户只读),得 %d", st)
 	} else {
 		t.Log("3c 折扣 RBAC ok: 组织管理员配置 → 403(客户只读),仅运营方可配")

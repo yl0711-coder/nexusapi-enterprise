@@ -64,10 +64,11 @@ func (s *Service) ConfigureDiscount(ctx context.Context, c session.Claims, orgID
 
 	switch in.Mode {
 	case DiscountNone:
-		// 取消折扣:对已配的令牌分组把特殊倍率写回基础(= 无折扣)。
+		// 取消折扣:删掉已配令牌分组的特殊倍率条目,回落到主站基础倍率(= 无折扣)。
+		// R2-轻微:删键而非写回 base=1×base,避免 GroupGroupRatio 堆死键(两者价格等效)。
 		prev := s.loadDiscountEntries(ctx, orgID)
-		for g, e := range prev {
-			if err := s.upstream.SetGroupGroupRatio(ctx, userGroup, g, e.Base); err != nil {
+		for g := range prev {
+			if err := s.upstream.DeleteGroupGroupRatio(ctx, userGroup, g); err != nil {
 				return nil, mapUpstream(err)
 			}
 		}

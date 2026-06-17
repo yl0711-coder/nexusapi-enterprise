@@ -2,9 +2,37 @@ package service
 
 import (
 	"fmt"
+	"regexp"
 
 	"github.com/nexusapi-platform/enterprise/pkg/apperr"
 )
+
+// 格式校验(R2-轻微:slug/admin_email 不校验格式 → 可建无法登录的管理员/坏 slug)。
+var (
+	// slug:小写字母/数字/连字符,2–64,首尾非连字符(URL/分组名友好)。
+	slugRe = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$`)
+	// email:务实校验(非 RFC 全量),挡住明显非法,避免建出登录不了的管理员。
+	emailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
+)
+
+// checkSlug 校验组织 slug 格式 + 长度。
+func checkSlug(slug string) error {
+	if !slugRe.MatchString(slug) {
+		return apperr.InvalidParam("slug 须为小写字母/数字/连字符,2–64 位且首尾非连字符")
+	}
+	return nil
+}
+
+// checkEmail 校验邮箱格式 + 长度(空串交由各调用方决定是否必填)。
+func checkEmail(field, email string) error {
+	if len(email) > maxEmailLen {
+		return apperr.InvalidParam(fmt.Sprintf("%s 超长(上限 %d 字符)", field, maxEmailLen))
+	}
+	if !emailRe.MatchString(email) {
+		return apperr.InvalidParam(field + " 格式非法")
+	}
+	return nil
+}
 
 // 字段长度上限(对齐 09 DDL 列宽,R2-M3:超长应 400 而非落库溢出 500)。
 const (

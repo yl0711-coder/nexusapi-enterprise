@@ -266,7 +266,7 @@ func pathInt64(r *http.Request, name string) (int64, error) {
 	v := r.PathValue(name)
 	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
-		return 0, apperr.InvalidParam("路径参数 " + name + " 非法")
+		return 0, apperr.BadRequest("路径参数 " + name + " 非法")
 	}
 	return n, nil
 }

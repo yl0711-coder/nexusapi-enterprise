@@ -221,6 +221,9 @@ func (s *Service) SetBillingSettings(ctx context.Context, c session.Claims, orgI
 		return nil, apperr.Internal("").WithCause(err)
 	}
 	if in.LowWatermark != nil {
+		if *in.LowWatermark < 0 { // R2-轻微:低位阈值不得为负(负值无意义且会让状态判定失灵)
+			return nil, apperr.InvalidParam("低位告警阈值不得为负")
+		}
 		if err := s.store.SetLowWatermark(ctx, orgID, *in.LowWatermark); err != nil {
 			return nil, apperr.Internal("").WithCause(err)
 		}

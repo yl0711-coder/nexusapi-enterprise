@@ -78,15 +78,15 @@ func writeEnvelope(w http.ResponseWriter, status int, env Envelope) {
 	_ = json.NewEncoder(w).Encode(env)
 }
 
-// decodeJSON 解析请求体到 v;失败返回 400 语义的参数错误(10 §1.2)。
+// decodeJSON 解析请求体到 v;解析失败属协议级错误,返回 400(10 §1.2;与业务校验 422 区分)。
 func decodeJSON(r *http.Request, v any) error {
 	if r.Body == nil {
-		return apperr.InvalidParam("请求体为空")
+		return apperr.BadRequest("请求体为空")
 	}
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		return apperr.InvalidParam("请求体格式非法")
+		return apperr.BadRequest("请求体格式非法")
 	}
 	return nil
 }

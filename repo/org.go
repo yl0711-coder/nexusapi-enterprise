@@ -121,6 +121,25 @@ func (s *Store) UpdateOrgSettings(ctx context.Context, orgID int64, name, timezo
 	return err
 }
 
+// ListDiscountedOrgIDs 列出已配折扣(mode != none)的组织 id,供折扣对账扫描(G,只读)。
+func (s *Store) ListDiscountedOrgIDs(ctx context.Context) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM organization WHERE discount_mode IS NOT NULL AND discount_mode <> 'none' AND deleted_at IS NULL ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // ApprovalRules 是可配审批阈值(E13)。
 type ApprovalRules struct {
 	AutoMaxQuota int64

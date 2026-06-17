@@ -23,6 +23,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -413,6 +414,88 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		t.Errorf("组织管理员配折扣应 403(客户只读),得 %d", st)
 	} else {
 		t.Log("3c 折扣 RBAC ok: 组织管理员配置 → 403(客户只读),仅运营方可配")
+	}
+
+	// ===== R2 回归:merge-preserve + 折扣对账(G)+ mode=none 删键 =====
+	ctxBg := context.Background()
+	ug := fmt.Sprintf("org_%d", orgID)
+	pricingPath := fmt.Sprintf("/api/v1/organizations/%d/pricing", orgID)
+	// 预置一个外部手工配的无关键 vip/default(模拟人工/其它工具配),平台后续读-改-写绝不能抹掉它。
+	if err := upstream.SetGroupGroupRatio(ctxBg, "vip", "default", 0.66); err != nil {
+		t.Fatalf("预置外部 vip 键失败: %v", err)
+	}
+	if st := api.do("PUT", pricingPath, opTok, map[string]any{"mode": "total", "discount_pct": 0.7}, nil); st != http.StatusOK {
+		t.Fatalf("重配折扣 0.7 HTTP=%d", st)
+	}
+	if r, ok, _ := upstream.GetGroupGroupRatio(ctxBg, "vip", "default"); !ok || r != 0.66 {
+		t.Errorf("merge-preserve 破:重配折扣后外部 vip 键被抹掉 ok=%v r=%v", ok, r)
+	} else {
+		t.Log("回归 merge-preserve ok: 平台重配折扣后外部 vip/default=0.66 仍存活(只改自己那条)")
+	}
+	// S2 并发写回归:20 个 goroutine 并发写 conc 用户分组下 20 个不同令牌分组键,
+	// 单写者锁若失效会丢更新(读-改-写覆盖)。断言 20 条全部存活。
+	{
+		const n = 20
+		var wg sync.WaitGroup
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(k int) {
+				defer wg.Done()
+				_ = upstream.SetGroupGroupRatio(ctxBg, "conc", fmt.Sprintf("g%02d", k), 0.5)
+			}(i)
+		}
+		wg.Wait()
+		survived := 0
+		for i := 0; i < n; i++ {
+			if _, ok, _ := upstream.GetGroupGroupRatio(ctxBg, "conc", fmt.Sprintf("g%02d", i)); ok {
+				survived++
+			}
+		}
+		if survived != n {
+			t.Errorf("S2 并发写丢更新:%d 条并发写仅存活 %d 条(单写者锁失效)", n, survived)
+		} else {
+			t.Logf("回归 S2 并发锁 ok: %d 并发写 GroupGroupRatio 全部存活,无丢更新", n)
+		}
+	}
+	// 折扣对账(G):外部篡改 org 自己的特殊倍率 → reconcile 必须检出 tampered。
+	if err := upstream.SetGroupGroupRatio(ctxBg, ug, "default", 0.123); err != nil {
+		t.Fatalf("模拟外部篡改失败: %v", err)
+	}
+	var rec struct {
+		DriftCount int `json:"drift_count"`
+		Drifts     []struct {
+			Kind       string `json:"kind"`
+			TokenGroup string `json:"token_group"`
+		} `json:"drifts"`
+	}
+	if st := api.do("POST", "/api/v1/pricing/reconcile", opTok, nil, &rec); st != http.StatusOK {
+		t.Fatalf("对账触发 HTTP=%d", st)
+	}
+	foundTamper := false
+	for _, d := range rec.Drifts {
+		if d.TokenGroup == "default" && d.Kind == "tampered" {
+			foundTamper = true
+		}
+	}
+	if !foundTamper {
+		t.Errorf("对账应检出 org default 被篡改(tampered),实得: %+v", rec)
+	} else {
+		t.Logf("回归 对账 G ok: 检出 %d 处漂移,含 org default tampered(只告警不改价)", rec.DriftCount)
+	}
+	if st := api.do("POST", "/api/v1/pricing/reconcile", adminTok, nil, nil); st != http.StatusForbidden {
+		t.Errorf("组织管理员触发对账应 403,得 %d", st)
+	}
+	// mode=none:取消折扣应删掉 org 自己的键(不写 base、不堆死键),且不误删外部 vip 键。
+	if st := api.do("PUT", pricingPath, opTok, map[string]any{"mode": "none"}, nil); st != http.StatusOK {
+		t.Fatalf("取消折扣 HTTP=%d", st)
+	}
+	if _, ok, _ := upstream.GetGroupGroupRatio(ctxBg, ug, "default"); ok {
+		t.Errorf("mode=none 应删 org default 键,但键仍在")
+	} else {
+		t.Log("回归 mode=none ok: 取消折扣删除 org default 特殊倍率键(回落基础倍率,不堆死键)")
+	}
+	if _, ok, _ := upstream.GetGroupGroupRatio(ctxBg, "vip", "default"); !ok {
+		t.Error("mode=none 误删了外部 vip 键(merge-preserve 破)")
 	}
 
 	// ===== 里程碑 4:申请-审批(US-06)+ 通知(US-13)=====

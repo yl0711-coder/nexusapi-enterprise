@@ -39,8 +39,31 @@ func (a *Adapter) GetGroupGroupRatio(ctx context.Context, userGroup, tokenGroup 
 // SetGroupGroupRatio 设「用户分组×令牌分组」特殊倍率(merge-preserve:读现状 → 只覆盖这一个 key →
 // 写回,绝不抹掉别人/手工配的其它条目,G 类字段所有权)。是平台唯一写的 option。
 func (a *Adapter) SetGroupGroupRatio(ctx context.Context, userGroup, tokenGroup string, ratio float64) error {
-	// 单写者锁(R2-S2/G):option 是全局 JSON、读-改-写非原子,并发会丢更新(动钱)。
-	// 用 KeyedLocker 串行化所有 GroupGroupRatio 写(MVP 单实例;多实例换分布式锁同栈)。
+	return a.mutateGroupGroupRatio(ctx, func(m map[string]map[string]float64) {
+		if m[userGroup] == nil {
+			m[userGroup] = map[string]float64{}
+		}
+		m[userGroup][tokenGroup] = ratio
+	})
+}
+
+// DeleteGroupGroupRatio 删掉某条特殊倍率(取消折扣回落基础倍率,不堆死键)。
+// 同一单写者锁 + merge-preserve:只删自己这条,空了的用户分组顺手清掉,绝不动别人条目。
+func (a *Adapter) DeleteGroupGroupRatio(ctx context.Context, userGroup, tokenGroup string) error {
+	return a.mutateGroupGroupRatio(ctx, func(m map[string]map[string]float64) {
+		if inner, ok := m[userGroup]; ok {
+			delete(inner, tokenGroup)
+			if len(inner) == 0 {
+				delete(m, userGroup)
+			}
+		}
+	})
+}
+
+// mutateGroupGroupRatio 在单写者锁下做 GroupGroupRatio 的读-改-写(merge-preserve)。
+// 单写者锁(R2-S2/G):option 是全局 JSON、读-改-写非原子,并发会丢更新(动钱)。
+// 用 KeyedLocker 串行化所有 GroupGroupRatio 写(MVP 单实例;多实例换分布式锁同栈)。
+func (a *Adapter) mutateGroupGroupRatio(ctx context.Context, apply func(m map[string]map[string]float64)) error {
 	release, lerr := a.locker.Acquire(ctx, "option:GroupGroupRatio")
 	if lerr != nil {
 		return &UpstreamError{Step: stepSetOption, PlatformCode: CodeInternal, Message: "获取折扣写锁失败", class: classRetryable, cause: lerr}
@@ -54,10 +77,7 @@ func (a *Adapter) SetGroupGroupRatio(ctx context.Context, userGroup, tokenGroup 
 	if m == nil {
 		m = map[string]map[string]float64{}
 	}
-	if m[userGroup] == nil {
-		m[userGroup] = map[string]float64{}
-	}
-	m[userGroup][tokenGroup] = ratio
+	apply(m)
 	val, merr := json.Marshal(m)
 	if merr != nil {
 		return &UpstreamError{Step: stepSetOption, PlatformCode: CodeInternal, Message: "序列化分组特殊倍率失败", class: classNonRetryable, cause: merr}

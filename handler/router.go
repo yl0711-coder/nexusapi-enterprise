@@ -25,6 +25,7 @@ func New(svc *service.Service, signer *session.Signer, log *slog.Logger, version
 	if log == nil {
 		log = slog.Default()
 	}
+	markStarted(time.Now().Unix()) // /metrics uptime 起点
 	return &Handler{svc: svc, signer: signer, log: log, version: version}
 }
 
@@ -35,6 +36,7 @@ func (h *Handler) Routes() http.Handler {
 	// 健康检查(无需鉴权;部署探针,沿用里程碑 0 契约)。
 	mux.HandleFunc("GET /healthz", h.handleHealthz)
 	mux.HandleFunc("GET /readyz", h.handleReadyz)
+	mux.HandleFunc("GET /metrics", h.handleMetrics) // Prometheus 抓取(R2-运维)
 
 	// 认证。
 	mux.HandleFunc("POST /api/v1/auth/login", h.handleLogin)
@@ -90,6 +92,7 @@ func (h *Handler) Routes() http.Handler {
 	// 计价/折扣联动(里程碑3c,单向写 new-api 分组倍率,客户只读)。
 	mux.HandleFunc("GET /api/v1/organizations/{id}/pricing", h.requireAuth(h.handleGetPricing))
 	mux.HandleFunc("PUT /api/v1/organizations/{id}/pricing", h.requireAuth(h.handleConfigureDiscount))
+	mux.HandleFunc("POST /api/v1/pricing/reconcile", h.requireAuth(h.handleReconcileDiscounts)) // 手动折扣对账(运营方,G)
 
 	// 申请-审批(里程碑4,US-06)+ 通知(US-13)+ 成员自助。
 	mux.HandleFunc("POST /api/v1/approvals", h.requireAuth(h.handleSubmitApproval))
@@ -113,8 +116,8 @@ func (h *Handler) Routes() http.Handler {
 	// /api/v1/* 之外的路径走内嵌静态前端;/ 返回 index.html。
 	mux.Handle("GET /", http.FileServerFS(web.FS))
 
-	// 中间件链:request_id → recover → mux。
-	return withRequestID(h.recoverPanic(mux))
+	// 中间件链:request_id → 访问日志/指标 → recover → mux。
+	return withRequestID(h.accessLog(h.recoverPanic(mux)))
 }
 
 func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {

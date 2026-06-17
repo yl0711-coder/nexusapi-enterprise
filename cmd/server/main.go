@@ -29,7 +29,7 @@ import (
 )
 
 // version 由构建时 -ldflags "-X main.version=..." 注入。
-var version = "6.1.0-m6"
+var version = "6.2.0-g"
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -110,6 +110,9 @@ func run(log *slog.Logger) error {
 		go worker.NewQuotaWorker(svc, log, iv, 100).Run(workerCtx)
 		// 结算 worker:只对开了 billing_enabled 的组织扣费(逐组织灰度,默认关)。
 		go worker.NewSettlementWorker(svc, log, iv).Run(workerCtx)
+		// 对账 worker(G):折扣镜像 vs new-api 实际特殊倍率,只读告警不改价。低频(默认 10min)。
+		rv := time.Duration(atoiOr("NEXUS_RECONCILE_INTERVAL_SEC", 600)) * time.Second
+		go worker.NewReconcileWorker(svc, log, rv).Run(workerCtx)
 	}
 
 	h := handler.New(svc, signer, log, version)

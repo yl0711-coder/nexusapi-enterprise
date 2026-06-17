@@ -118,16 +118,25 @@ const VIEWS_AFTER = {};
 const VIEWS = {};
 VIEWS.orgs = async () => {
   const d = await api("GET", "/organizations?page=1&page_size=50", null);
-  const rows = (d.list || []).map(o => `<tr>
+  // 过滤掉平台运营方伪组织(slug=_operator),只列真实客户(R2-轻微)。
+  const list = (d.list || []).filter(o => o.slug !== "_operator");
+  const rows = list.map(o => `<tr data-q="${esc((o.name + " " + o.slug).toLowerCase())}">
     <td><span class="lk" style="display:inline-block;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle" title="${esc(o.name)}" onclick="enterOrg(${o.id},'${esc(o.name)}')">${esc(o.name)}</span><div class="mini">${esc(o.slug)}</div></td>
     <td>${pill(o.status, o.status === "active" ? "ok" : o.status === "low" ? "warn" : "bad")}</td>
     <td>${esc(o.timezone)}</td><td>${esc(o.billing_mode)}</td>
     <td class="right"><span class="btn sm" onclick="enterOrg(${o.id},'${esc(o.name)}')">进入</span></td></tr>`).join("");
   return head("客户组织", "运营方:管理所有客户组织、入账、计费灰度、支持会话")
-    + `<div class="toolbar"><div class="search"></div><button class="btn pri" onclick="openCreateOrg()">+ 新建客户组织</button></div>
+    + `<div class="toolbar"><div class="search"><input id="orgSearch" placeholder="搜索组织名或 slug…" oninput="filterRows('orgSearch','orgTbody')"></div><button class="btn pri" onclick="openCreateOrg()">+ 新建客户组织</button></div>
     <div class="panel"><table><thead><tr><th>组织</th><th>状态</th><th>时区</th><th>计费</th><th></th></tr></thead>
-    <tbody>${rows || '<tr><td colspan=5 class="empty">暂无组织</td></tr>'}</tbody></table></div>`;
+    <tbody id="orgTbody">${rows || '<tr><td colspan=5 class="empty">暂无组织</td></tr>'}</tbody></table></div>`;
 };
+// filterRows 通用前端筛选:按 data-q 包含关键词显隐行(无需重新拉数据)。
+function filterRows(inputId, tbodyId) {
+  const q = (document.getElementById(inputId).value || "").trim().toLowerCase();
+  document.querySelectorAll("#" + tbodyId + " tr[data-q]").forEach(tr => {
+    tr.style.display = (!q || tr.getAttribute("data-q").indexOf(q) >= 0) ? "" : "none";
+  });
+}
 function openCreateOrg() {
   modal("新建客户组织", `<div class="fld"><label>组织名称</label><input id="co_n" placeholder="Acme 科技"></div>
     <div class="fld"><label>唯一标识 slug</label><input id="co_s" placeholder="acme"></div>

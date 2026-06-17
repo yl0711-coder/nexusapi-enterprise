@@ -31,6 +31,20 @@ func (h *Handler) handleGetPricing(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, r, http.StatusOK, pricingView(v))
 }
 
+// POST /pricing/reconcile — 手动触发折扣对账(仅运营方,只读告警,G)。
+func (h *Handler) handleReconcileDiscounts(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	drifts, err := h.svc.ReconcileDiscountsForOperator(r.Context(), c)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	if drifts == nil {
+		drifts = []service.DiscountDrift{}
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{"drift_count": len(drifts), "drifts": drifts})
+}
+
 // PUT /organizations/{id}/pricing — 配置折扣(仅运营方,写 new-api 分组特殊倍率)。
 type pricingReq struct {
 	Mode        string   `json:"mode"`         // none/total/per_group

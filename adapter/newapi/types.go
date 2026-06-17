@@ -98,6 +98,9 @@ type NewapiAdapter interface {
 	GetGroupRatio(ctx context.Context, group string) (ratio float64, configured bool, err error)
 	GetGroupGroupRatio(ctx context.Context, userGroup, tokenGroup string) (ratio float64, configured bool, err error)
 	SetGroupGroupRatio(ctx context.Context, userGroup, tokenGroup string, ratio float64) error
+	// DeleteGroupGroupRatio 删掉某「用户分组×令牌分组」特殊倍率条目(取消折扣回落基础倍率;
+	// merge-preserve + 单写者锁,不堆死键。R2-轻微:mode=none 应删键而非写 base)。
+	DeleteGroupGroupRatio(ctx context.Context, userGroup, tokenGroup string) error
 
 	// SetUserGroup 设 new-api 用户分组(读-改-写,quota 不丢);折扣按用户分组归属(A2)。
 	SetUserGroup(ctx context.Context, userID int, group string) error

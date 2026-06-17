@@ -144,8 +144,16 @@ req PATCH "/api/v1/organizations/$ORG_ID/billing-settings" "$AD_TOK" "{\"billing
 # 关回去,避免 dev 误扣(本地无真实用量,但保持干净)
 req PATCH "/api/v1/organizations/$ORG_ID/billing-settings" "$OP_TOK" "{\"billing_enabled\":false}" >/dev/null
 
+hdr "18) 里程碑3c 计价/折扣联动(总折扣,仅运营方)"
+req PUT "/api/v1/organizations/$ORG_ID/pricing" "$OP_TOK" "{\"mode\":\"total\",\"newapi_group\":\"org$ORG_ID\",\"group_ratio\":0.8}"
+[ "$CODE" = 200 ] && ok "配总折扣 200 回显 upstream=$(field group_ratio_upstream)" || bad "配折扣 CODE=$CODE BODY=$BODY"
+req GET "/api/v1/organizations/$ORG_ID/pricing" "$AD_TOK" ""
+[ "$CODE" = 200 ] && ok "组织管理员只读折扣 200" || bad "读折扣 CODE=$CODE"
+req PUT "/api/v1/organizations/$ORG_ID/pricing" "$AD_TOK" "{\"mode\":\"total\",\"group_ratio\":0.5}"
+[ "$CODE" = 403 ] && ok "组织管理员配折扣 → 403(客户只读,仅运营方可配)" || bad "应 403 得 $CODE"
+
 # 放最后:此步会调 GET /api/user/token 旋转 root token,放末尾避免作废 server 持有的管理员 token。
-hdr "18) 零侵入核对:new-api 侧真建了该用户"
+hdr "19) 零侵入核对:new-api 侧真建了该用户"
 NU="$(curl -s "http://localhost:13000/api/user/search?keyword=o${ORG_ID}m${MEMBER_ID}" \
   -H "Authorization: Bearer $(curl -s -c /tmp/j -X POST http://localhost:13000/api/user/login -H 'Content-Type: application/json' -d '{"username":"root","password":"RootPass123"}' >/dev/null; curl -s -b /tmp/j -H 'New-Api-User: 1' http://localhost:13000/api/user/token | grep -oE '"data":"[^"]+"' | sed -E 's/.*:"([^"]+)"/\1/')" \
   -H 'New-Api-User: 1' 2>/dev/null | grep -oE "\"username\":\"o${ORG_ID}m${MEMBER_ID}\"" | head -1)"

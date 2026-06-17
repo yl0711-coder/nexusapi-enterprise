@@ -73,6 +73,9 @@ func (h *Handler) Routes() http.Handler {
 	// 计费灰度开关(里程碑3b,逐组织,默认关;运营方控)。
 	mux.HandleFunc("GET /api/v1/organizations/{id}/billing-settings", h.requireAuth(h.handleGetBillingSettings))
 	mux.HandleFunc("PATCH /api/v1/organizations/{id}/billing-settings", h.requireAuth(h.handleSetBillingSettings))
+	// 计价/折扣联动(里程碑3c,单向写 new-api 分组倍率,客户只读)。
+	mux.HandleFunc("GET /api/v1/organizations/{id}/pricing", h.requireAuth(h.handleGetPricing))
+	mux.HandleFunc("PUT /api/v1/organizations/{id}/pricing", h.requireAuth(h.handleConfigureDiscount))
 
 	// 中间件链:request_id → recover → mux。
 	return withRequestID(h.recoverPanic(mux))
@@ -83,7 +86,7 @@ func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
-	writeRaw(w, http.StatusOK, map[string]string{"status": "ready", "milestone": "3b-billing-settlement"})
+	writeRaw(w, http.StatusOK, map[string]string{"status": "ready", "milestone": "3c-pricing-linkage"})
 }
 
 // writeRaw 写裸 JSON(健康检查不用业务信封,沿用里程碑 0 探针格式)。

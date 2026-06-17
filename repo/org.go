@@ -73,6 +73,45 @@ func (s *Store) ListOrganizations(ctx context.Context, limit, offset int) ([]*mo
 	return out, total, rows.Err()
 }
 
+// OrgDiscount 是组织折扣镜像(09 §1,配置后单向写入 new-api,本表只读回显)。
+type OrgDiscount struct {
+	Mode          string
+	NewapiGroup   *string
+	GroupRatio    *float64
+	SpecialRatios []byte // JSON
+}
+
+// GetOrgDiscount 读组织折扣配置。
+func (s *Store) GetOrgDiscount(ctx context.Context, orgID int64) (*OrgDiscount, error) {
+	var d OrgDiscount
+	var special sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT discount_mode, newapi_group, group_ratio, special_ratios FROM organization WHERE id = ? AND deleted_at IS NULL`, orgID).
+		Scan(&d.Mode, &d.NewapiGroup, &d.GroupRatio, &special)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if special.Valid {
+		d.SpecialRatios = []byte(special.String)
+	}
+	return &d, nil
+}
+
+// UpdateOrgDiscount 写组织折扣配置(镜像 new-api,单向)。
+func (s *Store) UpdateOrgDiscount(ctx context.Context, orgID int64, mode string, newapiGroup *string, groupRatio *float64, specialRatios []byte) error {
+	var special any
+	if len(specialRatios) > 0 {
+		special = string(specialRatios)
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE organization SET discount_mode = ?, newapi_group = COALESCE(?, newapi_group), group_ratio = ?, special_ratios = ?
+		 WHERE id = ? AND deleted_at IS NULL`, mode, newapiGroup, groupRatio, special, orgID)
+	return err
+}
+
 // UpdateOrgStatus 改组织服务状态(active/low/stopped,余额水位驱动,09 §14)。
 func (s *Store) UpdateOrgStatus(ctx context.Context, orgID int64, status string) error {
 	_, err := s.db.ExecContext(ctx,

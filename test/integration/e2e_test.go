@@ -415,6 +415,75 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		t.Log("3c 折扣 RBAC ok: 组织管理员配置 → 403(客户只读),仅运营方可配")
 	}
 
+	// ===== 里程碑 4:申请-审批(US-06)+ 通知(US-13)=====
+	qB4, _ := getNewapiUser(t, newapiURL, adminToken, adminUID, uid)
+	// ① 自动通过(小额今日)→ 即时下发,new-api quota 增。
+	var auto struct {
+		ID    int64  `json:"id"`
+		State string `json:"state"`
+	}
+	if st := api.do("POST", "/api/v1/approvals", memberTok,
+		map[string]any{"amount_quota": 10000000, "duration": "today", "reason": "赶工"}, &auto); st != http.StatusCreated || auto.State != "auto_approved" {
+		t.Fatalf("自动通过申请 HTTP=%d state=%s", st, auto.State)
+	}
+	if qa, _ := getNewapiUser(t, newapiURL, adminToken, adminUID, uid); qa != qB4+10000000 {
+		t.Errorf("自动通过后 quota 应 +1e7: %d→%d", qB4, qa)
+	} else {
+		t.Logf("US-06 自动通过 ok: 即时下发,quota %d→%d", qB4, qa)
+	}
+	// 通知:成员收到审批结果站内通知。
+	var nresp struct {
+		Unread int `json:"unread"`
+	}
+	api.do("GET", "/api/v1/notifications", memberTok, nil, &nresp)
+	if nresp.Unread < 1 {
+		t.Errorf("自动通过应生成站内通知,unread=%d", nresp.Unread)
+	} else {
+		t.Logf("US-13 通知 ok: 成员收到 %d 条未读", nresp.Unread)
+	}
+
+	// ② 二审档(大额 > 一审上限)→ pending → 一审 → 二审 → approved 下发。
+	var big struct {
+		ID       int64  `json:"id"`
+		State    string `json:"state"`
+		IsLevel2 bool   `json:"is_level2"`
+	}
+	if st := api.do("POST", "/api/v1/approvals", memberTok,
+		map[string]any{"amount_quota": 200000000, "duration": "today", "reason": "大项目"}, &big); st != http.StatusCreated {
+		t.Fatalf("大额申请 HTTP=%d", st)
+	}
+	if big.State != "pending" || !big.IsLevel2 {
+		t.Errorf("大额应 pending+二审: state=%s level2=%v", big.State, big.IsLevel2)
+	}
+	// 成员裁决自己的申请 → 403。
+	if st := api.do("POST", fmt.Sprintf("/api/v1/approvals/%d/decide", big.ID), memberTok,
+		map[string]any{"approved": true}, nil); st != http.StatusForbidden {
+		t.Errorf("成员裁决应 403,得 %d", st)
+	}
+	// 一审(组织管理员)→ l1_approved。
+	var d1 struct {
+		State string `json:"state"`
+	}
+	api.do("POST", fmt.Sprintf("/api/v1/approvals/%d/decide", big.ID), adminTok, map[string]any{"approved": true}, &d1)
+	if d1.State != "l1_approved" {
+		t.Errorf("一审通过应 l1_approved,得 %s", d1.State)
+	}
+	// 二审(组织管理员)→ approved + 下发。
+	qBeforeFinal, _ := getNewapiUser(t, newapiURL, adminToken, adminUID, uid)
+	var d2 struct {
+		State string `json:"state"`
+	}
+	api.do("POST", fmt.Sprintf("/api/v1/approvals/%d/decide", big.ID), adminTok, map[string]any{"approved": true}, &d2)
+	if d2.State != "approved" {
+		t.Errorf("二审通过应 approved,得 %s", d2.State)
+	}
+	if qf, _ := getNewapiUser(t, newapiURL, adminToken, adminUID, uid); qf != qBeforeFinal+200000000 {
+		t.Errorf("二审通过下发后 quota 应 +2e8: %d→%d", qBeforeFinal, qf)
+	} else {
+		t.Logf("US-06 二审 ok: pending→l1_approved→approved 且下发,quota %d→%d", qBeforeFinal, qf)
+	}
+	t.Log("里程碑 4 e2e 全通过:自动通过即时下发 + 二审两级流程 + 成员裁决403 + 站内通知")
+
 	// ===== 里程碑 3b:读 logs 扣费 + 去重 + 硬停(需 new-api 库连接造日志,本地集成 compose)=====
 	if newapiSQLDSN == "" {
 		t.Log("跳过 3b 扣费实测(未设 NEXUS_IT_NEWAPI_SQL_DSN);开关 RBAC 已验")

@@ -77,6 +77,13 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/organizations/{id}/pricing", h.requireAuth(h.handleGetPricing))
 	mux.HandleFunc("PUT /api/v1/organizations/{id}/pricing", h.requireAuth(h.handleConfigureDiscount))
 
+	// 申请-审批(里程碑4,US-06)+ 通知(US-13)+ 成员自助。
+	mux.HandleFunc("POST /api/v1/approvals", h.requireAuth(h.handleSubmitApproval))
+	mux.HandleFunc("GET /api/v1/organizations/{id}/approvals", h.requireAuth(h.handleListApprovals))
+	mux.HandleFunc("POST /api/v1/approvals/{id}/decide", h.requireAuth(h.handleDecideApproval))
+	mux.HandleFunc("GET /api/v1/notifications", h.requireAuth(h.handleListNotifications))
+	mux.HandleFunc("POST /api/v1/notifications/{id}/read", h.requireAuth(h.handleMarkNotificationRead))
+
 	// 中间件链:request_id → recover → mux。
 	return withRequestID(h.recoverPanic(mux))
 }
@@ -86,7 +93,7 @@ func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
-	writeRaw(w, http.StatusOK, map[string]string{"status": "ready", "milestone": "3c-pricing-linkage"})
+	writeRaw(w, http.StatusOK, map[string]string{"status": "ready", "milestone": "4-selfservice-approval-notify"})
 }
 
 // writeRaw 写裸 JSON(健康检查不用业务信封,沿用里程碑 0 探针格式)。

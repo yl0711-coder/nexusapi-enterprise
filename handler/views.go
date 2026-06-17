@@ -155,6 +155,45 @@ func toRechargeReqView(rq *model.RechargeRequest) rechargeReqView {
 	return v
 }
 
+type approvalView struct {
+	ID          int64  `json:"id"`
+	ApplicantID int64  `json:"applicant_id"`
+	TeamID      *int64 `json:"team_id"`
+	RequestType string `json:"request_type"`
+	Model       string `json:"model,omitempty"`
+	Amount      int64  `json:"amount_quota"`
+	Duration    string `json:"duration"`
+	Reason      string `json:"reason,omitempty"`
+	State       string `json:"state"`
+	IsLevel2    bool   `json:"is_level2"`
+	CreatedAt   string `json:"created_at"`
+}
+
+func toApprovalView(a *model.Approval) approvalView {
+	return approvalView{
+		ID: a.ID, ApplicantID: a.ApplicantID, TeamID: a.TeamID, RequestType: a.RequestType,
+		Model: a.Payload.Model, Amount: a.Payload.Amount, Duration: a.Payload.Duration, Reason: a.Payload.Reason,
+		State: a.State, IsLevel2: a.IsLevel2, CreatedAt: a.CreatedAt.Format(time.RFC3339),
+	}
+}
+
+type notificationView struct {
+	ID        int64  `json:"id"`
+	Type      string `json:"type"`
+	Title     string `json:"title"`
+	Body      string `json:"body,omitempty"`
+	IsRead    bool   `json:"is_read"`
+	CreatedAt string `json:"created_at"`
+}
+
+func toNotificationView(n *model.Notification) notificationView {
+	v := notificationView{ID: n.ID, Type: n.Type, Title: n.Title, IsRead: n.IsRead, CreatedAt: n.CreatedAt.Format(time.RFC3339)}
+	if n.Body != nil {
+		v.Body = *n.Body
+	}
+	return v
+}
+
 // pageMeta 是列表分页元信息(10 §1.5)。
 type pageMeta struct {
 	Page       int `json:"page"`

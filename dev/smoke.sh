@@ -152,8 +152,23 @@ req GET "/api/v1/organizations/$ORG_ID/pricing" "$AD_TOK" ""
 req PUT "/api/v1/organizations/$ORG_ID/pricing" "$AD_TOK" "{\"mode\":\"total\",\"group_ratio\":0.5}"
 [ "$CODE" = 403 ] && ok "组织管理员配折扣 → 403(客户只读,仅运营方可配)" || bad "应 403 得 $CODE"
 
+hdr "19) 里程碑4 申请-审批 + 通知(成员自助)"
+req POST "/api/v1/approvals" "$M_TOK" "{\"amount_quota\":10000000,\"duration\":\"today\",\"reason\":\"赶工\"}"
+[ "$CODE" = 201 ] && [ "$(field state)" = auto_approved ] && ok "小额申请自动通过 201(即时下发)" || bad "自动通过 CODE=$CODE BODY=$BODY"
+req GET "/api/v1/notifications" "$M_TOK" ""
+[ "$CODE" = 200 ] && ok "成员站内通知 200 unread=$(field unread)" || bad "通知 CODE=$CODE"
+req POST "/api/v1/approvals" "$M_TOK" "{\"amount_quota\":200000000,\"duration\":\"today\",\"reason\":\"大项目\"}"
+BIG_ID="$(field id)"
+[ "$CODE" = 201 ] && [ "$(field state)" = pending ] && ok "大额申请 → pending(待审,二审档)" || bad "大额 CODE=$CODE BODY=$BODY"
+req POST "/api/v1/approvals/$BIG_ID/decide" "$M_TOK" "{\"approved\":true}"
+[ "$CODE" = 403 ] && ok "成员裁决自己的申请 → 403" || bad "应 403 得 $CODE"
+req POST "/api/v1/approvals/$BIG_ID/decide" "$AD_TOK" "{\"approved\":true}"
+[ "$CODE" = 200 ] && ok "组织管理员一审 200 state=$(field state)" || bad "一审 CODE=$CODE BODY=$BODY"
+req POST "/api/v1/approvals/$BIG_ID/decide" "$AD_TOK" "{\"approved\":true}"
+[ "$CODE" = 200 ] && ok "组织管理员二审 200 state=$(field state)(终批+下发)" || bad "二审 CODE=$CODE BODY=$BODY"
+
 # 放最后:此步会调 GET /api/user/token 旋转 root token,放末尾避免作废 server 持有的管理员 token。
-hdr "19) 零侵入核对:new-api 侧真建了该用户"
+hdr "20) 零侵入核对:new-api 侧真建了该用户"
 NU="$(curl -s "http://localhost:13000/api/user/search?keyword=o${ORG_ID}m${MEMBER_ID}" \
   -H "Authorization: Bearer $(curl -s -c /tmp/j -X POST http://localhost:13000/api/user/login -H 'Content-Type: application/json' -d '{"username":"root","password":"RootPass123"}' >/dev/null; curl -s -b /tmp/j -H 'New-Api-User: 1' http://localhost:13000/api/user/token | grep -oE '"data":"[^"]+"' | sed -E 's/.*:"([^"]+)"/\1/')" \
   -H 'New-Api-User: 1' 2>/dev/null | grep -oE "\"username\":\"o${ORG_ID}m${MEMBER_ID}\"" | head -1)"

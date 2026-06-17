@@ -183,6 +183,55 @@ type RechargeRequest struct {
 	CreatedAt   time.Time
 }
 
+// approval 状态(09 §14)+ 请求类型。
+const (
+	ApprovalPending     = "pending"      // 待一审(团队负责人)
+	ApprovalL1Approved  = "l1_approved"  // 一审过,待二审(组织管理员)
+	ApprovalApproved    = "approved"     // 终批通过
+	ApprovalRejected    = "rejected"     // 驳回
+	ApprovalAutoApprove = "auto_approved" // 自动通过
+	ApprovalCancelled   = "cancelled"
+
+	ReqQuotaRaise = "quota_raise"
+	ReqModelOpen  = "model_open"
+)
+
+// Approval 对应 approval 表(09 §12)。
+type Approval struct {
+	ID           int64
+	OrgID        int64
+	ApplicantID  int64
+	TeamID       *int64
+	RequestType  string
+	Payload      ApprovalPayload
+	State        string
+	IsLevel2     bool
+	L1ReviewerID *int64
+	L2ReviewerID *int64
+	RejectReason *string
+	CreatedAt    time.Time
+}
+
+// ApprovalPayload 是申请载荷。
+type ApprovalPayload struct {
+	Model    string `json:"model,omitempty"`
+	Amount   int64  `json:"amount,omitempty"`   // 申请额度(quota)
+	Duration string `json:"duration,omitempty"` // today/3d/week
+	Reason   string `json:"reason,omitempty"`
+}
+
+// Notification 对应 notification 表(站内通知,US-13)。
+type Notification struct {
+	ID        int64
+	OrgID     int64
+	MemberID  int64
+	Type      string
+	Title     string
+	Body      *string
+	IsRead    bool
+	CreatedAt time.Time
+}
+
 // AuditEntry 对应 audit_log 表(09 §13)。Detail 为已脱敏 JSON(绝不含明文 key/密文)。
 type AuditEntry struct {
 	OrgID            int64

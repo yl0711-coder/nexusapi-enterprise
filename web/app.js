@@ -214,7 +214,7 @@ VIEWS.members = async () => {
       <span class="btn sm" onclick="toggleMember(${m.id},${m.status !== "active"})">${m.status === "active" ? "停用" : "恢复"}</span>
     </td></tr>`).join("");
   return head(S.role === "team_leader" ? "团队成员" : "成员", "开通成员即代发 API key;调额走临时 grant、到期自动回退")
-    + `<div class="toolbar"><div class="search"></div>${S.role !== "team_leader" || true ? `<button class="btn pri" onclick="openAddMember()">+ 开通成员</button>` : ""}</div>
+    + `<div class="toolbar"><div class="search"></div><button class="btn" onclick="openBulk()">批量导入</button><button class="btn pri" onclick="openAddMember()">+ 开通成员</button></div>
     <div class="panel"><table><thead><tr><th>成员</th><th>状态</th><th>Key(脱敏)</th><th></th></tr></thead>
     <tbody>${rows || '<tr><td colspan=4 class="empty">暂无成员</td></tr>'}</tbody></table></div>`;
 };
@@ -234,6 +234,23 @@ async function doAddMember() {
     modal("已开通并代发 Key", `<div class="note">明文 API Key 仅此一次显示,请交付成员并妥善保存:</div>
       <div class="keybox"><span>${esc(d.api_key)}</span><span class="lk" onclick="navigator.clipboard&&navigator.clipboard.writeText('${esc(d.api_key)}');toast('已复制')">复制</span></div>`,
       `<button class="btn pri" onclick="closeM();renderView()">完成</button>`);
+  } catch (e) { toast(e.message); }
+}
+async function openBulk() {
+  let tiers = []; try { tiers = (await api("GET", "/organizations/" + S.orgId + "/tiers", null)) || []; } catch (e) {}
+  const opts = tiers.map(t => `<option value="${t.id}">${esc(t.name)}${t.is_default ? "(默认)" : ""}</option>`).join("");
+  modal("批量导入成员", `<div class="fld"><label>姓名(每行一个)</label><textarea id="bk_t" rows="6" placeholder="张三&#10;李四&#10;王五"></textarea></div>
+    <div class="fld"><label>统一层级</label><select id="bk_tier">${opts}</select></div>
+    <div class="note">逐个限速代发 key,逐行返回结果;同批重名跳过;部分失败不回滚已成功行。</div>`,
+    `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doBulk()">导入</button>`);
+}
+async function doBulk() {
+  try {
+    const names = val("bk_t").split("\n").map(s => s.trim()).filter(Boolean);
+    const t = val("bk_tier"); const body = { names }; if (t) body.tier_id = parseInt(t);
+    const d = await api("POST", "/organizations/" + S.orgId + "/members:bulk", body);
+    const rows = (d.results || []).map(r => `<tr><td>${esc(r.name)}</td><td>${r.ok ? pill("成功", "ok") : pill("失败", "bad") + " " + esc(r.error || "")}</td></tr>`).join("");
+    modal("批量导入结果", `<div class="note">成功 ${d.success} · 失败 ${d.failed}</div><table>${rows}</table>`, `<button class="btn pri" onclick="closeM();renderView()">完成</button>`);
   } catch (e) { toast(e.message); }
 }
 function openAdjust(mid) {
@@ -321,7 +338,15 @@ VIEWS.mykey = async () => {
     + `<div class="panel"><div class="pb">
       <div class="keybox"><span>${esc(m.key_masked || "(尚未生成)")}</span></div>
       <div style="margin-top:14px"><button class="btn pri" onclick="rotateKey()">轮换 Key</button></div>
-      <div class="note">轮换后旧 key 立即失效,新明文 key 仅显示一次。</div></div></div>`;
+      <div class="note">轮换后旧 key 立即失效,新明文 key 仅显示一次。</div>
+      <div class="fld" style="margin-top:16px"><label>IP 白名单(单 IP 或 CIDR,逗号分隔;留空=不限)</label>
+        <input id="ipwl" value="${esc(m.key_masked ? "" : "")}" placeholder="203.0.113.5, 10.0.0.0/8"></div>
+      <button class="btn" onclick="saveIP()">保存 IP 白名单</button>
+      <div class="note">由 new-api 网关数据面拦截,与平台可用性解耦。</div></div></div>`;
+}
+async function saveIP() {
+  try { await api("POST", "/members/" + S.me.id + "/key:ip-whitelist", { allow_ips: val("ipwl") }); toast("已保存 IP 白名单"); }
+  catch (e) { toast(e.message); }
 };
 async function rotateKey() {
   try { const d = await api("POST", "/members/" + S.me.id + "/key:rotate", null);

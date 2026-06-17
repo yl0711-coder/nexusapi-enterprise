@@ -84,6 +84,21 @@ func (s *Store) UpdateMemberStatus(ctx context.Context, orgID, memberID int64, s
 	return err
 }
 
+// UpdateMemberTeamTier 改成员团队/层级(nil=不改,PATCH /members/:id)。
+func (s *Store) UpdateMemberTeamTier(ctx context.Context, orgID, memberID int64, teamID, tierID *int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE member SET team_id = COALESCE(?, team_id), tier_id = COALESCE(?, tier_id)
+		 WHERE id = ? AND org_id = ?`, teamID, tierID, memberID, orgID)
+	return err
+}
+
+// UpdateMemberRole 任命/变更成员角色(E17)。
+func (s *Store) UpdateMemberRole(ctx context.Context, orgID, memberID int64, role string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE member SET role = ? WHERE id = ? AND org_id = ?`, role, memberID, orgID)
+	return err
+}
+
 // GetMember 取成员,强制 org_id 谓词(跨 org → ErrNotFound)。
 func (s *Store) GetMember(ctx context.Context, orgID, id int64) (*model.Member, error) {
 	row := s.db.QueryRowContext(ctx, memberSelect+` WHERE id = ? AND org_id = ? AND deleted_at IS NULL`, id, orgID)

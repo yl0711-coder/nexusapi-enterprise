@@ -42,6 +42,11 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/organizations", h.requireAuth(h.handleListOrgs))
 	mux.HandleFunc("POST /api/v1/organizations", h.requireAuth(h.handleCreateOrg))
 	mux.HandleFunc("GET /api/v1/organizations/{id}", h.requireAuth(h.handleGetOrg))
+	mux.HandleFunc("PATCH /api/v1/organizations/{id}", h.requireAuth(h.handleUpdateOrg))
+	mux.HandleFunc("GET /api/v1/organizations/{id}/approval-rules", h.requireAuth(h.handleGetApprovalRules))
+	mux.HandleFunc("PUT /api/v1/organizations/{id}/approval-rules", h.requireAuth(h.handleSetApprovalRules))
+	mux.HandleFunc("GET /api/v1/organizations/{id}/quota-policies", h.requireAuth(h.handleListPolicies))
+	mux.HandleFunc("PUT /api/v1/organizations/{id}/quota-policies", h.requireAuth(h.handleSetPolicy))
 
 	// 团队。
 	mux.HandleFunc("GET /api/v1/organizations/{id}/teams", h.requireAuth(h.handleListTeams))
@@ -55,8 +60,13 @@ func (h *Handler) Routes() http.Handler {
 	// 成员(开通成员 = 代发 key,US-01)。
 	mux.HandleFunc("GET /api/v1/organizations/{id}/members", h.requireAuth(h.handleListMembers))
 	mux.HandleFunc("POST /api/v1/organizations/{id}/members", h.requireAuth(h.handleOpenMember))
+	mux.HandleFunc("POST /api/v1/organizations/{id}/members:bulk", h.requireAuth(h.handleBulkOpen))
+	mux.HandleFunc("POST /api/v1/organizations/{id}/members:bulk-status", h.requireAuth(h.handleBulkStatus))
 	mux.HandleFunc("GET /api/v1/members/{id}", h.requireAuth(h.handleGetMember))
+	mux.HandleFunc("PATCH /api/v1/members/{id}", h.requireAuth(h.handleUpdateMember))
+	mux.HandleFunc("POST /api/v1/members/{id}/role", h.requireAuth(h.handleAssignRole))
 	mux.HandleFunc("POST /api/v1/members/{id}/key:rotate", h.requireAuth(h.handleRotateKey))
+	mux.HandleFunc("POST /api/v1/members/{id}/key:ip-whitelist", h.requireAuth(h.handleSetKeyIP))
 
 	// 额度执行(里程碑2):调额 / 临时权限 / 停用恢复。
 	mux.HandleFunc("POST /api/v1/members/{id}/quota:adjust", h.requireAuth(h.handleAdjustQuota))
@@ -88,6 +98,8 @@ func (h *Handler) Routes() http.Handler {
 	// 用量看板(里程碑5)。
 	mux.HandleFunc("GET /api/v1/organizations/{id}/usage", h.requireAuth(h.handleOrgUsage))
 	mux.HandleFunc("GET /api/v1/members/{id}/usage", h.requireAuth(h.handleMemberUsage))
+	mux.HandleFunc("GET /api/v1/organizations/{id}/usage/export", h.requireAuth(h.handleUsageExport))
+	mux.HandleFunc("GET /api/v1/service-status", h.requireAuth(h.handleServiceStatus))
 
 	// 运营方三层支持(里程碑5,08 §2.2/§3.2)。
 	mux.HandleFunc("POST /api/v1/organizations/{id}/support-sessions", h.requireAuth(h.handleOpenSupport))
@@ -107,7 +119,7 @@ func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
-	writeRaw(w, http.StatusOK, map[string]string{"status": "ready", "milestone": "5-dashboard-support"})
+	writeRaw(w, http.StatusOK, map[string]string{"status": "ready", "milestone": "6-feature-complete"})
 }
 
 // writeRaw 写裸 JSON(健康检查不用业务信封,沿用里程碑 0 探针格式)。

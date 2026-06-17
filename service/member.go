@@ -252,6 +252,38 @@ func (s *Service) GetMember(ctx context.Context, c session.Claims, orgID, member
 	return m, nil
 }
 
+// SetKeyIPWhitelist 设自己 key 的 IP 白名单(E22,token allow_ips,支持单 IP/CIDR;就地更新不旋转 key)。
+// 拦截由 new-api 网关数据面执行,与平台可用性解耦(03 §3.4.2)。MVP 仅对本人。
+func (s *Service) SetKeyIPWhitelist(ctx context.Context, c session.Claims, orgID, memberID int64, allowIPs string) error {
+	if err := assertOrgScope(c, orgID); err != nil {
+		return err
+	}
+	if c.MemberID != memberID {
+		return apperr.Forbidden("仅可改本人 key 的 IP 白名单")
+	}
+	m, err := s.store.GetMember(ctx, orgID, memberID)
+	if errors.Is(err, repo.ErrNotFound) {
+		return apperr.NotFound("成员不存在")
+	}
+	if err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	if m.BootstrapState != model.BootstrapDone || len(m.AccessTokenEnc) == 0 || m.NewapiTokenID == nil {
+		return apperr.New(apperr.CodeInvalidParam, 409, "该成员尚无可用 key")
+	}
+	accessToken, err := s.keyring.DecryptString(string(m.AccessTokenEnc))
+	if err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	cred := newapi.MemberCred{NewapiUserID: int(m.NewapiUserID), AccessToken: accessToken}
+	spec := newapi.TokenSpec{Name: deriveTokenName(memberID, m.KeyRotation), UnlimitedQuota: true, ExpiredTime: -1, AllowIPs: allowIPs}
+	if err := s.upstream.UpdateToken(ctx, cred, int(*m.NewapiTokenID), spec); err != nil {
+		return mapUpstream(err)
+	}
+	s.audit(ctx, c, orgID, "set_key_ip_whitelist", "member", &memberID, map[string]any{"allow_ips": allowIPs})
+	return nil
+}
+
 // RotateKey 轮换成员的明文 key(US-07,E21)。MVP 仅支持对自己轮换;
 // 代他人走支持/协助路径(本里程碑不实现)。返回新明文 key,仅此一次。
 func (s *Service) RotateKey(ctx context.Context, c session.Claims, orgID, memberID int64) (apiKey, masked string, err error) {

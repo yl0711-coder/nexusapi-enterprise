@@ -80,6 +80,7 @@ type NewapiAdapter interface {
 	CreateToken(ctx context.Context, cred MemberCred, spec TokenSpec) (tokenID int, err error)
 	RevealTokenKey(ctx context.Context, cred MemberCred, tokenID int) (plaintextKey string, err error)
 	RotateToken(ctx context.Context, cred MemberCred, oldTokenID int, spec TokenSpec) (newTokenID int, key string, err error)
+	UpdateToken(ctx context.Context, cred MemberCred, tokenID int, spec TokenSpec) error
 	DeleteToken(ctx context.Context, cred MemberCred, tokenID int) error
 
 	// 额度/状态走 user_id(管理员身份,不冒充):

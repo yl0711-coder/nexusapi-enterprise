@@ -55,9 +55,13 @@ func (w *QuotaWorker) tick(ctx context.Context) {
 	n, err := w.svc.ReverseExpiredGrants(c, w.batch)
 	if err != nil {
 		w.log.Error("quota-worker 扫到期失败", "err", err)
-		return
-	}
-	if n > 0 {
+	} else if n > 0 {
 		w.log.Info("quota-worker 反向到期 grant", "count", n)
+	}
+	// 周期重置(03 §3.3):按 quota_policy 周期边界重算 override 下发。
+	if rn, rerr := w.svc.ResetDuePolicies(c); rerr != nil {
+		w.log.Error("quota-worker 周期重置失败", "err", rerr)
+	} else if rn > 0 {
+		w.log.Info("quota-worker 周期重置", "members", rn)
 	}
 }

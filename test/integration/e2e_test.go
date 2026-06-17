@@ -538,6 +538,37 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	api.do("POST", fmt.Sprintf("/api/v1/support-sessions/%d/close", supAS.SessionID), opTok, nil, nil)
 	t.Log("里程碑 5 e2e 全通过:用量看板 + 支持态只读(写403)+ 协助态(普通写放行/动钱红线403)")
 
+	// ===== 补全功能(文档要求项)=====
+	// 组织设置 PATCH(E19)。
+	if st := api.do("PATCH", fmt.Sprintf("/api/v1/organizations/%d", orgID), adminTok, map[string]any{"timezone": "Asia/Shanghai"}, nil); st != http.StatusOK {
+		t.Errorf("组织设置 PATCH 应 200,得 %d", st)
+	}
+	// 审批阈值 E13:配 + 读。
+	api.do("PUT", fmt.Sprintf("/api/v1/organizations/%d/approval-rules", orgID), adminTok, map[string]any{"auto_max_quota": 60000000}, nil)
+	var rules struct{ AutoMax int64 `json:"auto_max_quota"` }
+	api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/approval-rules", orgID), adminTok, nil, &rules)
+	if rules.AutoMax != 60000000 { t.Errorf("审批阈值配置回读应=6e7,得 %d", rules.AutoMax) } else { t.Log("E13 审批阈值可配 ok") }
+	// 配额策略 E PUT/GET。
+	api.do("PUT", fmt.Sprintf("/api/v1/organizations/%d/quota-policies", orgID), adminTok, map[string]any{"scope": "member", "scope_id": openResp.MemberID, "period": "daily", "limit_quota": 25000000}, nil)
+	if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/quota-policies", orgID), adminTok, nil, nil); st != http.StatusOK { t.Errorf("配额策略列表应 200,得 %d", st) } else { t.Log("配额策略 PUT/GET ok") }
+	// 角色任命 E17。
+	if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/role", openResp.MemberID), adminTok, map[string]any{"role": "team_leader"}, nil); st != http.StatusOK { t.Errorf("角色任命应 200,得 %d", st) } else { t.Log("E17 角色任命 ok") }
+	api.do("POST", fmt.Sprintf("/api/v1/members/%d/role", openResp.MemberID), adminTok, map[string]any{"role": "member"}, nil) // 改回
+	// 批量导入 US-02。
+	var bulk struct{ Success int `json:"success"`; Failed int `json:"failed"` }
+	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/members:bulk", orgID), adminTok, map[string]any{"names": []string{"批量甲", "批量乙", "批量甲"}, "tier_id": tierResp.ID}, &bulk); st != http.StatusOK || bulk.Success != 2 || bulk.Failed != 1 {
+		t.Errorf("批量导入应 成功2失败1(重名跳过): %+v st=%d", bulk, st)
+	} else { t.Log("US-02 批量导入 ok: 成功2 失败1(同批重名跳过)") }
+	// 服务状态(全角色)。
+	if st := api.do("GET", "/api/v1/service-status", memberTok, nil, nil); st != http.StatusOK { t.Errorf("服务状态应 200,得 %d", st) }
+	// IP 白名单 E22(成员对自己)。
+	if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/key:ip-whitelist", openResp.MemberID), memberTok, map[string]any{"allow_ips": "203.0.113.0/24"}, nil); st != http.StatusOK { t.Errorf("IP白名单应 200,得 %d", st) } else { t.Log("E22 IP白名单 ok") }
+	// 用量导出 CSV(不走信封,200 即可)。
+	if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/usage/export", orgID), adminTok, nil, nil); st != http.StatusOK { t.Errorf("用量导出应 200,得 %d", st) }
+	// 周期重置 worker:有 daily 策略 + 首次未重置 → 应重置该成员(返回>=1 或无错)。
+	if rn, rerr := svc.ResetDuePolicies(ctx); rerr != nil { t.Errorf("周期重置失败: %v", rerr) } else { t.Logf("周期重置 ok: 本次重置成员数=%d", rn) }
+	t.Log("补全功能全通过:组织设置/审批阈值/配额策略/角色任命/批量导入/服务状态/IP白名单/用量导出/周期重置")
+
 	// ===== 里程碑 3b:读 logs 扣费 + 去重 + 硬停(需 new-api 库连接造日志,本地集成 compose)=====
 	if newapiSQLDSN == "" {
 		t.Log("跳过 3b 扣费实测(未设 NEXUS_IT_NEWAPI_SQL_DSN);开关 RBAC 已验")

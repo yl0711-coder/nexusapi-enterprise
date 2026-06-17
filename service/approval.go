@@ -53,15 +53,21 @@ func (s *Service) SubmitApproval(ctx context.Context, c session.Claims, in Submi
 	}
 	days := durationDays(in.Duration)
 
+	// 可配审批阈值(E13);取库,失败则用默认常量兜底。
+	autoMax, autoDays, l1Max := approvalAutoMaxQuota, approvalAutoMaxDays, approvalL1MaxQuota
+	if r, rerr := s.store.GetApprovalRules(ctx, c.OrgID); rerr == nil {
+		autoMax, autoDays, l1Max = r.AutoMaxQuota, r.AutoMaxDays, r.L1MaxQuota
+	}
+
 	a := &model.Approval{
 		OrgID: c.OrgID, ApplicantID: c.MemberID, TeamID: applicant.TeamID, RequestType: reqType,
 		Payload: model.ApprovalPayload{Model: in.Model, Amount: in.Amount, Duration: in.Duration, Reason: in.Reason},
 	}
 
 	switch {
-	case !newModel && in.Amount <= approvalAutoMaxQuota && days <= approvalAutoMaxDays:
+	case !newModel && in.Amount <= autoMax && days <= autoDays:
 		a.State = model.ApprovalAutoApprove
-	case !newModel && in.Amount <= approvalL1MaxQuota:
+	case !newModel && in.Amount <= l1Max:
 		a.State = model.ApprovalPending
 		a.IsLevel2 = false
 	default: // >l1Max 或 开新模型

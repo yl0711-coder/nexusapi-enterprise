@@ -112,6 +112,47 @@ func (s *Store) UpdateOrgDiscount(ctx context.Context, orgID int64, mode string,
 	return err
 }
 
+// UpdateOrgSettings 改组织设置(名称/时区/默认层级;nil=不改,E19)。
+func (s *Store) UpdateOrgSettings(ctx context.Context, orgID int64, name, timezone *string, defaultTierID *int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE organization SET name = COALESCE(?, name), timezone = COALESCE(?, timezone),
+		    default_tier_id = COALESCE(?, default_tier_id)
+		 WHERE id = ? AND deleted_at IS NULL`, name, timezone, defaultTierID, orgID)
+	return err
+}
+
+// ApprovalRules 是可配审批阈值(E13)。
+type ApprovalRules struct {
+	AutoMaxQuota int64
+	AutoMaxDays  int
+	L1MaxQuota   int64
+}
+
+// GetApprovalRules 取组织审批阈值。
+func (s *Store) GetApprovalRules(ctx context.Context, orgID int64) (*ApprovalRules, error) {
+	var r ApprovalRules
+	err := s.db.QueryRowContext(ctx,
+		`SELECT approval_auto_max_quota, approval_auto_max_days, approval_l1_max_quota
+		 FROM organization WHERE id = ? AND deleted_at IS NULL`, orgID).Scan(&r.AutoMaxQuota, &r.AutoMaxDays, &r.L1MaxQuota)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// SetApprovalRules 设组织审批阈值(nil=不改)。
+func (s *Store) SetApprovalRules(ctx context.Context, orgID int64, autoMax, l1Max *int64, autoDays *int) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE organization SET approval_auto_max_quota = COALESCE(?, approval_auto_max_quota),
+		    approval_l1_max_quota = COALESCE(?, approval_l1_max_quota),
+		    approval_auto_max_days = COALESCE(?, approval_auto_max_days)
+		 WHERE id = ? AND deleted_at IS NULL`, autoMax, l1Max, autoDays, orgID)
+	return err
+}
+
 // UpdateOrgStatus 改组织服务状态(active/low/stopped,余额水位驱动,09 §14)。
 func (s *Store) UpdateOrgStatus(ctx context.Context, orgID int64, status string) error {
 	_, err := s.db.ExecContext(ctx,

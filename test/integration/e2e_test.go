@@ -568,14 +568,23 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/usage/export", orgID), adminTok, nil, nil); st != http.StatusOK { t.Errorf("用量导出应 200,得 %d", st) }
 	// 周期重置 worker:有 daily 策略 + 首次未重置 → 应重置该成员(返回>=1 或无错)。
 	if rn, rerr := svc.ResetDuePolicies(ctx); rerr != nil { t.Errorf("周期重置失败: %v", rerr) } else { t.Logf("周期重置 ok: 本次重置成员数=%d", rn) }
-	// D1 退款冲正(运营方减余额)。
-	var balBefore2 struct{ Balance int64 `json:"balance_quota"` }
+	// D1 退款冲正(运营方减余额)+ S1 守恒:total_recharged 不被污染。
+	var balBefore2 struct {
+		Balance    int64 `json:"balance_quota"`
+		Recharged  int64 `json:"total_recharged_quota"`
+	}
 	api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/balance", orgID), opTok, nil, &balBefore2)
 	if balBefore2.Balance > 0 {
 		var deb struct{ After int64 `json:"balance_quota_after"` }
 		if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/debits", orgID), opTok, map[string]any{"amount_quota": 1000000, "reason": "退款冲正"}, &deb); st != http.StatusOK || deb.After != balBefore2.Balance-1000000 {
 			t.Errorf("减余额冲正应 -1e6: before=%d after=%d st=%d", balBefore2.Balance, deb.After, st)
 		} else { t.Log("D1 退款冲正 ok: 运营方减余额 + 留痕") }
+		// S1:冲正后累计充值不变(退款走 total_refunded,不污染 total_recharged)。
+		var balAfter2 struct{ Recharged int64 `json:"total_recharged_quota"` }
+		api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/balance", orgID), opTok, nil, &balAfter2)
+		if balAfter2.Recharged != balBefore2.Recharged {
+			t.Errorf("S1:冲正污染了累计充值 %d→%d", balBefore2.Recharged, balAfter2.Recharged)
+		} else { t.Log("S1 守恒 ok: 冲正不动累计充值(退款独立流水)") }
 		// 组织管理员减余额 → 403(动钱红线)。
 		if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/debits", orgID), adminTok, map[string]any{"amount_quota": 1, "reason": "x"}, nil); st != http.StatusForbidden {
 			t.Errorf("组织管理员减余额应 403,得 %d", st)

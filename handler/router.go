@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/nexusapi-platform/enterprise/pkg/session"
 	"github.com/nexusapi-platform/enterprise/service"
@@ -120,6 +122,13 @@ func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	// R2-S5:真探一次 DB;库不可达则 503,LB/编排据此停打流量。
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := h.svc.Ping(ctx); err != nil {
+		writeRaw(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "reason": "db_unreachable"})
+		return
+	}
 	writeRaw(w, http.StatusOK, map[string]string{"status": "ready", "milestone": "6-feature-complete"})
 }
 

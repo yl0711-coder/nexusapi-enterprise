@@ -102,7 +102,7 @@ const VIEWS = {};
 VIEWS.orgs = async () => {
   const d = await api("GET", "/organizations?page=1&page_size=50", null);
   const rows = (d.list || []).map(o => `<tr>
-    <td><span class="lk" onclick="enterOrg(${o.id},'${esc(o.name)}')">${esc(o.name)}</span><div class="mini">${esc(o.slug)}</div></td>
+    <td><span class="lk" style="display:inline-block;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle" title="${esc(o.name)}" onclick="enterOrg(${o.id},'${esc(o.name)}')">${esc(o.name)}</span><div class="mini">${esc(o.slug)}</div></td>
     <td>${pill(o.status, o.status === "active" ? "ok" : o.status === "low" ? "warn" : "bad")}</td>
     <td>${esc(o.timezone)}</td><td>${esc(o.billing_mode)}</td>
     <td class="right"><span class="btn sm" onclick="enterOrg(${o.id},'${esc(o.name)}')">进入</span></td></tr>`).join("");
@@ -328,8 +328,9 @@ VIEWS.myusage = async () => {
   const top = (u.by_model || []).slice(0, 8);
   const max = Math.max(1, ...top.map(b => b.consumed_quota));
   const bars = top.map(b => `<div class="bar"><span class="nm">${esc(b.key)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / max * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`).join("") || '<div class="empty">近 7 天暂无用量</div>';
+  const calls = top.reduce((a, b) => a + (b.count || 0), 0);
   return head("我的用量", "近 7 天消耗")
-    + `<div class="cards">${kpi("近 7 天消耗", money(u.total_quota), "")}${kpi("", "", "")}${kpi("", "", "")}${kpi("", "", "")}</div>
+    + `<div class="cards">${kpi("近 7 天消耗", money(u.total_quota), "读 new-api 结算")}${kpi("涉及模型", String(top.length), "近 7 天")}${kpi("调用次数", String(calls), "近 7 天")}${kpi("当前状态", '<span class="pill ok">正常</span>', "")}</div>
     <div class="panel"><div class="ph">按模型</div><div class="pb">${bars}</div></div>`;
 };
 VIEWS.mykey = async () => {

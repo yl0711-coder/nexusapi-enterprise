@@ -141,10 +141,10 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 			return totalDeducted, err
 		}
 		totalDeducted += amount
-		// 守恒断言:balance 必须 == total_recharged - total_consumed。
-		if bal.Balance != bal.TotalRecharged-bal.TotalConsumed {
+		// 守恒断言:balance 必须 == total_recharged - total_refunded - total_consumed(R2-S1)。
+		if bal.Balance != bal.TotalRecharged-bal.TotalRefunded-bal.TotalConsumed {
 			s.log.Error("守恒断言失败!", "org_id", orgID, "balance", bal.Balance,
-				"recharged", bal.TotalRecharged, "consumed", bal.TotalConsumed)
+				"recharged", bal.TotalRecharged, "refunded", bal.TotalRefunded, "consumed", bal.TotalConsumed)
 		}
 		if err := s.recomputeOrgStatus(ctx, orgID, bal); err != nil {
 			s.log.Error("结算后重算组织状态失败", "org_id", orgID, "err", err)

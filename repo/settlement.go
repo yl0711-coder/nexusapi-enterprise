@@ -94,7 +94,7 @@ func (s *Store) DeductBalance(ctx context.Context, orgID, amount int64) (*model.
 	// balance 赋值放前面用原值算,避免 MySQL 左到右求值把 amount 减两次(同 AddRecharge 的坑)。
 	res, err := tx.ExecContext(ctx,
 		`UPDATE company_balance
-		    SET balance = total_recharged - total_consumed - ?,
+		    SET balance = total_recharged - total_consumed - total_refunded - ?,
 		        total_consumed = total_consumed + ?,
 		        version = version + 1
 		  WHERE org_id = ? AND version = ?`, amount, amount, orgID, ver)
@@ -106,9 +106,9 @@ func (s *Store) DeductBalance(ctx context.Context, orgID, amount int64) (*model.
 	}
 	var b model.Balance
 	if err := tx.QueryRowContext(ctx,
-		`SELECT org_id, total_recharged, total_consumed, balance, low_watermark, version
+		`SELECT org_id, total_recharged, total_consumed, total_refunded, balance, low_watermark, version
 		 FROM company_balance WHERE org_id = ?`, orgID).Scan(
-		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.Balance, &b.LowWatermark, &b.Version); err != nil {
+		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.TotalRefunded, &b.Balance, &b.LowWatermark, &b.Version); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

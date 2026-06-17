@@ -144,6 +144,7 @@ type Balance struct {
 	OrgID          int64
 	TotalRecharged int64
 	TotalConsumed  int64
+	TotalRefunded  int64
 	Balance        int64
 	LowWatermark   int64
 	Version        int64

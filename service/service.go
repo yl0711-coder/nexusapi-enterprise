@@ -56,6 +56,9 @@ func New(d Deps) *Service {
 // now 便于将来注入测试时钟。
 func (s *Service) now() time.Time { return time.Now().UTC() }
 
+// Ping 探活底层库(就绪探针用,R2-S5:readyz 真探 DB)。
+func (s *Service) Ping(ctx context.Context) error { return s.store.DB().PingContext(ctx) }
+
 // withTimeout 给上游/库调用统一兜一个短超时上界(防 handler 无界等待)。
 func withTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, d)

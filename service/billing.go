@@ -82,7 +82,7 @@ func (s *Service) DebitBalance(ctx context.Context, c session.Claims, orgID int6
 	if in.Reason == "" {
 		return nil, apperr.InvalidParam("冲正须填原因(留痕)")
 	}
-	bal, err := s.store.DebitBalance(ctx, orgID, in.AmountQuota)
+	bal, err := s.store.DebitBalance(ctx, orgID, in.AmountQuota, in.Reason, actorOf(c))
 	if errors.Is(err, repo.ErrInsufficientBalance) {
 		return nil, apperr.InvalidParam("冲正金额超过当前余额")
 	}

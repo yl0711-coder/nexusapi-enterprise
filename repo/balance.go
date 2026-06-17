@@ -28,9 +28,9 @@ func (s *Store) GetOrCreateBalance(ctx context.Context, orgID int64) (*model.Bal
 func (s *Store) getBalance(ctx context.Context, orgID int64) (*model.Balance, error) {
 	var b model.Balance
 	err := s.db.QueryRowContext(ctx,
-		`SELECT org_id, total_recharged, total_consumed, balance, low_watermark, version
+		`SELECT org_id, total_recharged, total_consumed, total_refunded, balance, low_watermark, version
 		 FROM company_balance WHERE org_id = ?`, orgID).Scan(
-		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.Balance, &b.LowWatermark, &b.Version)
+		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.TotalRefunded, &b.Balance, &b.LowWatermark, &b.Version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -75,7 +75,7 @@ func (s *Store) AddRecharge(ctx context.Context, r *model.Recharge) (*model.Bala
 	// 故 balance 赋值放在 total_recharged 之前,用其**原值**算,避免把 amount 加两次。
 	res, err := tx.ExecContext(ctx,
 		`UPDATE company_balance
-		    SET balance = total_recharged + ? - total_consumed,
+		    SET balance = total_recharged + ? - total_consumed - total_refunded,
 		        total_recharged = total_recharged + ?,
 		        version = version + 1
 		  WHERE org_id = ? AND version = ?`, r.Amount, r.Amount, r.OrgID, ver)
@@ -88,9 +88,9 @@ func (s *Store) AddRecharge(ctx context.Context, r *model.Recharge) (*model.Bala
 
 	var b model.Balance
 	if err := tx.QueryRowContext(ctx,
-		`SELECT org_id, total_recharged, total_consumed, balance, low_watermark, version
+		`SELECT org_id, total_recharged, total_consumed, total_refunded, balance, low_watermark, version
 		 FROM company_balance WHERE org_id = ?`, r.OrgID).Scan(
-		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.Balance, &b.LowWatermark, &b.Version); err != nil {
+		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.TotalRefunded, &b.Balance, &b.LowWatermark, &b.Version); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -99,9 +99,10 @@ func (s *Store) AddRecharge(ctx context.Context, r *model.Recharge) (*model.Bala
 	return &b, nil
 }
 
-// DebitBalance 减余额冲正(退款,US-12 执行半段):total_recharged -= amount(net 预付下调),
-// balance 重算,乐观锁。amount 必须 ≤ 当前余额(冲正不得使余额为负)。返回扣后余额。
-func (s *Store) DebitBalance(ctx context.Context, orgID, amount int64) (*model.Balance, error) {
+// DebitBalance 减余额冲正(退款,US-12 执行半段,R2-S1 修正):**不动 total_recharged**,
+// 改 total_refunded += amount(守恒 balance = 充值 - 退款 - 消耗),并落独立 refund 流水。
+// amount 必须 ≤ 当前余额(冲正不得使余额为负)。乐观锁。返回扣后余额。
+func (s *Store) DebitBalance(ctx context.Context, orgID, amount int64, reason, operator string) (*model.Balance, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -118,10 +119,15 @@ func (s *Store) DebitBalance(ctx context.Context, orgID, amount int64) (*model.B
 	if amount > bal {
 		return nil, ErrInsufficientBalance
 	}
+	// 独立退款流水(可变 recharge 表保持不动,审计可追溯)。
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO refund (org_id, amount, reason, operator) VALUES (?, ?, ?, ?)`, orgID, amount, reason, operator); err != nil {
+		return nil, err
+	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE company_balance
-		    SET balance = total_recharged - total_consumed - ?,
-		        total_recharged = total_recharged - ?,
+		    SET balance = total_recharged - total_consumed - total_refunded - ?,
+		        total_refunded = total_refunded + ?,
 		        version = version + 1
 		  WHERE org_id = ? AND version = ?`, amount, amount, orgID, ver)
 	if err != nil {
@@ -132,9 +138,9 @@ func (s *Store) DebitBalance(ctx context.Context, orgID, amount int64) (*model.B
 	}
 	var b model.Balance
 	if err := tx.QueryRowContext(ctx,
-		`SELECT org_id, total_recharged, total_consumed, balance, low_watermark, version
+		`SELECT org_id, total_recharged, total_consumed, total_refunded, balance, low_watermark, version
 		 FROM company_balance WHERE org_id = ?`, orgID).Scan(
-		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.Balance, &b.LowWatermark, &b.Version); err != nil {
+		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.TotalRefunded, &b.Balance, &b.LowWatermark, &b.Version); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

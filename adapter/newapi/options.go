@@ -39,6 +39,14 @@ func (a *Adapter) GetGroupGroupRatio(ctx context.Context, userGroup, tokenGroup 
 // SetGroupGroupRatio 设「用户分组×令牌分组」特殊倍率(merge-preserve:读现状 → 只覆盖这一个 key →
 // 写回,绝不抹掉别人/手工配的其它条目,G 类字段所有权)。是平台唯一写的 option。
 func (a *Adapter) SetGroupGroupRatio(ctx context.Context, userGroup, tokenGroup string, ratio float64) error {
+	// 单写者锁(R2-S2/G):option 是全局 JSON、读-改-写非原子,并发会丢更新(动钱)。
+	// 用 KeyedLocker 串行化所有 GroupGroupRatio 写(MVP 单实例;多实例换分布式锁同栈)。
+	release, lerr := a.locker.Acquire(ctx, "option:GroupGroupRatio")
+	if lerr != nil {
+		return &UpstreamError{Step: stepSetOption, PlatformCode: CodeInternal, Message: "获取折扣写锁失败", class: classRetryable, cause: lerr}
+	}
+	defer release()
+
 	m, err := a.getGroupGroupRatioMap(ctx)
 	if err != nil {
 		return err

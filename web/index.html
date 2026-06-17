@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NexusAPI 企业管理平台</title>
+<link rel="stylesheet" href="app.css">
+<style>
+/* 生产前端补充:登录表单与少量布局,沿用原型设计变量 */
+.loginbox .fld input{margin:0}
+.kvtable td{padding:7px 0;border-bottom:1px solid var(--line)}.kvtable td.k{color:var(--muted);width:42%}
+.errline{color:var(--bad);font-size:12.5px;margin-top:8px;min-height:16px}
+.badge-dot{display:inline-block;min-width:16px;height:16px;line-height:16px;text-align:center;background:var(--bad);color:#fff;border-radius:9px;font-size:11px;padding:0 4px;margin-left:6px}
+</style>
+</head>
+<body>
+<!-- 登录覆盖层 -->
+<div class="login" id="login">
+  <div class="loginbox">
+    <div class="lg"><span class="mk" style="width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--brand),var(--brand2));color:#fff;display:grid;place-items:center;font-weight:800">N</span> 企业管理台</div>
+    <div class="mini" style="margin:6px 0 20px">企业 LLM 用量与配额管理平台</div>
+    <button class="ssobtn" disabled style="opacity:.55"><b style="color:#07c160">企</b> 企业微信扫码登录 <span class="mini">· V2</span></button>
+    <button class="ssobtn" disabled style="opacity:.55"><b style="color:#3b82f6">钉</b> 钉钉登录 <span class="mini">· V2</span></button>
+    <div class="divider"><span>账号登录</span></div>
+    <div class="fld"><label>账号(邮箱)</label><input id="lg_email" placeholder="you@company.com" value="ops@nexus.local"></div>
+    <div class="fld"><label>密码</label><input id="lg_pw" type="password" placeholder="密码" value="OpsPass123"></div>
+    <div class="fld"><label>动态验证码 (2FA)</label><input id="lg_otp" placeholder="6 位验证码 · 本期可留空"></div>
+    <button class="btn pri" style="width:100%;padding:11px" id="lg_btn" onclick="doLogin()">登录</button>
+    <div class="errline" id="lg_err"></div>
+  </div>
+</div>
+
+<!-- 主应用 -->
+<div id="app"></div>
+
+<!-- 模态 + toast -->
+<div class="mask" id="mask"><div class="modal" id="modal"></div></div>
+<div class="toast" id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

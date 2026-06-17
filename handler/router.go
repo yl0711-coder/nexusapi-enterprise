@@ -7,6 +7,7 @@ import (
 
 	"github.com/nexusapi-platform/enterprise/pkg/session"
 	"github.com/nexusapi-platform/enterprise/service"
+	"github.com/nexusapi-platform/enterprise/web"
 )
 
 // Handler 持有依赖,挂载所有平台 REST 路由(10 §1.7,前缀 /api/v1)。
@@ -92,6 +93,10 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/organizations/{id}/support-sessions", h.requireAuth(h.handleOpenSupport))
 	mux.HandleFunc("GET /api/v1/support-sessions/{id}", h.requireAuth(h.handleGetSupport))
 	mux.HandleFunc("POST /api/v1/support-sessions/{id}/close", h.requireAuth(h.handleCloseSupport))
+
+	// 前端 SPA(catch-all,最不具体,/api/v1 与 /healthz 等更具体的先匹配):
+	// /api/v1/* 之外的路径走内嵌静态前端;/ 返回 index.html。
+	mux.Handle("GET /", http.FileServerFS(web.FS))
 
 	// 中间件链:request_id → recover → mux。
 	return withRequestID(h.recoverPanic(mux))

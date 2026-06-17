@@ -117,7 +117,7 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	}
 	var tierResp struct{ ID int64 `json:"id"` }
 	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/tiers", orgID), adminTok,
-		map[string]any{"name": "标准档", "model_set": []string{"gpt-5.4", "claude-sonnet-4-6"}, "monthly_limit": 25000000}, &tierResp); st != http.StatusCreated {
+		map[string]any{"name": "标准档", "model_set": []string{"gpt-5.4", "claude-sonnet-4-6", "gpt-5-mini"}, "monthly_limit": 25000000, "model_cap": map[string]any{"gpt-5-mini": 1000000}}, &tierResp); st != http.StatusCreated {
 		t.Fatalf("建层级 HTTP=%d", st)
 	}
 	if st := api.do("POST", fmt.Sprintf("/api/v1/tiers/%d/default", tierResp.ID), adminTok, nil, nil); st != http.StatusOK {
@@ -622,6 +622,14 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		t.Errorf("结算应扣 4e6: deducted=%d before=%d after=%d", deducted, balB3b, balAfter)
 	} else {
 		t.Logf("3b 读logs扣费 ok: 扣 %d,余额 %d→%d", deducted, balB3b, balAfter)
+	}
+
+	// E4 单模型软限额:gpt-5-mini 今日 4e6 > model_cap 1e6 → 成员应收到 soft_limit 告警。
+	rawN := api.doRaw("GET", "/api/v1/notifications", memberTok, nil)
+	if !strings.Contains(rawN, "soft_limit") {
+		t.Errorf("单模型超 cap 应生成 soft_limit 告警,通知里未见:%.200s", rawN)
+	} else {
+		t.Log("E4 单模型软限额 ok: gpt-5-mini 超 model_cap → 成员收到 soft_limit 告警")
 	}
 
 	// 再结算一次 → 去重不重复扣。

@@ -64,7 +64,8 @@ type Tier struct {
 	ID           int64
 	OrgID        int64
 	Name         string
-	ModelSet     []string // 允许的模型集合;空 = 继承组织默认
+	ModelSet     []string         // 允许的模型集合;空 = 继承组织默认
+	ModelCap     map[string]int64 // 单模型日上限(quota),如 {"claude-opus":50000};软限额(E4)
 	DailyLimit   *int64
 	WeeklyLimit  *int64
 	MonthlyLimit *int64

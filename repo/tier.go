@@ -14,15 +14,19 @@ func (s *Store) CreateTier(ctx context.Context, t *model.Tier) (int64, error) {
 	if t.Status == "" {
 		t.Status = model.StatusActive
 	}
-	var modelSet any
+	var modelSet, modelCap any
 	if len(t.ModelSet) > 0 {
 		b, _ := json.Marshal(t.ModelSet)
 		modelSet = string(b)
 	}
+	if len(t.ModelCap) > 0 {
+		b, _ := json.Marshal(t.ModelCap)
+		modelCap = string(b)
+	}
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO tier (org_id, name, model_set, daily_limit, weekly_limit, monthly_limit, newapi_group, is_default, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.OrgID, t.Name, modelSet, t.DailyLimit, t.WeeklyLimit, t.MonthlyLimit, t.NewapiGroup, t.IsDefault, t.Status)
+		`INSERT INTO tier (org_id, name, model_set, model_cap, daily_limit, weekly_limit, monthly_limit, newapi_group, is_default, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.OrgID, t.Name, modelSet, modelCap, t.DailyLimit, t.WeeklyLimit, t.MonthlyLimit, t.NewapiGroup, t.IsDefault, t.Status)
 	if err != nil {
 		if isDupKey(err) {
 			return 0, ErrConflict
@@ -35,7 +39,7 @@ func (s *Store) CreateTier(ctx context.Context, t *model.Tier) (int64, error) {
 // GetTier 取层级,强制 org_id 谓词。
 func (s *Store) GetTier(ctx context.Context, orgID, id int64) (*model.Tier, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, org_id, name, model_set, daily_limit, weekly_limit, monthly_limit, newapi_group, is_default, status, created_at, updated_at
+		`SELECT id, org_id, name, model_set, model_cap, daily_limit, weekly_limit, monthly_limit, newapi_group, is_default, status, created_at, updated_at
 		 FROM tier WHERE id = ? AND org_id = ? AND deleted_at IS NULL`, id, orgID)
 	return scanTier(row)
 }
@@ -43,7 +47,7 @@ func (s *Store) GetTier(ctx context.Context, orgID, id int64) (*model.Tier, erro
 // ListTiers 列出 org 下层级。
 func (s *Store) ListTiers(ctx context.Context, orgID int64) ([]*model.Tier, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, org_id, name, model_set, daily_limit, weekly_limit, monthly_limit, newapi_group, is_default, status, created_at, updated_at
+		`SELECT id, org_id, name, model_set, model_cap, daily_limit, weekly_limit, monthly_limit, newapi_group, is_default, status, created_at, updated_at
 		 FROM tier WHERE org_id = ? AND deleted_at IS NULL ORDER BY id`, orgID)
 	if err != nil {
 		return nil, err
@@ -94,8 +98,8 @@ func (s *Store) SetDefaultTier(ctx context.Context, orgID, tierID int64) error {
 
 func scanTier(r rowScanner) (*model.Tier, error) {
 	var t model.Tier
-	var modelSet sql.NullString
-	err := r.Scan(&t.ID, &t.OrgID, &t.Name, &modelSet, &t.DailyLimit, &t.WeeklyLimit,
+	var modelSet, modelCap sql.NullString
+	err := r.Scan(&t.ID, &t.OrgID, &t.Name, &modelSet, &modelCap, &t.DailyLimit, &t.WeeklyLimit,
 		&t.MonthlyLimit, &t.NewapiGroup, &t.IsDefault, &t.Status, &t.CreatedAt, &t.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -105,6 +109,9 @@ func scanTier(r rowScanner) (*model.Tier, error) {
 	}
 	if modelSet.Valid && modelSet.String != "" {
 		_ = json.Unmarshal([]byte(modelSet.String), &t.ModelSet)
+	}
+	if modelCap.Valid && modelCap.String != "" {
+		_ = json.Unmarshal([]byte(modelCap.String), &t.ModelCap)
 	}
 	return &t, nil
 }

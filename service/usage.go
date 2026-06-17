@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"sort"
+	"time"
 
 	"github.com/nexusapi-platform/enterprise/model"
 	"github.com/nexusapi-platform/enterprise/pkg/apperr"
@@ -60,23 +61,64 @@ func (s *Service) MemberUsage(ctx context.Context, c session.Claims, orgID, memb
 	return s.aggregateUsage(ctx, sinceHours, &orgID, &uid)
 }
 
-// aggregateUsage 读窗口内消费 logs 聚合。orgFilter!=nil 只算该 org;userFilter!=nil 只算该 new-api user。
+// aggregateUsage 用量聚合(B4:已结算 usage_ledger 为主 + 当期未结小窗口 logs 为辅)。
+// orgFilter 必给(看板按组织);userFilter!=nil 只算该 new-api user。历史读 ledger(分页安全、不压
+// new-api);只对"结算游标→now"小窗口实时读 logs 补当期(限 2 页,绝不长段全量)。
 func (s *Service) aggregateUsage(ctx context.Context, sinceHours int, orgFilter *int64, userFilter *int64) (*UsageReport, error) {
 	if sinceHours <= 0 || sinceHours > 24*31 {
-		sinceHours = 24 // 默认近 24h
+		sinceHours = 24
 	}
 	until := s.now().Unix()
 	since := until - int64(sinceHours)*3600
-
 	byModel := map[string]*UsageBucket{}
 	byMember := map[string]*UsageBucket{}
-	memberCache := map[int64]*model.Member{}
 	var total int64
+	add := func(modelName string, uid, q int64) {
+		total += q
+		bm := byModel[modelName]
+		if bm == nil {
+			bm = &UsageBucket{Key: modelName}
+			byModel[modelName] = bm
+		}
+		bm.ConsumedQuota += q
+		bm.Count++
+		mk := itoa(uid)
+		bmem := byMember[mk]
+		if bmem == nil {
+			bmem = &UsageBucket{Key: mk}
+			byMember[mk] = bmem
+		}
+		bmem.ConsumedQuota += q
+		bmem.Count++
+	}
 
-	for page := 1; page <= usageMaxPages; page++ {
-		entries, totalCnt, err := s.upstream.ReadConsumptionLogs(ctx, since, until, page, 100)
+	// 1) 已结算 ledger 为主。
+	if orgFilter != nil {
+		lm, lu, _, err := s.store.AggregateUsageLedger(ctx, *orgFilter, time.Unix(since, 0).UTC(), userFilter)
 		if err != nil {
-			return nil, mapUpstream(err)
+			return nil, apperr.Internal("").WithCause(err)
+		}
+		for m, q := range lm {
+			bm := &UsageBucket{Key: m, ConsumedQuota: q, Count: 1}
+			byModel[m] = bm
+			total += q
+		}
+		for uid, q := range lu {
+			byMember[itoa(uid)] = &UsageBucket{Key: itoa(uid), ConsumedQuota: q, Count: 1}
+		}
+	}
+
+	// 2) 当期未结小窗口 logs(结算游标→now,限 2 页;读不到则看板降级只用 ledger)。
+	cur, cerr := s.store.GetOrCreateCursor(ctx, 0)
+	liveStart := since
+	if cerr == nil && cur.LastSettledTS > liveStart {
+		liveStart = cur.LastSettledTS
+	}
+	memberCache := map[int64]*model.Member{}
+	for page := 1; page <= 2 && liveStart < until; page++ {
+		entries, totalCnt, err := s.upstream.ReadConsumptionLogs(ctx, liveStart, until, page, 100)
+		if err != nil {
+			break
 		}
 		for _, e := range entries {
 			if e.Quota <= 0 {
@@ -100,22 +142,7 @@ func (s *Service) aggregateUsage(ctx context.Context, sinceHours int, orgFilter 
 					continue
 				}
 			}
-			total += e.Quota
-			bm := byModel[e.ModelName]
-			if bm == nil {
-				bm = &UsageBucket{Key: e.ModelName}
-				byModel[e.ModelName] = bm
-			}
-			bm.ConsumedQuota += e.Quota
-			bm.Count++
-			mk := itoa(int64(e.UserID))
-			bmem := byMember[mk]
-			if bmem == nil {
-				bmem = &UsageBucket{Key: mk}
-				byMember[mk] = bmem
-			}
-			bmem.ConsumedQuota += e.Quota
-			bmem.Count++
+			add(e.ModelName, int64(e.UserID), e.Quota)
 		}
 		if page*100 >= totalCnt {
 			break

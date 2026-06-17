@@ -14,6 +14,7 @@ import (
 type CreateTierInput struct {
 	Name         string
 	ModelSet     []string
+	ModelCap     map[string]int64
 	DailyLimit   *int64
 	WeeklyLimit  *int64
 	MonthlyLimit *int64
@@ -32,7 +33,7 @@ func (s *Service) CreateTier(ctx context.Context, c session.Claims, orgID int64,
 		return nil, apperr.InvalidParam("层级名称必填")
 	}
 	id, err := s.store.CreateTier(ctx, &model.Tier{
-		OrgID: orgID, Name: in.Name, ModelSet: in.ModelSet,
+		OrgID: orgID, Name: in.Name, ModelSet: in.ModelSet, ModelCap: in.ModelCap,
 		DailyLimit: in.DailyLimit, WeeklyLimit: in.WeeklyLimit, MonthlyLimit: in.MonthlyLimit,
 		NewapiGroup: in.NewapiGroup,
 	})

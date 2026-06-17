@@ -108,8 +108,9 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 		}
 	}
 
-	// 2) 去重落账 + 累计每组织新增消耗。
+	// 2) 去重落账 + 累计每组织新增消耗 + 收集本次新落账桶(供单模型软限额检测)。
 	perOrg := map[int64]int64{}
+	var settled []*bucketAgg
 	for _, a := range aggs {
 		inserted, err := s.store.UpsertLedgerBucket(ctx, &repo.LedgerBucket{
 			OrgID: a.orgID, MemberID: a.memberID, NewapiUserID: a.newapiUserID, TeamID: a.teamID,
@@ -121,6 +122,7 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 		}
 		if inserted {
 			perOrg[a.orgID] += a.consumed
+			settled = append(settled, a)
 		}
 	}
 
@@ -150,6 +152,11 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 		s.auditSystem(ctx, orgID, "settlement_deduct", "balance", &orgID, map[string]any{
 			"deducted": amount, "balance_after": bal.Balance,
 		}, "ok")
+	}
+
+	// 3.5) 单模型日上限软限额检测(E4:跨阈值则告警;默认仅告警,收权限可配)。
+	for _, a := range settled {
+		s.checkModelSoftLimit(ctx, a)
 	}
 
 	// 4) 推进水位:全部读尽 → 推到 until;否则推到已处理的最大 ts(dedup 兜底重叠)。
@@ -193,6 +200,42 @@ func (s *Service) restoreOrgQuotas(ctx context.Context, orgID int64) error {
 	}
 	s.auditSystem(ctx, orgID, "restore_quota", "organization", &orgID, map[string]any{"members": len(members)}, "ok")
 	return nil
+}
+
+// checkModelSoftLimit 检测某成员某模型今日累计是否刚跨过层级 model_cap;跨过则告警(E4,默认仅告警)。
+// "收该模型权限"作可配升级项(改令牌 model_limits 去掉该模型),本期仅告警避免 logs 滞后误伤。
+func (s *Service) checkModelSoftLimit(ctx context.Context, a *bucketAgg) {
+	member, err := s.store.GetMember(ctx, a.orgID, a.memberID)
+	if err != nil || member.TierID == nil {
+		return
+	}
+	tier, err := s.store.GetTier(ctx, a.orgID, *member.TierID)
+	if err != nil || len(tier.ModelCap) == 0 {
+		return
+	}
+	cap, ok := tier.ModelCap[a.model]
+	if !ok || cap <= 0 {
+		return
+	}
+	now := s.now()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	sumToday, err := s.store.SumMemberModelToday(ctx, a.orgID, a.newapiUserID, a.model, dayStart)
+	if err != nil {
+		return
+	}
+	// 仅在"本次落账刚把今日累计推过上限"时告警一次(天然去重)。
+	if sumToday-a.consumed <= cap && sumToday > cap {
+		title := fmt.Sprintf("单模型用量超限:%s", a.model)
+		body := fmt.Sprintf("模型 %s 今日已用 %d 超上限 %d(软限额,默认仅告警)", a.model, sumToday, cap)
+		s.notify(ctx, a.orgID, a.memberID, "soft_limit", title, body)
+		if admins, e := s.store.ListOrgAdminIDs(ctx, a.orgID); e == nil {
+			for _, aid := range admins {
+				s.notify(ctx, a.orgID, aid, "soft_limit", title, body)
+			}
+		}
+		s.auditSystem(ctx, a.orgID, "model_soft_limit_exceeded", "member", &a.memberID,
+			map[string]any{"model": a.model, "today": sumToday, "cap": cap}, "ok")
+	}
 }
 
 // hourBucket 把 unix 秒取整到小时桶(UTC)。

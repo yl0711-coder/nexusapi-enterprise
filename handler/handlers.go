@@ -172,12 +172,13 @@ func (h *Handler) handleListTiers(w http.ResponseWriter, r *http.Request) {
 }
 
 type createTierReq struct {
-	Name         string   `json:"name"`
-	ModelSet     []string `json:"model_set"`
-	DailyLimit   *int64   `json:"daily_limit"`
-	WeeklyLimit  *int64   `json:"weekly_limit"`
-	MonthlyLimit *int64   `json:"monthly_limit"`
-	NewapiGroup  *string  `json:"newapi_group"`
+	Name         string           `json:"name"`
+	ModelSet     []string         `json:"model_set"`
+	ModelCap     map[string]int64 `json:"model_cap"`
+	DailyLimit   *int64           `json:"daily_limit"`
+	WeeklyLimit  *int64           `json:"weekly_limit"`
+	MonthlyLimit *int64           `json:"monthly_limit"`
+	NewapiGroup  *string          `json:"newapi_group"`
 }
 
 func (h *Handler) handleCreateTier(w http.ResponseWriter, r *http.Request) {
@@ -193,7 +194,7 @@ func (h *Handler) handleCreateTier(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t, err := h.svc.CreateTier(r.Context(), c, orgID, service.CreateTierInput{
-		Name: in.Name, ModelSet: in.ModelSet, DailyLimit: in.DailyLimit,
+		Name: in.Name, ModelSet: in.ModelSet, ModelCap: in.ModelCap, DailyLimit: in.DailyLimit,
 		WeeklyLimit: in.WeeklyLimit, MonthlyLimit: in.MonthlyLimit, NewapiGroup: in.NewapiGroup,
 	})
 	if err != nil {

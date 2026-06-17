@@ -99,6 +99,25 @@ func (s *Store) UpdateMemberRole(ctx context.Context, orgID, memberID int64, rol
 	return err
 }
 
+// ListOrgAdminIDs 列组织管理员的 member id(软限额/告警的通知对象)。
+func (s *Store) ListOrgAdminIDs(ctx context.Context, orgID int64) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM member WHERE org_id = ? AND role = 'org_admin' AND deleted_at IS NULL`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // GetMember 取成员,强制 org_id 谓词(跨 org → ErrNotFound)。
 func (s *Store) GetMember(ctx context.Context, orgID, id int64) (*model.Member, error) {
 	row := s.db.QueryRowContext(ctx, memberSelect+` WHERE id = ? AND org_id = ? AND deleted_at IS NULL`, id, orgID)

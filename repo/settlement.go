@@ -117,6 +117,49 @@ func (s *Store) DeductBalance(ctx context.Context, orgID, amount int64) (*model.
 	return &b, nil
 }
 
+// AggregateUsageLedger 从已结算台账聚合用量(看板主数据源,B4:分页安全、不压 new-api)。
+// since 起的 time_bucket;userFilter!=nil 只算该 new-api user。返回 按模型 / 按用户 的消耗 + 总量。
+func (s *Store) AggregateUsageLedger(ctx context.Context, orgID int64, since time.Time, userFilter *int64) (byModel map[string]int64, byUser map[int64]int64, total int64, err error) {
+	byModel = map[string]int64{}
+	byUser = map[int64]int64{}
+	cond := "org_id = ? AND time_bucket >= ?"
+	args := []any{orgID, since}
+	if userFilter != nil {
+		cond += " AND newapi_user_id = ?"
+		args = append(args, *userFilter)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT model_name, newapi_user_id, SUM(consumed_quota) FROM usage_ledger WHERE `+cond+` GROUP BY model_name, newapi_user_id`, args...)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var model string
+		var uid, q int64
+		if err := rows.Scan(&model, &uid, &q); err != nil {
+			return nil, nil, 0, err
+		}
+		byModel[model] += q
+		byUser[uid] += q
+		total += q
+	}
+	return byModel, byUser, total, rows.Err()
+}
+
+// SumMemberModelToday 累计某成员某模型在 since 之后的已结算消耗(单模型软限额 E4 用)。
+func (s *Store) SumMemberModelToday(ctx context.Context, orgID, newapiUserID int64, model string, since time.Time) (int64, error) {
+	var q sql.NullInt64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT SUM(consumed_quota) FROM usage_ledger
+		 WHERE org_id = ? AND newapi_user_id = ? AND model_name = ? AND time_bucket >= ?`,
+		orgID, newapiUserID, model, since).Scan(&q)
+	if err != nil {
+		return 0, err
+	}
+	return q.Int64, nil
+}
+
 // GetMemberByNewapiUserID 按 new-api user_id 反查成员(结算把 log 映射到成员/组织)。无 org 谓词(leader 跨租户)。
 func (s *Store) GetMemberByNewapiUserID(ctx context.Context, newapiUserID int64) (*model.Member, error) {
 	row := s.db.QueryRowContext(ctx, memberSelect+` WHERE newapi_user_id = ? AND deleted_at IS NULL`, newapiUserID)

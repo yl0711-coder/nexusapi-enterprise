@@ -18,8 +18,19 @@ func (s *Service) ResetDuePolicies(ctx context.Context) (int, error) {
 	}
 	now := s.now()
 	reset := 0
+	locCache := map[int64]*time.Location{}
 	for _, p := range policies {
-		boundary := periodBoundary(p.Period, now)
+		loc := locCache[p.OrgID]
+		if loc == nil {
+			loc = time.UTC
+			if org, oerr := s.store.GetOrganization(ctx, p.OrgID); oerr == nil && org.Timezone != "" {
+				if l, lerr := time.LoadLocation(org.Timezone); lerr == nil {
+					loc = l
+				}
+			}
+			locCache[p.OrgID] = loc
+		}
+		boundary := periodBoundary(p.Period, now, loc)
 		if boundary.IsZero() {
 			continue
 		}
@@ -77,20 +88,22 @@ func (s *Service) policyScopeMembers(ctx context.Context, p *repo.QuotaPolicy) (
 	}
 }
 
-// periodBoundary 当期重置边界(UTC 期初):daily=今日 0 点;weekly=本周一 0 点;monthly=本月 1 日 0 点。
-func periodBoundary(period string, now time.Time) time.Time {
-	y, mo, d := now.UTC().Date()
+// periodBoundary 当期重置边界(按组织时区 loc 的本地期初,B3:anchor 到日界 00:00):
+// daily=今日 0 点;weekly=本周一 0 点;monthly=本月 1 日 0 点。HH:MM 级 anchor 可后续细化。
+func periodBoundary(period string, now time.Time, loc *time.Location) time.Time {
+	ln := now.In(loc)
+	y, mo, d := ln.Date()
 	switch period {
 	case "daily":
-		return time.Date(y, mo, d, 0, 0, 0, 0, time.UTC)
+		return time.Date(y, mo, d, 0, 0, 0, 0, loc)
 	case "weekly":
-		wd := int(now.UTC().Weekday()) // Sun=0
+		wd := int(ln.Weekday()) // Sun=0
 		if wd == 0 {
 			wd = 7
 		}
-		return time.Date(y, mo, d, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -(wd - 1))
+		return time.Date(y, mo, d, 0, 0, 0, 0, loc).AddDate(0, 0, -(wd - 1))
 	case "monthly":
-		return time.Date(y, mo, 1, 0, 0, 0, 0, time.UTC)
+		return time.Date(y, mo, 1, 0, 0, 0, 0, loc)
 	default:
 		return time.Time{}
 	}

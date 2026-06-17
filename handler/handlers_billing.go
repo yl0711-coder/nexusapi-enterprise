@@ -84,6 +84,32 @@ func (h *Handler) handleRecharge(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// POST /organizations/{id}/debits — 减余额冲正(运营方执行退款,US-12)。
+type debitReq struct {
+	AmountQuota int64  `json:"amount_quota"`
+	Reason      string `json:"reason"`
+}
+
+func (h *Handler) handleDebit(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	orgID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	var in debitReq
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	b, err := h.svc.DebitBalance(r.Context(), c, orgID, service.DebitInput{AmountQuota: in.AmountQuota, Reason: in.Reason})
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{"org_id": orgID, "balance_quota_after": b.Balance})
+}
+
 // GET /organizations/{id}/recharge-requests — 申请列表(O/A)。
 func (h *Handler) handleListRechargeRequests(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())

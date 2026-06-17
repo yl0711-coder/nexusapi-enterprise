@@ -41,8 +41,12 @@ func (s *Service) OpenSupportSession(ctx context.Context, c session.Claims, orgI
 	}
 	var grantType *string
 	if in.Scope == model.SupportAssist {
-		if in.GrantType != model.SupportAuthorized && in.GrantType != model.SupportBreakGlass {
-			return nil, apperr.InvalidParam("协助态须给 grant_type(authorized/break_glass)")
+		// 破玻璃需我方二级审批前置,整套运营方支持是二期(E1);一期只放客户授权协助。
+		if in.GrantType == model.SupportBreakGlass {
+			return nil, apperr.Forbidden("破玻璃(需二级审批前置)为二期能力,本期不开放")
+		}
+		if in.GrantType != model.SupportAuthorized {
+			return nil, apperr.InvalidParam("协助态须给 grant_type=authorized(破玻璃二期)")
 		}
 		gt := in.GrantType
 		grantType = &gt

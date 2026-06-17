@@ -568,7 +568,24 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/usage/export", orgID), adminTok, nil, nil); st != http.StatusOK { t.Errorf("用量导出应 200,得 %d", st) }
 	// 周期重置 worker:有 daily 策略 + 首次未重置 → 应重置该成员(返回>=1 或无错)。
 	if rn, rerr := svc.ResetDuePolicies(ctx); rerr != nil { t.Errorf("周期重置失败: %v", rerr) } else { t.Logf("周期重置 ok: 本次重置成员数=%d", rn) }
-	t.Log("补全功能全通过:组织设置/审批阈值/配额策略/角色任命/批量导入/服务状态/IP白名单/用量导出/周期重置")
+	// D1 退款冲正(运营方减余额)。
+	var balBefore2 struct{ Balance int64 `json:"balance_quota"` }
+	api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/balance", orgID), opTok, nil, &balBefore2)
+	if balBefore2.Balance > 0 {
+		var deb struct{ After int64 `json:"balance_quota_after"` }
+		if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/debits", orgID), opTok, map[string]any{"amount_quota": 1000000, "reason": "退款冲正"}, &deb); st != http.StatusOK || deb.After != balBefore2.Balance-1000000 {
+			t.Errorf("减余额冲正应 -1e6: before=%d after=%d st=%d", balBefore2.Balance, deb.After, st)
+		} else { t.Log("D1 退款冲正 ok: 运营方减余额 + 留痕") }
+		// 组织管理员减余额 → 403(动钱红线)。
+		if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/debits", orgID), adminTok, map[string]any{"amount_quota": 1, "reason": "x"}, nil); st != http.StatusForbidden {
+			t.Errorf("组织管理员减余额应 403,得 %d", st)
+		}
+	}
+	// E1 破玻璃本期关。
+	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/support-sessions", orgID), opTok, map[string]any{"scope": "assist", "grant_type": "break_glass", "ttl_seconds": 600}, nil); st != http.StatusForbidden {
+		t.Errorf("破玻璃本期应 403(二期),得 %d", st)
+	} else { t.Log("E1 破玻璃本期关 ok: → 403") }
+	t.Log("补全功能全通过:组织设置/审批阈值/配额策略/角色任命/批量导入/服务状态/IP白名单/用量导出/周期重置/退款冲正/破玻璃关")
 
 	// ===== 里程碑 3b:读 logs 扣费 + 去重 + 硬停(需 new-api 库连接造日志,本地集成 compose)=====
 	if newapiSQLDSN == "" {

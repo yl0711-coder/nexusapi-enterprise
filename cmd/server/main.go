@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+	_ "time/tzdata" // 嵌入时区库(distroless 无 tzdata,周期重置按组织时区需要,B3)
 
 	"github.com/nexusapi-platform/enterprise/adapter/newapi"
 	"github.com/nexusapi-platform/enterprise/handler"

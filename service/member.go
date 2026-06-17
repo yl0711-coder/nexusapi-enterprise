@@ -22,12 +22,14 @@ type OpenMemberInput struct {
 
 // OpenMemberResult 开通成员产物。APIKey 明文仅本次回显一次(10 §1.8.1 / §3.1)。
 type OpenMemberResult struct {
-	MemberID     int64
-	NewapiUserID int64
-	APIKey       string // 明文,仅此一次
-	KeyMasked    string
-	TierID       *int64
-	Models       []string
+	MemberID        int64
+	NewapiUserID    int64
+	APIKey          string // 明文,仅此一次
+	KeyMasked       string
+	InitialPassword string // 成员平台登录初始密码,仅此一次回显(交付成员、首登改密;C2)
+	LoginEmail      string
+	TierID          *int64
+	Models          []string
 }
 
 // OpenMember 开通成员 = 建 new-api 用户 + 代发 key + 绑层级(US-01,E05)。
@@ -172,6 +174,14 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 	if err := s.upstream.SetUserGroup(ctx, res.NewapiUserID, orgUserGroup(orgID)); err != nil {
 		s.log.Warn("设成员 new-api 用户分组失败(可后续补)", "member_id", memberID, "err", err)
 	}
+	// 令牌 model_limits = 层级模型集(B2:网关数据面限模型,真拦截、不依赖平台在线)。best-effort。
+	if tier != nil && len(tier.ModelSet) > 0 {
+		cred := newapi.MemberCred{NewapiUserID: res.NewapiUserID, AccessToken: res.AccessToken}
+		spec := newapi.TokenSpec{Name: deriveTokenName(memberID, 1), UnlimitedQuota: true, ExpiredTime: -1, Group: "default", ModelLimits: tier.ModelSet}
+		if err := s.upstream.UpdateToken(ctx, cred, res.TokenID, spec); err != nil {
+			s.log.Warn("设令牌 model_limits 失败(可后续补)", "member_id", memberID, "err", err)
+		}
+	}
 
 	// 下发初始 quota = 解析基线(tier 链 + 显式覆盖,B1)。失败不回滚开通(key 是主交付物),仅告警。
 	final.TierID = prov.TierID
@@ -187,10 +197,12 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 	})
 
 	out := &OpenMemberResult{
-		MemberID:     memberID,
-		NewapiUserID: int64(res.NewapiUserID),
-		APIKey:       res.PlaintextKey,
-		KeyMasked:    keyMasked,
+		MemberID:        memberID,
+		NewapiUserID:    int64(res.NewapiUserID),
+		APIKey:          res.PlaintextKey,
+		KeyMasked:       keyMasked,
+		InitialPassword: platPw, // 仅此一次回显;成员首登改密
+		LoginEmail:      email,
 	}
 	if tier != nil {
 		out.TierID = &tier.ID

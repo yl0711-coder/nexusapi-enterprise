@@ -64,6 +64,44 @@ func (s *Service) Recharge(ctx context.Context, c session.Claims, orgID int64, i
 	return bal, nil
 }
 
+// DebitInput 减余额冲正入参(US-12 执行半段)。
+type DebitInput struct {
+	AmountQuota int64
+	Reason      string
+}
+
+// DebitBalance 运营方执行退款冲正(US-12 / D1:平台是数字台账,线下退款后在平台录入减余额)。
+// 动钱红线:仅运营方;金额≤余额;乐观锁;重算组织状态;强制留痕(actor+原因)。
+func (s *Service) DebitBalance(ctx context.Context, c session.Claims, orgID int64, in DebitInput) (*model.Balance, error) {
+	if err := assertRole(c, session.RoleOperator); err != nil {
+		return nil, err
+	}
+	if in.AmountQuota <= 0 {
+		return nil, apperr.InvalidParam("冲正金额须为正")
+	}
+	if in.Reason == "" {
+		return nil, apperr.InvalidParam("冲正须填原因(留痕)")
+	}
+	bal, err := s.store.DebitBalance(ctx, orgID, in.AmountQuota)
+	if errors.Is(err, repo.ErrInsufficientBalance) {
+		return nil, apperr.InvalidParam("冲正金额超过当前余额")
+	}
+	if errors.Is(err, repo.ErrNotFound) {
+		return nil, apperr.NotFound("组织无余额记录")
+	}
+	if errors.Is(err, repo.ErrOptimisticLock) {
+		return nil, apperr.OptimisticLock("余额并发冲突,请重试")
+	}
+	if err != nil {
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	if err := s.recomputeOrgStatus(ctx, orgID, bal); err != nil {
+		s.log.Error("冲正后重算组织状态失败", "org_id", orgID, "err", err)
+	}
+	s.audit(ctx, c, orgID, "refund_debit", "balance", &orgID, map[string]any{"amount": in.AmountQuota, "reason": in.Reason, "balance_after": bal.Balance})
+	return bal, nil
+}
+
 // GetBalance 查公司余额(O/A)。
 func (s *Service) GetBalance(ctx context.Context, c session.Claims, orgID int64) (*model.Balance, error) {
 	if err := assertOrgScope(c, orgID); err != nil {

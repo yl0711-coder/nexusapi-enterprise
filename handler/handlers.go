@@ -280,12 +280,14 @@ func (h *Handler) handleOpenMember(w http.ResponseWriter, r *http.Request) {
 	}
 	// api_key 明文仅此一次回显(10 §1.8.1)。
 	writeOK(w, r, http.StatusCreated, map[string]any{
-		"member_id":      res.MemberID,
-		"newapi_user_id": res.NewapiUserID,
-		"api_key":        res.APIKey,
-		"key_masked":     res.KeyMasked,
-		"tier_id":        res.TierID,
-		"models":         res.Models,
+		"member_id":        res.MemberID,
+		"newapi_user_id":   res.NewapiUserID,
+		"api_key":          res.APIKey,
+		"key_masked":       res.KeyMasked,
+		"login_email":      res.LoginEmail,
+		"initial_password": res.InitialPassword, // 仅此一次,交付成员、首登改密
+		"tier_id":          res.TierID,
+		"models":           res.Models,
 	})
 }
 

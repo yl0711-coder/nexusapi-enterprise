@@ -99,6 +99,53 @@ func (s *Store) AddRecharge(ctx context.Context, r *model.Recharge) (*model.Bala
 	return &b, nil
 }
 
+// DebitBalance 减余额冲正(退款,US-12 执行半段):total_recharged -= amount(net 预付下调),
+// balance 重算,乐观锁。amount 必须 ≤ 当前余额(冲正不得使余额为负)。返回扣后余额。
+func (s *Store) DebitBalance(ctx context.Context, orgID, amount int64) (*model.Balance, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	var ver, bal int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT version, balance FROM company_balance WHERE org_id = ? FOR UPDATE`, orgID).Scan(&ver, &bal); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if amount > bal {
+		return nil, ErrInsufficientBalance
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE company_balance
+		    SET balance = total_recharged - total_consumed - ?,
+		        total_recharged = total_recharged - ?,
+		        version = version + 1
+		  WHERE org_id = ? AND version = ?`, amount, amount, orgID, ver)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return nil, ErrOptimisticLock
+	}
+	var b model.Balance
+	if err := tx.QueryRowContext(ctx,
+		`SELECT org_id, total_recharged, total_consumed, balance, low_watermark, version
+		 FROM company_balance WHERE org_id = ?`, orgID).Scan(
+		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.Balance, &b.LowWatermark, &b.Version); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+// ErrInsufficientBalance 表示冲正/退款金额超过当前余额。
+var ErrInsufficientBalance = errors.New("repo: 余额不足以冲正")
+
 // SetLowWatermark 设组织低位告警阈值。
 func (s *Store) SetLowWatermark(ctx context.Context, orgID, watermark int64) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT IGNORE INTO company_balance (org_id) VALUES (?)`, orgID); err != nil {

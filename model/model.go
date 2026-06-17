@@ -100,6 +100,44 @@ type Member struct {
 	UpdatedAt            time.Time
 }
 
+// grant_type(09 §14 + 08 §3.4)。
+const (
+	GrantQuotaAdd   = "quota_add"   // 临时增额(payload.delta>0)
+	GrantQuotaSub   = "quota_sub"   // 临时减额(payload.delta<0)
+	GrantModelAdd   = "model_add"   // 临时放开模型(payload.model)
+	GrantAccountTTL = "account_ttl" // 临时账号有效期(到期停号)
+)
+
+// grant status(09 §14)。
+const (
+	GrantStatusActive  = "active"
+	GrantStatusExpired = "expired"
+	GrantStatusRevoked = "revoked"
+)
+
+// Grant 对应 member_grant 表(09 §11,落地改名避保留字)。
+type Grant struct {
+	ID          int64
+	OrgID       int64
+	MemberID    int64
+	GrantType   string
+	Payload     GrantPayload
+	Reason      *string
+	Operator    string
+	EffectiveAt time.Time
+	ExpireAt    time.Time
+	Status      string
+	RevertedAt  *time.Time
+	CreatedAt   time.Time
+}
+
+// GrantPayload 是 grant 的载荷(按 grant_type 取用其中字段)。
+type GrantPayload struct {
+	Delta    int64  `json:"delta,omitempty"`    // quota_add/sub:带符号的额度增减(quota)
+	Duration string `json:"duration,omitempty"` // 时长标识:today/3d/week 等
+	Model    string `json:"model,omitempty"`    // model_add:放开的模型名
+}
+
 // AuditEntry 对应 audit_log 表(09 §13)。Detail 为已脱敏 JSON(绝不含明文 key/密文)。
 type AuditEntry struct {
 	OrgID            int64

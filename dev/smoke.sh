@@ -90,7 +90,34 @@ req GET "/api/v1/organizations/999999/members" "$AD_TOK" ""
 req GET /api/v1/me "" ""
 [ "$CODE" = 401 ] && ok "无 token 访问 → 401" || bad "应 401 得 $CODE"
 
-hdr "10) 零侵入核对:new-api 侧真建了该用户"
+hdr "10) 里程碑2 额度执行:调额(US-03)"
+req POST "/api/v1/members/$MEMBER_ID/quota:adjust" "$AD_TOK" "{\"delta_quota\":5000000,\"duration\":\"today\",\"reason\":\"赶项目\"}"
+GRANT_ID="$(field grant_id)"; NEWCAP="$(field new_cap_quota)"
+[ "$CODE" = 200 ] && [ -n "$GRANT_ID" ] && ok "调额 200,new_cap_quota=$NEWCAP grant_id=$GRANT_ID" || bad "调额 CODE=$CODE BODY=$BODY"
+
+hdr "11) 列临时权限 + 撤销(回退)"
+req GET "/api/v1/members/$MEMBER_ID/grants" "$AD_TOK" ""
+[ "$CODE" = 200 ] && ok "列 grants 200 total=$(field total)" || bad "列 grants CODE=$CODE"
+req DELETE "/api/v1/grants/$GRANT_ID" "$AD_TOK" ""
+[ "$CODE" = 200 ] && ok "撤销 grant 200(override 回退基线)" || bad "撤销 CODE=$CODE BODY=$BODY"
+
+hdr "12) 临时账号有效期 account_ttl(US-04a)"
+EXP="$(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)"
+req POST "/api/v1/members/$MEMBER_ID/grants" "$AD_TOK" "{\"type\":\"account_ttl\",\"expire_at\":\"$EXP\",\"reason\":\"实习生\"}"
+[ "$CODE" = 201 ] && ok "设 account_ttl 201(到期由 worker 反向停号)" || bad "account_ttl CODE=$CODE BODY=$BODY"
+
+hdr "13) 停用 / 恢复成员(US-05)"
+req POST "/api/v1/members/$MEMBER_ID/status" "$AD_TOK" "{\"enabled\":false}"
+[ "$CODE" = 200 ] && ok "停用 200 status=$(field status)" || bad "停用 CODE=$CODE BODY=$BODY"
+req POST "/api/v1/members/$MEMBER_ID/status" "$AD_TOK" "{\"enabled\":true}"
+[ "$CODE" = 200 ] && ok "恢复 200 status=$(field status)" || bad "恢复 CODE=$CODE BODY=$BODY"
+
+hdr "14) RBAC:成员自己调额 → 403(只有管理员/团队负责人可调)"
+req POST "/api/v1/members/$MEMBER_ID/quota:adjust" "$M_TOK" "{\"delta_quota\":1,\"duration\":\"today\"}"
+[ "$CODE" = 403 ] && ok "成员调额 → 403" || bad "应 403 得 $CODE"
+
+# 放最后:此步会调 GET /api/user/token 旋转 root token,放末尾避免作废 server 持有的管理员 token。
+hdr "15) 零侵入核对:new-api 侧真建了该用户"
 NU="$(curl -s "http://localhost:13000/api/user/search?keyword=o${ORG_ID}m${MEMBER_ID}" \
   -H "Authorization: Bearer $(curl -s -c /tmp/j -X POST http://localhost:13000/api/user/login -H 'Content-Type: application/json' -d '{"username":"root","password":"RootPass123"}' >/dev/null; curl -s -b /tmp/j -H 'New-Api-User: 1' http://localhost:13000/api/user/token | grep -oE '"data":"[^"]+"' | sed -E 's/.*:"([^"]+)"/\1/')" \
   -H 'New-Api-User: 1' 2>/dev/null | grep -oE "\"username\":\"o${ORG_ID}m${MEMBER_ID}\"" | head -1)"

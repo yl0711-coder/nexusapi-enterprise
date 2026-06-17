@@ -168,8 +168,15 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 		return nil, apperr.Internal("").WithCause(err)
 	}
 
+	// 下发初始 quota = 层级基线(US-01 AC:active 时 quota=层级上限,03 §3.3)。
+	// 失败不回滚开通(key 已是主交付物),仅告警——可由调额/worker 重算补下发。
+	initialQuota := tierBaseQuota(tier)
+	if err := s.upstream.ManageUserQuota(ctx, res.NewapiUserID, newapi.QuotaOverride, initialQuota); err != nil {
+		s.log.Warn("开通成员后下发初始 quota 失败(可后续重算补下发)", "member_id", memberID, "err", err)
+	}
+
 	s.audit(ctx, c, orgID, "open_member", "member", &memberID, map[string]any{
-		"name": in.Name, "newapi_user_id": res.NewapiUserID, "adopted_existing": res.AdoptedExisting,
+		"name": in.Name, "newapi_user_id": res.NewapiUserID, "adopted_existing": res.AdoptedExisting, "init_quota": initialQuota,
 	})
 
 	out := &OpenMemberResult{

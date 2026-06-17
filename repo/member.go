@@ -77,6 +77,13 @@ func (s *Store) ActivatePlatformAccount(ctx context.Context, orgID, memberID int
 	return err
 }
 
+// UpdateMemberStatus 改成员状态(US-05 停用/恢复、account_ttl 到期置 expired)。
+func (s *Store) UpdateMemberStatus(ctx context.Context, orgID, memberID int64, status string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE member SET status = ? WHERE id = ? AND org_id = ?`, status, memberID, orgID)
+	return err
+}
+
 // GetMember 取成员,强制 org_id 谓词(跨 org → ErrNotFound)。
 func (s *Store) GetMember(ctx context.Context, orgID, id int64) (*model.Member, error) {
 	row := s.db.QueryRowContext(ctx, memberSelect+` WHERE id = ? AND org_id = ? AND deleted_at IS NULL`, id, orgID)

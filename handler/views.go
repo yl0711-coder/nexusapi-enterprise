@@ -79,6 +79,32 @@ func toMemberView(m *model.Member) memberView {
 	}
 }
 
+type grantView struct {
+	ID        int64  `json:"id"`
+	MemberID  int64  `json:"member_id"`
+	GrantType string `json:"grant_type"`
+	Delta     int64  `json:"delta,omitempty"`
+	Model     string `json:"model,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	Operator  string `json:"operator"`
+	ExpireAt  string `json:"expire_at"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"created_at"`
+}
+
+func toGrantView(g *model.Grant) grantView {
+	v := grantView{
+		ID: g.ID, MemberID: g.MemberID, GrantType: g.GrantType,
+		Delta: g.Payload.Delta, Model: g.Payload.Model, Operator: g.Operator,
+		ExpireAt: g.ExpireAt.Format(time.RFC3339), Status: g.Status,
+		CreatedAt: g.CreatedAt.Format(time.RFC3339),
+	}
+	if g.Reason != nil {
+		v.Reason = *g.Reason
+	}
+	return v
+}
+
 // pageMeta 是列表分页元信息(10 §1.5)。
 type pageMeta struct {
 	Page       int `json:"page"`

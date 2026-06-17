@@ -57,6 +57,13 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/members/{id}", h.requireAuth(h.handleGetMember))
 	mux.HandleFunc("POST /api/v1/members/{id}/key:rotate", h.requireAuth(h.handleRotateKey))
 
+	// 额度执行(里程碑2):调额 / 临时权限 / 停用恢复。
+	mux.HandleFunc("POST /api/v1/members/{id}/quota:adjust", h.requireAuth(h.handleAdjustQuota))
+	mux.HandleFunc("POST /api/v1/members/{id}/grants", h.requireAuth(h.handleSetGrant))
+	mux.HandleFunc("GET /api/v1/members/{id}/grants", h.requireAuth(h.handleListGrants))
+	mux.HandleFunc("DELETE /api/v1/grants/{id}", h.requireAuth(h.handleRevokeGrant))
+	mux.HandleFunc("POST /api/v1/members/{id}/status", h.requireAuth(h.handleSetMemberStatus))
+
 	// 中间件链:request_id → recover → mux。
 	return withRequestID(h.recoverPanic(mux))
 }
@@ -66,7 +73,7 @@ func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
-	writeRaw(w, http.StatusOK, map[string]string{"status": "ready", "milestone": "1-identity-org-rbac-openmember"})
+	writeRaw(w, http.StatusOK, map[string]string{"status": "ready", "milestone": "2-quota-execution"})
 }
 
 // writeRaw 写裸 JSON(健康检查不用业务信封,沿用里程碑 0 探针格式)。

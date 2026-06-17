@@ -222,6 +222,74 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	}
 
 	t.Log("里程碑 1 e2e 全通过:US-01 开通成员(真机代发 key)+ 列表脱敏 + 轮换 + RBAC(403/404/401)")
+
+	// ===== 里程碑 2:额度执行(调额 / 撤销回退 / account_ttl 到期 worker 反向 / 停用恢复)=====
+	uid := openResp.NewapiUserID
+	q0, _ := getNewapiUser(t, newapiURL, adminToken, adminUID, uid)
+	t.Logf("开通后 new-api 用户 quota=%d", q0)
+
+	// US-03 调额 +5,000,000(今日)→ new-api 用户 quota 实增。
+	var adj struct {
+		NewCapQuota int64 `json:"new_cap_quota"`
+		GrantID     int64 `json:"grant_id"`
+	}
+	if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/quota:adjust", openResp.MemberID), adminTok,
+		map[string]any{"delta_quota": 5000000, "duration": "today", "reason": "赶项目"}, &adj); st != http.StatusOK {
+		t.Fatalf("调额 HTTP=%d", st)
+	}
+	q1, _ := getNewapiUser(t, newapiURL, adminToken, adminUID, uid)
+	if q1 != q0+5000000 {
+		t.Errorf("调额后 quota 应 +5e6: q0=%d q1=%d", q0, q1)
+	} else {
+		t.Logf("US-03 调额 ok: new-api quota %d→%d, grant=%d", q0, q1, adj.GrantID)
+	}
+
+	// 撤销 grant → override 回退到基线。
+	if st := api.do("DELETE", fmt.Sprintf("/api/v1/grants/%d", adj.GrantID), adminTok, nil, nil); st != http.StatusOK {
+		t.Fatalf("撤销 grant HTTP=%d", st)
+	}
+	q2, _ := getNewapiUser(t, newapiURL, adminToken, adminUID, uid)
+	if q2 != q0 {
+		t.Errorf("撤销后 quota 应回退到 %d, 得 %d", q0, q2)
+	} else {
+		t.Logf("撤销回退 ok: new-api quota→%d", q2)
+	}
+
+	// US-04a account_ttl:近未来到期 → worker 反向 → new-api 用户 disable + member expired。
+	exp := time.Now().Add(2 * time.Second).UTC().Format(time.RFC3339)
+	if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/grants", openResp.MemberID), adminTok,
+		map[string]any{"type": "account_ttl", "expire_at": exp, "reason": "实习生到期"}, nil); st != http.StatusCreated {
+		t.Fatalf("account_ttl grant HTTP=%d", st)
+	}
+	time.Sleep(2500 * time.Millisecond)
+	if n, err := svc.ReverseExpiredGrants(ctx, 100); err != nil || n < 1 {
+		t.Fatalf("worker 反向到期 grant: n=%d err=%v", n, err)
+	}
+	if _, st := getNewapiUser(t, newapiURL, adminToken, adminUID, uid); st == 1 {
+		t.Errorf("account_ttl 到期后 new-api 用户应被 disable(status!=1),得 status=%d", st)
+	} else {
+		t.Log("US-04a account_ttl 到期 worker 反向 ok: new-api 用户已 disable")
+	}
+
+	// US-05 停用/恢复:恢复(上一步被 disable)→ enabled;再停用 → disabled。
+	if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/status", openResp.MemberID), adminTok,
+		map[string]any{"enabled": true}, nil); st != http.StatusOK {
+		t.Fatalf("恢复 HTTP=%d", st)
+	}
+	if _, st := getNewapiUser(t, newapiURL, adminToken, adminUID, uid); st != 1 {
+		t.Errorf("恢复后 new-api 用户应 enabled(status=1),得 %d", st)
+	}
+	if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/status", openResp.MemberID), adminTok,
+		map[string]any{"enabled": false}, nil); st != http.StatusOK {
+		t.Fatalf("停用 HTTP=%d", st)
+	}
+	if _, st := getNewapiUser(t, newapiURL, adminToken, adminUID, uid); st == 1 {
+		t.Errorf("停用后 new-api 用户应 disabled,得 enabled")
+	} else {
+		t.Log("US-05 停用/恢复 ok")
+	}
+
+	t.Log("里程碑 2 e2e 全通过:调额(new-api quota 实变)+ 撤销回退 + account_ttl 到期 worker 反向 + 停用/恢复")
 }
 
 // ---- helpers ----
@@ -398,6 +466,29 @@ func setupRC4(t *testing.T, base string) (string, int) {
 		t.Fatalf("未取到管理员 access_token,原始: %s", raw)
 	}
 	return token, uid
+}
+
+// getNewapiUser 以管理员身份查 new-api 用户的 quota 与 status(1=enabled,2=disabled)。
+func getNewapiUser(t *testing.T, base, adminToken string, adminUID int, userID int64) (int64, int) {
+	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/user/%d", base, userID), nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("New-Api-User", strconv.Itoa(adminUID))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("查 new-api 用户失败: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	var env struct {
+		Data struct {
+			Quota  int64 `json:"quota"`
+			Status int   `json:"status"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("解析 new-api 用户失败: %v\n%s", err, raw)
+	}
+	return env.Data.Quota, env.Data.Status
 }
 
 func randSuffix() string {

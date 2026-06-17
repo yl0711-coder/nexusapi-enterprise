@@ -61,6 +61,9 @@ bash dev/smoke.sh        # 里程碑1 接口走查:登录→建组织/团队/层
 - 联调入口:http://localhost:18080 ;运营方账号 `ops@nexus.local` / `OpsPass123`(dev 引导账号)。
 - server 容器名 `nexus-ent-dev`,停:`docker rm -f nexus-ent-dev`;看日志:`docker logs nexus-ent-dev`。
 - dev 主密钥/会话密钥是脚本里写死的固定值,**仅 dev**(稳定才能让重启后旧密文仍可解);生产经环境变量注入真密钥,绝不入库。
+- **排障**:若调额/调度类接口返回 `50301 上游鉴权失效`,多半是有人对 root 调了 `GET /api/user/token`
+  (该调用会旋转 root 的 access_token,作废 server 持有的那个)。重跑 `bash dev/run-server.sh`
+  取新 token 即可。生产上只有平台持 root 且开通后不再调 GET token,不会触发。
 - 手动戳接口示例:
   `TOK=$(curl -s -XPOST localhost:18080/api/v1/auth/login -d '{"email":"ops@nexus.local","password":"OpsPass123"}' | grep -oE '"token":"[^"]+"' | cut -d'"' -f4)`
   然后 `curl -s localhost:18080/api/v1/organizations -H "Authorization: Bearer $TOK"`。

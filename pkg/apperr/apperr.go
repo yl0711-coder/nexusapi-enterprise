@@ -133,6 +133,8 @@ func FromUpstream(code int, message string, cause error) *Error {
 		httpStatus = http.StatusServiceUnavailable
 	case 50504: // 上游超时
 		httpStatus = http.StatusGatewayTimeout
+	case 50301: // 上游鉴权失效(自愈失败):走 5xx,与其余上游故障一致,便于按 HTTP 状态告警(R2-M9)
+		httpStatus = http.StatusBadGateway
 	case CodeInternal:
 		httpStatus = http.StatusInternalServerError
 	}

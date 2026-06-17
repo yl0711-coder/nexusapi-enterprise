@@ -161,6 +161,16 @@ type AdjustQuotaResult struct {
 // AdjustQuota 临时调额(US-03,E07):建 grant → 重算 override → 经 adapter 下发 → 审计。
 // 到期由 quota-worker 反向(03 §3.4)。RBAC:组织管理员(本 org)/ 团队负责人(本 team)。
 func (s *Service) AdjustQuota(ctx context.Context, c session.Claims, orgID, memberID int64, in AdjustQuotaInput) (*AdjustQuotaResult, error) {
+	// R2-M4:调额是动钱面——拒空值(delta=0 无意义)+ 限绝对值上限(防误填天量)。
+	if in.DeltaQuota == 0 {
+		return nil, apperr.InvalidParam("调整量不能为 0")
+	}
+	if in.DeltaQuota > maxAdjustQuota || in.DeltaQuota < -maxAdjustQuota {
+		return nil, apperr.InvalidParam("单次调整量超出上限")
+	}
+	if err := checkLen("原因", in.Reason, maxNoteLen); err != nil {
+		return nil, err
+	}
 	m, err := s.loadManageableMember(ctx, c, orgID, memberID)
 	if err != nil {
 		return nil, err

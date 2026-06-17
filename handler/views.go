@@ -42,16 +42,19 @@ func toTeamView(t *model.Team) teamView {
 }
 
 type tierView struct {
-	ID         int64    `json:"id"`
-	OrgID      int64    `json:"org_id"`
-	Name       string   `json:"name"`
-	ModelSet   []string `json:"model_set"`
-	IsDefault  bool     `json:"is_default"`
-	Status     string   `json:"status"`
+	ID           int64            `json:"id"`
+	OrgID        int64            `json:"org_id"`
+	Name         string           `json:"name"`
+	ModelSet     []string         `json:"model_set"`
+	ModelCap     map[string]int64 `json:"model_cap,omitempty"`
+	MonthlyLimit *int64           `json:"monthly_limit_quota"`
+	IsDefault    bool             `json:"is_default"`
+	Status       string           `json:"status"`
 }
 
 func toTierView(t *model.Tier) tierView {
-	return tierView{ID: t.ID, OrgID: t.OrgID, Name: t.Name, ModelSet: t.ModelSet, IsDefault: t.IsDefault, Status: t.Status}
+	return tierView{ID: t.ID, OrgID: t.OrgID, Name: t.Name, ModelSet: t.ModelSet, ModelCap: t.ModelCap,
+		MonthlyLimit: t.MonthlyLimit, IsDefault: t.IsDefault, Status: t.Status}
 }
 
 // memberView 脱敏成员视图:key 只回显 key_masked,绝不含 access_token/password。
@@ -105,18 +108,35 @@ func toGrantView(g *model.Grant) grantView {
 	return v
 }
 
+// displayCurrency 对客展示币种(A3:应与主站 QuotaDisplayType 一致;MVP 默认 USD,上线读主站 option)。
+const displayCurrency = "USD"
+
+// quotaPerUnit 元/美元↔quota 锚定(A4,与主站一致)。
+const quotaPerUnit = 500000.0
+
+func toDisplay(quota int64) float64 { return float64(quota) / quotaPerUnit }
+
 type balanceView struct {
-	OrgID          int64 `json:"org_id"`
-	TotalRecharged int64 `json:"total_recharged_quota"`
-	TotalConsumed  int64 `json:"total_consumed_quota"`
-	Balance        int64 `json:"balance_quota"`
-	LowWatermark   int64 `json:"low_watermark_quota"`
+	OrgID          int64   `json:"org_id"`
+	TotalRecharged int64   `json:"total_recharged_quota"`
+	TotalConsumed  int64   `json:"total_consumed_quota"`
+	TotalRefunded  int64   `json:"total_refunded_quota"`
+	Balance        int64   `json:"balance_quota"`
+	LowWatermark   int64   `json:"low_watermark_quota"`
+	Currency       string  `json:"currency"`        // 对外币种(口径固化在后端,M2)
+	BalanceDisplay float64 `json:"balance_display"` // 按币种换算的金额(quota/QuotaPerUnit)
+	RechargedDisplay float64 `json:"total_recharged_display"`
+	ConsumedDisplay  float64 `json:"total_consumed_display"`
+	RefundedDisplay  float64 `json:"total_refunded_display"`
 }
 
 func toBalanceView(b *model.Balance) balanceView {
 	return balanceView{
-		OrgID: b.OrgID, TotalRecharged: b.TotalRecharged, TotalConsumed: b.TotalConsumed,
+		OrgID: b.OrgID, TotalRecharged: b.TotalRecharged, TotalConsumed: b.TotalConsumed, TotalRefunded: b.TotalRefunded,
 		Balance: b.Balance, LowWatermark: b.LowWatermark,
+		Currency:       displayCurrency,
+		BalanceDisplay: toDisplay(b.Balance), RechargedDisplay: toDisplay(b.TotalRecharged),
+		ConsumedDisplay: toDisplay(b.TotalConsumed), RefundedDisplay: toDisplay(b.TotalRefunded),
 	}
 }
 

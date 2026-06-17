@@ -47,7 +47,7 @@ const NAV = {
   operator: [{ grp: "运营" }, { v: "orgs", ic: "▦", t: "客户组织" }],
   org_admin: [{ grp: "管理" }, { v: "dash", ic: "◧", t: "概览" }, { v: "members", ic: "☷", t: "成员" }, { v: "teams", ic: "▣", t: "团队" }, { v: "tiers", ic: "◆", t: "层级" }, { v: "approvals", ic: "✓", t: "审批" }, { v: "billing", ic: "¥", t: "余额与计费" }],
   team_leader: [{ grp: "团队" }, { v: "members", ic: "☷", t: "团队成员" }, { v: "approvals", ic: "✓", t: "审批" }],
-  member: [{ grp: "我的" }, { v: "myusage", ic: "▦", t: "我的用量" }, { v: "mykey", ic: "⚿", t: "我的 API Key" }, { v: "myreq", ic: "✚", t: "申请增额" }, { v: "mynotif", ic: "🔔", t: "通知" }],
+  member: [{ grp: "我的" }, { v: "myusage", ic: "▦", t: "我的用量" }, { v: "mykey", ic: "⚿", t: "我的 API Key" }, { v: "myreq", ic: "✚", t: "申请增额" }, { v: "mynotif", ic: "✉", t: "通知" }],
 };
 
 function renderShell() {
@@ -69,9 +69,26 @@ function renderSide() {
   let h = "";
   (NAV[S.role] || []).forEach(n => {
     if (n.grp) { h += `<div class="grp">${esc(n.grp)}</div>`; return; }
-    h += `<div class="nav ${S.view === n.v ? "on" : ""}" onclick="go('${n.v}')"><span class="ic">${n.ic}</span>${esc(n.t)}</div>`;
+    h += `<div class="nav ${S.view === n.v ? "on" : ""}" id="nav-${n.v}" onclick="go('${n.v}')"><span class="ic">${n.ic}</span>${esc(n.t)}</div>`;
   });
   document.getElementById("side").innerHTML = h;
+  updateBadges();
+}
+async function updateBadges() {
+  try {
+    if (S.role === "org_admin" || S.role === "team_leader") {
+      const d = await api("GET", "/organizations/" + S.orgId + "/approvals?state=pending&page=1&page_size=1", null);
+      setBadge("approvals", (d.pagination || {}).total || 0);
+    }
+    if (S.role === "member") {
+      const n = await api("GET", "/notifications?page=1&page_size=1", null);
+      setBadge("mynotif", n.unread || 0);
+    }
+  } catch (e) {}
+}
+function setBadge(v, n) {
+  const el = document.getElementById("nav-" + v);
+  if (el && n > 0) el.insertAdjacentHTML("beforeend", `<span class="badge-dot">${n}</span>`);
 }
 function go(v) { S.view = v; renderSide(); renderView(); }
 
@@ -149,6 +166,7 @@ async function enterOrg(id, name) {
     <div class="toolbar">
       <button class="btn pri" onclick="openTopup(${id})">充值入账</button>
       <button class="btn" onclick="toggleBilling(${id},${!bs.billing_enabled})">${bs.billing_enabled ? "关闭扣费" : "开启扣费(灰度)"}</button>
+      <button class="btn" onclick="openDiscount(${id})">配置折扣</button>
       <button class="btn" onclick="openSupport(${id})">支持会话</button>
     </div>
     <div class="panel"><div class="ph">成员</div><div class="pb"><table><tbody>${rows || '<tr><td class="empty">暂无成员</td></tr>'}</tbody></table></div></div>`;
@@ -169,6 +187,25 @@ async function doTopup(id) {
 async function toggleBilling(id, on) {
   try { await api("PATCH", "/organizations/" + id + "/billing-settings", { billing_enabled: on }); toast(on ? "已开启扣费(灰度)" : "已关闭扣费"); enterOrg(id, S.org.name); }
   catch (e) { toast(e.message); }
+}
+async function openDiscount(id) {
+  let cur = {}; try { cur = await api("GET", "/organizations/" + id + "/pricing", null); } catch (e) {}
+  const up = cur.upstream_special_ratio || {};
+  const curTxt = Object.keys(up).length ? Object.entries(up).map(([g, r]) => `${g}: ${r}`).join(" · ") : "无";
+  modal("配置客户折扣", `<div class="fld"><label>模式</label><select id="dc_m">
+      <option value="total">整体折扣(所有分组)</option><option value="per_group">按分组折扣</option><option value="none">取消折扣</option></select></div>
+    <div class="fld"><label>折扣率(0.9 = 9 折)</label><input id="dc_p" type="number" step="0.05" placeholder="0.9"></div>
+    <div class="fld"><label>令牌分组(逗号分隔,整体留空=default)</label><input id="dc_g" placeholder="default"></div>
+    <div class="note">单向写 new-api 分组特殊倍率(绝对值=基础倍率×折扣率);客户侧只读。当前 new-api 实际值:${esc(curTxt)}</div>`,
+    `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doDiscount(${id})">下发</button>`);
+}
+async function doDiscount(id) {
+  try {
+    const body = { mode: val("dc_m") };
+    const p = parseFloat(val("dc_p")); if (p > 0) body.discount_pct = p;
+    const gs = val("dc_g").split(",").map(s => s.trim()).filter(Boolean); if (gs.length) body.token_groups = gs;
+    await api("PUT", "/organizations/" + id + "/pricing", body); closeM(); toast("折扣已下发(写入 new-api)");
+  } catch (e) { toast(e.message); }
 }
 function openSupport(id) {
   modal("运营方支持会话", `<div class="fld"><label>支持类型</label><select id="sp_s"><option value="readonly">只读支持(看不能改)</option><option value="assist">协助态(可受控写,动钱/读key红线挡)</option></select></div>
@@ -205,7 +242,8 @@ VIEWS.dash = async () => {
 VIEWS.members = async () => {
   const id = S.orgId;
   const d = await api("GET", "/organizations/" + id + "/members?page=1&page_size=50", null);
-  const rows = (d.list || []).map(m => `<tr>
+  // 管理类账号(运营方/组织管理员)不进"成员"列表(M7);只列 API 使用成员。
+  const rows = (d.list || []).filter(m => m.role !== "org_admin" && m.role !== "operator").map(m => `<tr>
     <td>${esc(m.display_name || m.login_email)}<div class="mini">${esc(m.login_email)}</div></td>
     <td>${pill(m.status, m.status === "active" ? "ok" : "mut")}</td>
     <td class="mini">${esc(m.key_masked || "-")}</td>
@@ -282,21 +320,30 @@ async function doCreateTeam() { try { await api("POST", "/organizations/" + S.or
 VIEWS.tiers = async () => {
   const d = await api("GET", "/organizations/" + S.orgId + "/tiers", null);
   const rows = (d || []).map(t => `<tr><td>${esc(t.name)}${t.is_default ? ' <span class="tag">默认</span>' : ""}</td>
+    <td>${t.monthly_limit_quota != null ? money(t.monthly_limit_quota) + " / 月" : '<span class="mini">不限</span>'}</td>
     <td>${(t.model_set || []).map(m => `<span class="mcap">${esc(m)}</span>`).join("") || '<span class="mini">继承</span>'}</td></tr>`).join("");
-  return head("层级", "可复用档位 = 模型集 + 额度档")
+  return head("层级", "可复用档位 = 模型集 + 月额度 + 单模型日上限")
     + `<div class="toolbar"><button class="btn pri" onclick="openCreateTier()">+ 新建层级</button></div>
-    <div class="panel"><table><thead><tr><th>层级</th><th>模型集</th></tr></thead><tbody>${rows || '<tr><td colspan=2 class="empty">暂无层级</td></tr>'}</tbody></table></div>`;
+    <div class="panel"><table><thead><tr><th>层级</th><th>月额度</th><th>模型集</th></tr></thead><tbody>${rows || '<tr><td colspan=3 class="empty">暂无层级</td></tr>'}</tbody></table></div>`;
 };
-function openCreateTier() { modal("新建层级", `<div class="fld"><label>层级名称</label><input id="ti_n" placeholder="标准档"></div><div class="fld"><label>模型集(逗号分隔,留空=继承)</label><input id="ti_m" placeholder="gpt-5-mini,claude-sonnet-4-5-20250929"></div>`, `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doCreateTier()">创建</button>`); }
+function openCreateTier() { modal("新建层级", `<div class="fld"><label>层级名称</label><input id="ti_n" placeholder="标准档"></div>
+  <div class="fld"><label>月额度(美元,成员当期上限基线)</label><input id="ti_q" type="number" placeholder="50"></div>
+  <div class="fld"><label>模型集(逗号分隔,留空=继承)</label><input id="ti_m" placeholder="gpt-5-mini,claude-sonnet-4-5-20250929"></div>
+  <div class="note">月额度是成员当期 quota 上限的基线;留空成员将无法确定额度。</div>`,
+  `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doCreateTier()">创建</button>`); }
 async function doCreateTier() {
-  try { const ms = val("ti_m").split(",").map(s => s.trim()).filter(Boolean); await api("POST", "/organizations/" + S.orgId + "/tiers", { name: val("ti_n"), model_set: ms }); closeM(); toast("已创建"); renderView(); }
-  catch (e) { toast(e.message); }
+  try {
+    const ms = val("ti_m").split(",").map(s => s.trim()).filter(Boolean);
+    const body = { name: val("ti_n"), model_set: ms };
+    const q = parseFloat(val("ti_q")); if (q > 0) body.monthly_limit = Math.round(q * 500000);
+    await api("POST", "/organizations/" + S.orgId + "/tiers", body); closeM(); toast("已创建"); renderView();
+  } catch (e) { toast(e.message); }
 }
 VIEWS.approvals = async () => {
   const d = await api("GET", "/organizations/" + S.orgId + "/approvals?page=1&page_size=50", null);
   const rows = (d.list || []).map(a => {
     const can = a.state === "pending" || a.state === "l1_approved";
-    return `<tr><td>#${a.id} ${esc(a.request_type)}${a.is_level2 ? ' <span class="tag">二审</span>' : ""}<div class="mini">${esc(a.model || "")} ${money(a.amount_quota)} / ${esc(a.duration)}</div></td>
+    return `<tr><td>#${a.id} ${esc(a.request_type)}${a.is_level2 ? ' <span class="tag">二审</span>' : ""}<div class="mini">申请人 #${a.applicant_id} · ${esc((a.created_at || "").slice(0, 16).replace("T", " "))} · ${esc(a.model || "")} ${money(a.amount_quota)} / ${esc(a.duration)}</div></td>
     <td>${pill(a.state, a.state === "approved" || a.state === "auto_approved" ? "ok" : a.state === "rejected" ? "bad" : "warn")}</td>
     <td class="right">${can ? `<span class="btn sm pri" onclick="decide(${a.id},true)">批准</span> <span class="btn sm danger" onclick="decide(${a.id},false)">驳回</span>` : ""}</td></tr>`;
   }).join("");

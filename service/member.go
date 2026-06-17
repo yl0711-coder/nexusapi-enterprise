@@ -48,6 +48,9 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 	if in.Name == "" {
 		return nil, apperr.InvalidParam("成员姓名必填")
 	}
+	if err := firstErr(checkLen("姓名", in.Name, maxNameLen), checkLen("邮箱", in.Email, maxEmailLen)); err != nil {
+		return nil, err
+	}
 
 	// 团队负责人:只能开到本团队;team_id 缺省套本团队,显式跨团队 → 403。
 	if c.Role == session.RoleTeamLeader {

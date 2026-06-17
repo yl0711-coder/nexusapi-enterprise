@@ -32,6 +32,9 @@ func (s *Service) CreateTier(ctx context.Context, c session.Claims, orgID int64,
 	if in.Name == "" {
 		return nil, apperr.InvalidParam("层级名称必填")
 	}
+	if err := checkLen("层级名称", in.Name, maxNameLen); err != nil {
+		return nil, err
+	}
 	id, err := s.store.CreateTier(ctx, &model.Tier{
 		OrgID: orgID, Name: in.Name, ModelSet: in.ModelSet, ModelCap: in.ModelCap,
 		DailyLimit: in.DailyLimit, WeeklyLimit: in.WeeklyLimit, MonthlyLimit: in.MonthlyLimit,

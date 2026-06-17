@@ -91,6 +91,10 @@ func (s *Service) SubmitApproval(ctx context.Context, c session.Claims, in Submi
 	s.audit(ctx, c, c.OrgID, "submit_approval", "approval", &id, map[string]any{
 		"state": a.State, "amount": in.Amount, "model": in.Model, "level2": a.IsLevel2,
 	})
+	// 重读取真实 created_at 等(R2-M5:避免返回内存对象的 0001 脏值时间)。
+	if full, ferr := s.store.GetApproval(ctx, c.OrgID, id); ferr == nil {
+		return full, nil
+	}
 	return a, nil
 }
 

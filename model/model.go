@@ -232,6 +232,30 @@ type Notification struct {
 	CreatedAt time.Time
 }
 
+// 支持态(09 §14)。
+const (
+	SupportReadonly   = "readonly"
+	SupportAssist     = "assist"
+	SupportAuthorized = "authorized"
+	SupportBreakGlass = "break_glass"
+	SupportActive     = "active"
+	SupportRevoked    = "revoked"
+	SupportExpired    = "expired"
+)
+
+// SupportSession 对应 support_session 表(09 §14)。
+type SupportSession struct {
+	ID         int64
+	OrgID      int64
+	Actor      string
+	OnBehalfOf string
+	Scope      string
+	GrantType  *string
+	State      string
+	StartedAt  time.Time
+	ExpireAt   time.Time
+}
+
 // AuditEntry 对应 audit_log 表(09 §13)。Detail 为已脱敏 JSON(绝不含明文 key/密文)。
 type AuditEntry struct {
 	OrgID            int64

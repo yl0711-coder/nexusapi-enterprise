@@ -84,6 +84,15 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/notifications", h.requireAuth(h.handleListNotifications))
 	mux.HandleFunc("POST /api/v1/notifications/{id}/read", h.requireAuth(h.handleMarkNotificationRead))
 
+	// 用量看板(里程碑5)。
+	mux.HandleFunc("GET /api/v1/organizations/{id}/usage", h.requireAuth(h.handleOrgUsage))
+	mux.HandleFunc("GET /api/v1/members/{id}/usage", h.requireAuth(h.handleMemberUsage))
+
+	// 运营方三层支持(里程碑5,08 §2.2/§3.2)。
+	mux.HandleFunc("POST /api/v1/organizations/{id}/support-sessions", h.requireAuth(h.handleOpenSupport))
+	mux.HandleFunc("GET /api/v1/support-sessions/{id}", h.requireAuth(h.handleGetSupport))
+	mux.HandleFunc("POST /api/v1/support-sessions/{id}/close", h.requireAuth(h.handleCloseSupport))
+
 	// 中间件链:request_id → recover → mux。
 	return withRequestID(h.recoverPanic(mux))
 }
@@ -93,7 +102,7 @@ func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
-	writeRaw(w, http.StatusOK, map[string]string{"status": "ready", "milestone": "4-selfservice-approval-notify"})
+	writeRaw(w, http.StatusOK, map[string]string{"status": "ready", "milestone": "5-dashboard-support"})
 }
 
 // writeRaw 写裸 JSON(健康检查不用业务信封,沿用里程碑 0 探针格式)。

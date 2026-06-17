@@ -56,8 +56,10 @@ type Claims struct {
 	TeamID   int64  `json:"tid,omitempty"` // 团队负责人/成员的所辖团队;0=无
 	// SupportSessionID 非 0 表示运营方处于支持态(只读/协助),写端点据此叠加闸(08 §2.2)。
 	SupportSessionID int64 `json:"sid,omitempty"`
-	IssuedAt         int64 `json:"iat"`
-	ExpiresAt        int64 `json:"exp"`
+	// SupportScope 支持态能力:readonly(只读,拒所有写)/ assist(协助,可写但动钱/读key红线挡)。
+	SupportScope string `json:"sscope,omitempty"`
+	IssuedAt     int64  `json:"iat"`
+	ExpiresAt    int64  `json:"exp"`
 }
 
 // Signer 用签名密钥签发/校验 token。

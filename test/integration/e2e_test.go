@@ -484,6 +484,60 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	}
 	t.Log("里程碑 4 e2e 全通过:自动通过即时下发 + 二审两级流程 + 成员裁决403 + 站内通知")
 
+	// ===== 里程碑 5:用量看板 + 运营方三层支持 =====
+	// 用量看板(无真实用量时返回空结构 200)。
+	if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/usage?since_hours=24", orgID), adminTok, nil, nil); st != http.StatusOK {
+		t.Errorf("组织用量看板应 200,得 %d", st)
+	} else {
+		t.Log("用量看板 ok: GET /usage 200")
+	}
+
+	// 运营方支持态:只读态。
+	var supRO struct {
+		SessionID int64  `json:"session_id"`
+		Token     string `json:"token"`
+	}
+	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/support-sessions", orgID), opTok,
+		map[string]any{"scope": "readonly", "ttl_seconds": 600, "reason": "排障"}, &supRO); st != http.StatusCreated {
+		t.Fatalf("开只读支持会话 HTTP=%d", st)
+	}
+	// 只读态:能读(运营方经支持会话看到客户成员)。
+	if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/members", orgID), supRO.Token, nil, nil); st != http.StatusOK {
+		t.Errorf("只读支持态应能读成员列表,得 %d", st)
+	}
+	// 只读态:任何写 → 403(10402)。
+	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/members", orgID), supRO.Token,
+		map[string]any{"name": "x", "tier_id": tierResp.ID}, nil); st != http.StatusForbidden {
+		t.Errorf("只读支持态写应 403,得 %d", st)
+	} else {
+		t.Log("US-2.2 只读支持态 ok: 能读、任何写 → 403")
+	}
+	api.do("POST", fmt.Sprintf("/api/v1/support-sessions/%d/close", supRO.SessionID), opTok, nil, nil)
+
+	// 协助态:普通写放行、动钱红线挡。
+	var supAS struct {
+		SessionID int64  `json:"session_id"`
+		Token     string `json:"token"`
+	}
+	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/support-sessions", orgID), opTok,
+		map[string]any{"scope": "assist", "grant_type": "authorized", "ttl_seconds": 600, "reason": "协助配置"}, &supAS); st != http.StatusCreated {
+		t.Fatalf("开协助支持会话 HTTP=%d", st)
+	}
+	// 协助态普通写(调额)放行。
+	if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/quota:adjust", openResp.MemberID), supAS.Token,
+		map[string]any{"delta_quota": 1000000, "duration": "today"}, nil); st != http.StatusOK {
+		t.Errorf("协助态普通写(调额)应放行 200,得 %d", st)
+	}
+	// 协助态动钱 → 403 红线(10403)。
+	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/recharges", orgID), supAS.Token,
+		map[string]any{"amount_quota": 1, "transfer_no": "X"}, nil); st != http.StatusForbidden {
+		t.Errorf("协助态动钱应 403 红线,得 %d", st)
+	} else {
+		t.Log("US-2.2 协助态 ok: 普通写放行、动钱红线 → 403")
+	}
+	api.do("POST", fmt.Sprintf("/api/v1/support-sessions/%d/close", supAS.SessionID), opTok, nil, nil)
+	t.Log("里程碑 5 e2e 全通过:用量看板 + 支持态只读(写403)+ 协助态(普通写放行/动钱红线403)")
+
 	// ===== 里程碑 3b:读 logs 扣费 + 去重 + 硬停(需 new-api 库连接造日志,本地集成 compose)=====
 	if newapiSQLDSN == "" {
 		t.Log("跳过 3b 扣费实测(未设 NEXUS_IT_NEWAPI_SQL_DSN);开关 RBAC 已验")

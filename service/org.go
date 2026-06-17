@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/nexusapi-platform/enterprise/model"
@@ -124,10 +125,13 @@ func (s *Service) audit(ctx context.Context, c session.Claims, orgID int64, acti
 		Detail:     detailJSON,
 		Result:     "ok",
 	}
-	// 运营方支持态:双身份(后续里程碑接 on_behalf_of)。
+	// 运营方支持态:双身份(actor=运营方真实 + on_behalf_of=客户管理员),写客户 audit_log(08 §0.4)。
 	if c.SupportSessionID != 0 {
 		sid := c.SupportSessionID
 		e.SupportSessionID = &sid
+		e.Actor = fmt.Sprintf("operator:%d", c.MemberID)
+		onBehalf := fmt.Sprintf("org_admin@org%d", orgID)
+		e.OnBehalfOf = &onBehalf
 	}
 	if err := s.store.WriteAudit(ctx, e); err != nil {
 		s.log.Error("写审计失败", "action", action, "org_id", orgID, "err", err)

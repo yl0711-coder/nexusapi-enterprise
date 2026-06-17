@@ -167,8 +167,21 @@ req POST "/api/v1/approvals/$BIG_ID/decide" "$AD_TOK" "{\"approved\":true}"
 req POST "/api/v1/approvals/$BIG_ID/decide" "$AD_TOK" "{\"approved\":true}"
 [ "$CODE" = 200 ] && ok "组织管理员二审 200 state=$(field state)(终批+下发)" || bad "二审 CODE=$CODE BODY=$BODY"
 
+hdr "20) 里程碑5 用量看板 + 运营方三层支持"
+req GET "/api/v1/organizations/$ORG_ID/usage?since_hours=24" "$AD_TOK" ""
+[ "$CODE" = 200 ] && ok "组织用量看板 200" || bad "用量 CODE=$CODE"
+req POST "/api/v1/organizations/$ORG_ID/support-sessions" "$OP_TOK" "{\"scope\":\"readonly\",\"ttl_seconds\":600,\"reason\":\"排障\"}"
+SUP_TOK="$(field token)"; SUP_ID="$(field session_id)"
+[ "$CODE" = 201 ] && [ -n "$SUP_TOK" ] && ok "开只读支持会话 201" || bad "开会话 CODE=$CODE BODY=$BODY"
+req GET "/api/v1/organizations/$ORG_ID/members" "$SUP_TOK" ""
+[ "$CODE" = 200 ] && ok "只读支持态能读成员列表 200" || bad "只读读 CODE=$CODE"
+req POST "/api/v1/organizations/$ORG_ID/members" "$SUP_TOK" "{\"name\":\"x\"}"
+[ "$CODE" = 403 ] && ok "只读支持态写 → 403(后端闸)" || bad "应 403 得 $CODE"
+req POST "/api/v1/support-sessions/$SUP_ID/close" "$OP_TOK" ""
+[ "$CODE" = 200 ] && ok "结束支持会话 200" || bad "结束 CODE=$CODE"
+
 # 放最后:此步会调 GET /api/user/token 旋转 root token,放末尾避免作废 server 持有的管理员 token。
-hdr "20) 零侵入核对:new-api 侧真建了该用户"
+hdr "21) 零侵入核对:new-api 侧真建了该用户"
 NU="$(curl -s "http://localhost:13000/api/user/search?keyword=o${ORG_ID}m${MEMBER_ID}" \
   -H "Authorization: Bearer $(curl -s -c /tmp/j -X POST http://localhost:13000/api/user/login -H 'Content-Type: application/json' -d '{"username":"root","password":"RootPass123"}' >/dev/null; curl -s -b /tmp/j -H 'New-Api-User: 1' http://localhost:13000/api/user/token | grep -oE '"data":"[^"]+"' | sed -E 's/.*:"([^"]+)"/\1/')" \
   -H 'New-Api-User: 1' 2>/dev/null | grep -oE "\"username\":\"o${ORG_ID}m${MEMBER_ID}\"" | head -1)"

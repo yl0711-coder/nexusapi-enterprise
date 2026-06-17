@@ -117,7 +117,7 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	}
 	var tierResp struct{ ID int64 `json:"id"` }
 	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/tiers", orgID), adminTok,
-		map[string]any{"name": "标准档", "model_set": []string{"gpt-5.4", "claude-sonnet-4-6"}}, &tierResp); st != http.StatusCreated {
+		map[string]any{"name": "标准档", "model_set": []string{"gpt-5.4", "claude-sonnet-4-6"}, "monthly_limit": 25000000}, &tierResp); st != http.StatusCreated {
 		t.Fatalf("建层级 HTTP=%d", st)
 	}
 	if st := api.do("POST", fmt.Sprintf("/api/v1/tiers/%d/default", tierResp.ID), adminTok, nil, nil); st != http.StatusOK {
@@ -448,8 +448,9 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		State    string `json:"state"`
 		IsLevel2 bool   `json:"is_level2"`
 	}
+	// 二审需 ≥30 万元 = 1.5e11 quota;用 40 万元 = 2e11 quota 触发(阈值已按元修正,A4)。
 	if st := api.do("POST", "/api/v1/approvals", memberTok,
-		map[string]any{"amount_quota": 200000000, "duration": "today", "reason": "大项目"}, &big); st != http.StatusCreated {
+		map[string]any{"amount_quota": 200000000000, "duration": "today", "reason": "大项目"}, &big); st != http.StatusCreated {
 		t.Fatalf("大额申请 HTTP=%d", st)
 	}
 	if big.State != "pending" || !big.IsLevel2 {
@@ -477,8 +478,8 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	if d2.State != "approved" {
 		t.Errorf("二审通过应 approved,得 %s", d2.State)
 	}
-	if qf, _ := getNewapiUser(t, newapiURL, adminToken, adminUID, uid); qf != qBeforeFinal+200000000 {
-		t.Errorf("二审通过下发后 quota 应 +2e8: %d→%d", qBeforeFinal, qf)
+	if qf, _ := getNewapiUser(t, newapiURL, adminToken, adminUID, uid); qf != qBeforeFinal+200000000000 {
+		t.Errorf("二审通过下发后 quota 应 +2e11: %d→%d", qBeforeFinal, qf)
 	} else {
 		t.Logf("US-06 二审 ok: pending→l1_approved→approved 且下发,quota %d→%d", qBeforeFinal, qf)
 	}

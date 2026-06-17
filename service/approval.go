@@ -13,10 +13,11 @@ import (
 )
 
 // 审批三档阈值(08 §3.1;原型默认值,可配)。本期硬编默认,后续接 approval-rules 端点。
+// 单位是 quota(= 元×500000)。默认对应:日增额 < 10 万元自动通过;≥ 30 万元(或开新模型)→ 二审(A4 拍板)。
 const (
-	approvalAutoMaxQuota int64 = 50_000_000  // ① 自动通过额度上限
-	approvalAutoMaxDays        = 1           // ① 自动通过时长上限(天)
-	approvalL1MaxQuota   int64 = 150_000_000 // ② 一审上限(超此或开新模型 → 二审)
+	approvalAutoMaxQuota int64 = 50_000_000_000  // ① 10 万元 = 100000 × 500000
+	approvalAutoMaxDays        = 1               // ① 自动通过时长上限(天)
+	approvalL1MaxQuota   int64 = 150_000_000_000 // ② 30 万元 = 300000 × 500000
 )
 
 // SubmitApprovalInput 提交申请入参(US-06;成员发起)。

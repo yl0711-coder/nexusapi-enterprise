@@ -12,39 +12,22 @@ import (
 	"github.com/nexusapi-platform/enterprise/repo"
 )
 
-// DefaultBaseQuota 是层级未设任何周期上限时的兜底基线额度(quota)。25_000_000 = $50(09 §16 锚定)。
-const DefaultBaseQuota int64 = 25_000_000
+// DefaultBaseTierMonthlyQuota 是建组织时自动建的"基础档"月度额度(quota,可见可改;= $50/月,锚定 500000=$1)。
+// 这不是隐藏兜底常量,而是落在可见 tier 模板上的初始保守值,运营/商务按客户调整。
+const DefaultBaseTierMonthlyQuota int64 = 25_000_000
 
-// tierBaseQuota 取层级的基线额度:优先 monthly→weekly→daily,都没有则兜底默认(03 §3.1 当期上限)。
-func tierBaseQuota(t *model.Tier) int64 {
-	if t == nil {
-		return DefaultBaseQuota
-	}
-	switch {
-	case t.MonthlyLimit != nil:
-		return *t.MonthlyLimit
-	case t.WeeklyLimit != nil:
-		return *t.WeeklyLimit
-	case t.DailyLimit != nil:
-		return *t.DailyLimit
-	default:
-		return DefaultBaseQuota
-	}
-}
+// QuotaPerUnit 锚定:1 元/美元 = 500000 quota(与主站一致;元↔quota 换算的唯一常量)。
+const QuotaPerUnit int64 = 500000
 
-// computeOverride 合成成员当期 override 额度 = 层级基线 + 活跃额度类 grant 之和(clamp 到 0)。
-// 生效优先级(02 §3:个人临时 > 层级);团队/组织默认在 tier 未绑时由 DefaultBaseQuota 兜底,
-// 更细的多级合成在后续里程碑细化。
+// computeOverride 合成成员当期 override 额度 = 基线 + 活跃额度类 grant(clamp 0)。
+// 基线(B1 已拍板模型):显式覆盖(member>team>org 的 quota_policy.limit)?? 解析 tier 链
+// (member.tier ?? team.tier ?? org.tier)取当前 period 的 limit。tier 是可复用额度模板,
+// 运行时解析、不为每成员物化 policy;组织建时必有默认档,**无任何隐藏兜底常量**。
 func (s *Service) computeOverride(ctx context.Context, m *model.Member) (int64, error) {
-	var tier *model.Tier
-	if m.TierID != nil {
-		t, err := s.store.GetTier(ctx, m.OrgID, *m.TierID)
-		if err != nil && !errors.Is(err, repo.ErrNotFound) {
-			return 0, err
-		}
-		tier = t
+	base, err := s.resolveBaseQuota(ctx, m)
+	if err != nil {
+		return 0, err
 	}
-	base := tierBaseQuota(tier)
 	grants, err := s.store.ListActiveQuotaGrants(ctx, m.OrgID, m.ID)
 	if err != nil {
 		return 0, err
@@ -57,6 +40,95 @@ func (s *Service) computeOverride(ctx context.Context, m *model.Member) (int64, 
 		override = 0
 	}
 	return override, nil
+}
+
+// resolveBaseQuota 解析成员当期基线额度(quota)。
+func (s *Service) resolveBaseQuota(ctx context.Context, m *model.Member) (int64, error) {
+	policies, err := s.store.ListQuotaPolicies(ctx, m.OrgID)
+	if err != nil {
+		return 0, err
+	}
+	period := orgPeriod(policies) // org 级 reset 规则的 period,默认 monthly
+	// 显式覆盖:member 级 > team 级(quota_policy.limit_quota)。
+	if lim, ok := explicitOverride(policies, m.ID, m.TeamID); ok {
+		return lim, nil
+	}
+	// tier 链:member.tier ?? team.tier ?? org.tier。
+	tierID := m.TierID
+	if tierID == nil && m.TeamID != nil {
+		if t, err := s.store.GetTeam(ctx, m.OrgID, *m.TeamID); err == nil {
+			tierID = t.DefaultTierID
+		}
+	}
+	if tierID == nil {
+		org, err := s.store.GetOrganization(ctx, m.OrgID)
+		if err != nil {
+			return 0, err
+		}
+		tierID = org.DefaultTierID
+	}
+	if tierID == nil {
+		return 0, apperr.Internal("组织未配默认档,无法确定额度基线(请建组织时设默认档)")
+	}
+	tier, err := s.store.GetTier(ctx, m.OrgID, *tierID)
+	if err != nil {
+		return 0, err
+	}
+	lim, ok := tierPeriodLimit(tier, period)
+	if !ok {
+		return 0, apperr.Internal("默认档未配该周期额度上限")
+	}
+	return lim, nil
+}
+
+// orgPeriod 取组织级重置规则的 period(scope=org 的 quota_policy);缺省 monthly。
+func orgPeriod(policies []*repo.QuotaPolicy) string {
+	for _, p := range policies {
+		if p.Scope == "org" && p.Period != "" {
+			return p.Period
+		}
+	}
+	return "monthly"
+}
+
+// explicitOverride 找显式覆盖额度:member 级优先于 team 级(scope 的 quota_policy.limit_quota)。
+func explicitOverride(policies []*repo.QuotaPolicy, memberID int64, teamID *int64) (int64, bool) {
+	for _, p := range policies {
+		if p.Scope == "member" && p.ScopeID == memberID && p.Status == "active" {
+			return p.LimitQuota, true
+		}
+	}
+	if teamID != nil {
+		for _, p := range policies {
+			if p.Scope == "team" && p.ScopeID == *teamID && p.Status == "active" {
+				return p.LimitQuota, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// tierPeriodLimit 取层级在该 period 的额度上限;该 period 未配则回退 monthly→weekly→daily 第一个非空。
+func tierPeriodLimit(t *model.Tier, period string) (int64, bool) {
+	pick := func() *int64 {
+		switch period {
+		case "daily":
+			return t.DailyLimit
+		case "weekly":
+			return t.WeeklyLimit
+		default:
+			return t.MonthlyLimit
+		}
+	}
+	if v := pick(); v != nil {
+		return *v, true
+	}
+	for _, v := range []*int64{t.MonthlyLimit, t.WeeklyLimit, t.DailyLimit} {
+		if v != nil {
+			return *v, true
+		}
+	}
+	return 0, false
 }
 
 // applyMemberOverride 重算并经 adapter(限速出口)把成员 override quota 下发到 new-api。

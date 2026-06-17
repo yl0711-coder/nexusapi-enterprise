@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/nexusapi-platform/enterprise/adapter/newapi"
 	"github.com/nexusapi-platform/enterprise/handler"
 	"github.com/nexusapi-platform/enterprise/pkg/crypto"
@@ -45,10 +47,16 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		t.Skip("跳过集成测试:未设 NEXUS_IT_DSN / NEXUS_IT_NEWAPI_URL(见 docker-compose.integration.yml)")
 	}
 
+	// 可选:new-api 的库连接,用于建 nexus 库 + 造消费日志验扣费(3b)。仅本地集成 compose 设。
+	newapiSQLDSN := os.Getenv("NEXUS_IT_NEWAPI_SQL_DSN")
+
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	// 1) 连 MySQL(带重试,等容器就绪)+ 迁移。
+	if newapiSQLDSN != "" {
+		ensureDatabase(t, newapiSQLDSN, "nexus") // 本地 compose 的 mysql 只建了 newapi 库,nexus 自建
+	}
 	store := openWithRetry(t, ctx, dsn)
 	defer store.Close()
 	if err := store.Migrate(ctx); err != nil {
@@ -375,6 +383,93 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	}
 
 	t.Log("里程碑 3a e2e 全通过:入账(余额增/幂等)+ 查询 + 申请充值(不改余额)+ 动钱红线 403 + 低位告警状态翻转")
+
+	// ===== 里程碑 3b:计费开关 RBAC(总是跑)=====
+	if st := api.do("PATCH", fmt.Sprintf("/api/v1/organizations/%d/billing-settings", orgID), adminTok,
+		map[string]any{"billing_enabled": true}, nil); st != http.StatusForbidden {
+		t.Errorf("组织管理员改计费开关应 403(仅运营方),得 %d", st)
+	} else {
+		t.Log("计费开关 RBAC ok: 组织管理员改 → 403")
+	}
+
+	// ===== 里程碑 3b:读 logs 扣费 + 去重 + 硬停(需 new-api 库连接造日志,本地集成 compose)=====
+	if newapiSQLDSN == "" {
+		t.Log("跳过 3b 扣费实测(未设 NEXUS_IT_NEWAPI_SQL_DSN);开关 RBAC 已验")
+		t.Log("里程碑 3b 开关部分通过")
+		return
+	}
+
+	// 开计费(关硬停、低位阈值清 0,状态判定干净)。
+	if st := api.do("PATCH", fmt.Sprintf("/api/v1/organizations/%d/billing-settings", orgID), opTok,
+		map[string]any{"billing_enabled": true, "hard_stop_enabled": false, "low_watermark_quota": 0}, nil); st != http.StatusOK {
+		t.Fatalf("开计费 HTTP=%d", st)
+	}
+
+	readBal := func() int64 {
+		var b struct {
+			Balance  int64 `json:"balance_quota"`
+			Consumed int64 `json:"total_consumed_quota"`
+		}
+		api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/balance", orgID), opTok, nil, &b)
+		return b.Balance
+	}
+	seedNow := time.Now().Unix()
+	balB3b := readBal()
+
+	// 造一条 4,000,000 消费日志 → 结算扣费。
+	seedConsumptionLog(t, newapiSQLDSN, uid, "gpt-5-mini", 4000000, seedNow-10)
+	deducted, derr := svc.RunSettlement(ctx)
+	if derr != nil {
+		t.Fatalf("结算失败: %v", derr)
+	}
+	balAfter := readBal()
+	if deducted != 4000000 || balAfter != balB3b-4000000 {
+		t.Errorf("结算应扣 4e6: deducted=%d before=%d after=%d", deducted, balB3b, balAfter)
+	} else {
+		t.Logf("3b 读logs扣费 ok: 扣 %d,余额 %d→%d", deducted, balB3b, balAfter)
+	}
+
+	// 再结算一次 → 去重不重复扣。
+	if d2, _ := svc.RunSettlement(ctx); d2 != 0 || readBal() != balAfter {
+		t.Errorf("重复结算应去重不再扣: d2=%d bal=%d", d2, readBal())
+	} else {
+		t.Log("3b 去重 ok: 同一桶重复结算不再扣")
+	}
+
+	// 硬停:开 hard_stop,造一笔超过余额的消耗,重置游标(去重保证 4e6 不再扣),结算 → 余额≤0 → 成员被 disable+quota0。
+	api.do("PATCH", fmt.Sprintf("/api/v1/organizations/%d/billing-settings", orgID), opTok,
+		map[string]any{"hard_stop_enabled": true}, nil)
+	bigConsume := balAfter + 1000000
+	seedConsumptionLog(t, newapiSQLDSN, uid, "gpt-4o-mini", bigConsume, seedNow-10)
+	if _, err := store.DB().ExecContext(ctx, "UPDATE settlement_cursor SET last_settled_ts=0 WHERE org_id=0"); err != nil {
+		t.Fatalf("重置游标: %v", err)
+	}
+	if _, err := svc.RunSettlement(ctx); err != nil {
+		t.Fatalf("硬停结算失败: %v", err)
+	}
+	if q, _ := getNewapiUser(t, newapiURL, adminToken, adminUID, uid); q != 0 {
+		t.Errorf("硬停后成员 new-api quota 应=0,得 %d", q)
+	} else {
+		t.Log("3b 硬停 ok: 余额≤0 + 硬停开 → 成员 quota override 为 0(网关实时拒)")
+	}
+	var orgSt struct {
+		Status string `json:"status"`
+	}
+	api.do("GET", fmt.Sprintf("/api/v1/organizations/%d", orgID), opTok, nil, &orgSt)
+	if orgSt.Status != "stopped" {
+		t.Errorf("硬停后组织状态应 stopped,得 %q", orgSt.Status)
+	}
+
+	// 充值恢复 → 解硬停,成员 quota 重算恢复 >0。
+	api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/recharges", orgID), opTok,
+		map[string]any{"amount_quota": 100000000, "transfer_no": "TR-RESTORE-" + randSuffix()}, nil)
+	if q, _ := getNewapiUser(t, newapiURL, adminToken, adminUID, uid); q <= 0 {
+		t.Errorf("充值恢复后成员 quota 应>0,得 %d", q)
+	} else {
+		t.Logf("3b 解硬停 ok: 充值后成员 quota 重算恢复=%d", q)
+	}
+
+	t.Log("里程碑 3b e2e 全通过:读logs扣费 + 去重防重复扣 + 守恒 + 硬停(逐组织开关)+ 充值解硬停恢复")
 }
 
 // ---- helpers ----
@@ -574,6 +669,45 @@ func getNewapiUser(t *testing.T, base, adminToken string, adminUID int, userID i
 		t.Fatalf("解析 new-api 用户失败: %v\n%s", err, raw)
 	}
 	return env.Data.Quota, env.Data.Status
+}
+
+// ensureDatabase 用一个已存在库的连接建另一个库(本地 compose 自建 nexus)。
+func ensureDatabase(t *testing.T, dsn, dbname string) {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("连 newapi 库失败: %v", err)
+	}
+	defer db.Close()
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		if err = db.Ping(); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("等 MySQL 超时: %v", err)
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if _, err := db.Exec("CREATE DATABASE IF NOT EXISTS " + dbname + " CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"); err != nil {
+		t.Fatalf("建库 %s 失败: %v", dbname, err)
+	}
+}
+
+// seedConsumptionLog 向 newapi.logs 造一条 type=2 消费日志(测试模拟用量,平台经 /api/log/ 读)。
+func seedConsumptionLog(t *testing.T, dsn string, userID int64, model string, quota int64, createdAt int64) {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("连 newapi 库失败: %v", err)
+	}
+	defer db.Close()
+	_, err = db.Exec(
+		"INSERT INTO logs (user_id, created_at, type, content, username, token_name, model_name, quota, "+
+			"prompt_tokens, completion_tokens, use_time, is_stream, channel_id, channel_name, token_id, `group`, ip, request_id, other) "+
+			"VALUES (?, ?, 2, '', '', '', ?, ?, 100, 200, 1, 0, 0, '', 0, 'default', '', '', '')",
+		userID, createdAt, model, quota)
+	if err != nil {
+		t.Fatalf("造消费日志失败: %v", err)
+	}
 }
 
 func randSuffix() string {

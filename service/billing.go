@@ -155,6 +155,63 @@ func (s *Service) ListRechargeRequests(ctx context.Context, c session.Claims, or
 	return s.store.ListRechargeRequests(ctx, orgID, limit, offset)
 }
 
+// BillingSettingsInput 计费灰度开关入参(nil=不改)。
+type BillingSettingsInput struct {
+	BillingEnabled  *bool
+	HardStopEnabled *bool
+	LowWatermark    *int64
+}
+
+// BillingSettings 当前计费开关 + 低位阈值。
+type BillingSettings struct {
+	BillingEnabled  bool
+	HardStopEnabled bool
+	LowWatermark    int64
+}
+
+// SetBillingSettings 设组织计费灰度开关 + 低位阈值(仅运营方,逐组织灰度;扣费/硬停默认关)。
+func (s *Service) SetBillingSettings(ctx context.Context, c session.Claims, orgID int64, in BillingSettingsInput) (*BillingSettings, error) {
+	if err := assertRole(c, session.RoleOperator); err != nil {
+		return nil, err
+	}
+	if _, err := s.store.GetOrganization(ctx, orgID); errors.Is(err, repo.ErrNotFound) {
+		return nil, apperr.NotFound("组织不存在")
+	} else if err != nil {
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	if err := s.store.SetOrgBillingFlags(ctx, orgID, in.BillingEnabled, in.HardStopEnabled); err != nil {
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	if in.LowWatermark != nil {
+		if err := s.store.SetLowWatermark(ctx, orgID, *in.LowWatermark); err != nil {
+			return nil, apperr.Internal("").WithCause(err)
+		}
+	}
+	s.audit(ctx, c, orgID, "set_billing_settings", "organization", &orgID, map[string]any{
+		"billing_enabled": in.BillingEnabled, "hard_stop_enabled": in.HardStopEnabled, "low_watermark": in.LowWatermark,
+	})
+	return s.GetBillingSettings(ctx, c, orgID)
+}
+
+// GetBillingSettings 读计费开关 + 低位阈值(O/A)。
+func (s *Service) GetBillingSettings(ctx context.Context, c session.Claims, orgID int64) (*BillingSettings, error) {
+	if err := assertOrgScope(c, orgID); err != nil {
+		return nil, err
+	}
+	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
+		return nil, err
+	}
+	f, err := s.store.GetOrgBillingFlags(ctx, orgID)
+	if err != nil {
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	b, err := s.store.GetOrCreateBalance(ctx, orgID)
+	if err != nil {
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	return &BillingSettings{BillingEnabled: f.BillingEnabled, HardStopEnabled: f.HardStopEnabled, LowWatermark: b.LowWatermark}, nil
+}
+
 // recomputeOrgStatus 按余额水位重算组织服务状态并(若变化)落库 + 审计(US-11)。
 //
 // 余额 <= 0 → stopped;0 < 余额 <= low_watermark(且阈值>0)→ low;否则 active。
@@ -178,9 +235,29 @@ func (s *Service) recomputeOrgStatus(ctx context.Context, orgID int64, b *model.
 	if err := s.store.UpdateOrgStatus(ctx, orgID, target); err != nil {
 		return err
 	}
+
+	// 硬停:逐组织开关,默认关(用户拍板 2026-06-17)。开了才在 stopped 进/出时 override 成员 quota。
+	flags, ferr := s.store.GetOrgBillingFlags(ctx, orgID)
+	hardStop := ferr == nil && flags.HardStopEnabled
+	if hardStop {
+		switch {
+		case target == model.OrgStatusStopped:
+			if err := s.hardStopOrg(ctx, orgID); err != nil {
+				s.log.Error("硬停失败", "org_id", orgID, "err", err)
+			}
+		case org.Status == model.OrgStatusStopped: // 从 stopped 恢复
+			if err := s.restoreOrgQuotas(ctx, orgID); err != nil {
+				s.log.Error("解硬停恢复 quota 失败", "org_id", orgID, "err", err)
+			}
+		}
+	}
+	hsState := "disabled"
+	if hardStop {
+		hsState = "enabled"
+	}
 	s.auditSystem(ctx, orgID, "org_status_change", "organization", &orgID, map[string]any{
-		"from": org.Status, "to": target, "balance": b.Balance, "hard_stop": "disabled(3a)",
+		"from": org.Status, "to": target, "balance": b.Balance, "hard_stop": hsState,
 	}, "ok")
-	s.log.Info("组织状态随余额变化", "org_id", orgID, "from", org.Status, "to", target, "balance", b.Balance)
+	s.log.Info("组织状态随余额变化", "org_id", orgID, "from", org.Status, "to", target, "balance", b.Balance, "hard_stop", hsState)
 	return nil
 }

@@ -1,5 +1,6 @@
-# 里程碑 1 集成测试编排:真实 MySQL 8.0 + 真实 new-api rc.4 + 容器内跑 e2e。
-# 全程容器内编译/运行,不碰本机 Go。用法:
+# 集成测试编排:真实 MySQL 8.0 + 真实 new-api rc.4 + 容器内跑 e2e(里程碑 1/2/3a/3b)。
+# new-api 也连 MySQL(独立 newapi 库),使测试能向 newapi.logs 造 type=2 消费日志验扣费(3b)。
+# 全程容器内,不碰本机 Go。用法:
 #   docker compose -f test/docker-compose.integration.yml up --build \
 #       --abort-on-container-exit --exit-code-from tests
 services:
@@ -8,9 +9,9 @@ services:
     command: --default-authentication-plugin=mysql_native_password
     environment:
       MYSQL_ROOT_PASSWORD: rootpw
-      MYSQL_DATABASE: nexus
+      MYSQL_DATABASE: newapi          # new-api 启动即需此库;平台库 nexus 由测试自建
     tmpfs:
-      - /var/lib/mysql   # 一次性:测试库不落盘
+      - /var/lib/mysql                # 一次性:测试库不落盘
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-prootpw"]
       interval: 3s
@@ -19,8 +20,13 @@ services:
 
   newapi:
     image: calciumion/new-api:v1.0.0-rc.4
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      SQL_DSN: "root:rootpw@tcp(mysql:3306)/newapi"
     tmpfs:
-      - /data            # 一次性:不持久化
+      - /data
     expose:
       - "3000"
 
@@ -36,4 +42,6 @@ services:
     environment:
       NEXUS_IT_DSN: "root:rootpw@tcp(mysql:3306)/nexus?parseTime=true&loc=UTC&charset=utf8mb4"
       NEXUS_IT_NEWAPI_URL: "http://newapi:3000"
-    command: ["go", "test", "./test/integration/", "-run", "Integration", "-v", "-count=1", "-timeout", "240s"]
+      # new-api 的库连接:测试用它建 nexus 库 + 向 newapi.logs 造 type=2 消费日志(验扣费)。
+      NEXUS_IT_NEWAPI_SQL_DSN: "root:rootpw@tcp(mysql:3306)/newapi?parseTime=true&loc=UTC&charset=utf8mb4"
+    command: ["go", "test", "./test/integration/", "-run", "Integration", "-v", "-count=1", "-timeout", "300s"]

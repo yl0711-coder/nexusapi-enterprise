@@ -134,8 +134,18 @@ req POST "/api/v1/organizations/$ORG_ID/recharge-requests" "$AD_TOK" "{\"type\":
 req POST "/api/v1/organizations/$ORG_ID/recharge-requests" "$M_TOK" "{\"type\":\"topup\",\"amount_quota\":1}"
 [ "$CODE" = 403 ] && ok "成员申请充值 → 403(计费子集仅组织管理员)" || bad "应 403 得 $CODE"
 
+hdr "17) 里程碑3b 计费开关(逐组织灰度,仅运营方)"
+req PATCH "/api/v1/organizations/$ORG_ID/billing-settings" "$OP_TOK" "{\"billing_enabled\":true,\"hard_stop_enabled\":false,\"low_watermark_quota\":1000000}"
+[ "$CODE" = 200 ] && ok "运营方开计费 200 billing_enabled=$(field billing_enabled)" || bad "开计费 CODE=$CODE BODY=$BODY"
+req GET "/api/v1/organizations/$ORG_ID/billing-settings" "$AD_TOK" ""
+[ "$CODE" = 200 ] && ok "查计费开关 200(组织管理员可读)" || bad "查开关 CODE=$CODE"
+req PATCH "/api/v1/organizations/$ORG_ID/billing-settings" "$AD_TOK" "{\"billing_enabled\":false}"
+[ "$CODE" = 403 ] && ok "组织管理员改计费开关 → 403(仅运营方)" || bad "应 403 得 $CODE"
+# 关回去,避免 dev 误扣(本地无真实用量,但保持干净)
+req PATCH "/api/v1/organizations/$ORG_ID/billing-settings" "$OP_TOK" "{\"billing_enabled\":false}" >/dev/null
+
 # 放最后:此步会调 GET /api/user/token 旋转 root token,放末尾避免作废 server 持有的管理员 token。
-hdr "17) 零侵入核对:new-api 侧真建了该用户"
+hdr "18) 零侵入核对:new-api 侧真建了该用户"
 NU="$(curl -s "http://localhost:13000/api/user/search?keyword=o${ORG_ID}m${MEMBER_ID}" \
   -H "Authorization: Bearer $(curl -s -c /tmp/j -X POST http://localhost:13000/api/user/login -H 'Content-Type: application/json' -d '{"username":"root","password":"RootPass123"}' >/dev/null; curl -s -b /tmp/j -H 'New-Api-User: 1' http://localhost:13000/api/user/token | grep -oE '"data":"[^"]+"' | sed -E 's/.*:"([^"]+)"/\1/')" \
   -H 'New-Api-User: 1' 2>/dev/null | grep -oE "\"username\":\"o${ORG_ID}m${MEMBER_ID}\"" | head -1)"

@@ -60,9 +60,32 @@ func (s *Store) Close() error { return s.db.Close() }
 // DB 暴露底层连接池(集成测试/迁移用)。
 func (s *Store) DB() *sql.DB { return s.db }
 
-// Migrate 按文件名顺序执行内嵌迁移(幂等:全 CREATE TABLE IF NOT EXISTS)。
-// 逐条语句执行(不依赖 multiStatements),把 SQL 按分号切分并跳过注释/空白。
+// Migrate 按文件名顺序执行内嵌迁移,**每个文件只应用一次**(记 schema_migration 表)。
+// 早期 CREATE TABLE IF NOT EXISTS 的迁移即便重跑也幂等;一旦记录后不再重跑,
+// 使 ALTER 这类非幂等语句也能安全只执行一次。
 func (s *Store) Migrate(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx,
+		`CREATE TABLE IF NOT EXISTS schema_migration (
+		   filename   VARCHAR(128) NOT NULL PRIMARY KEY,
+		   applied_at DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+		 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`); err != nil {
+		return fmt.Errorf("repo: 建 schema_migration 失败: %w", err)
+	}
+	applied := map[string]bool{}
+	rows, err := s.db.QueryContext(ctx, `SELECT filename FROM schema_migration`)
+	if err != nil {
+		return fmt.Errorf("repo: 读已应用迁移失败: %w", err)
+	}
+	for rows.Next() {
+		var f string
+		if err := rows.Scan(&f); err != nil {
+			rows.Close()
+			return err
+		}
+		applied[f] = true
+	}
+	rows.Close()
+
 	entries, err := fs.ReadDir(migrations.FS, ".")
 	if err != nil {
 		return fmt.Errorf("repo: 读取迁移目录失败: %w", err)
@@ -75,6 +98,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 	}
 	sort.Strings(files)
 	for _, name := range files {
+		if applied[name] {
+			continue
+		}
 		raw, err := migrations.FS.ReadFile(name)
 		if err != nil {
 			return fmt.Errorf("repo: 读取迁移 %s 失败: %w", name, err)
@@ -83,6 +109,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 			if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 				return fmt.Errorf("repo: 执行迁移 %s 失败: %w\n语句: %.120s", name, err, stmt)
 			}
+		}
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO schema_migration (filename) VALUES (?)`, name); err != nil {
+			return fmt.Errorf("repo: 记录迁移 %s 失败: %w", name, err)
 		}
 	}
 	return nil

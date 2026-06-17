@@ -27,6 +27,7 @@ const (
 	stepManageUser  = "ManageUserQuota"
 	stepSetStatus   = "SetUserStatus"
 	stepProbe       = "ProbeAccessToken"
+	stepReadLogs    = "ReadConsumptionLogs"
 )
 
 // Config 配置 adapter 的 Executor 单出口行为。零值有合理默认(见 normalize)。

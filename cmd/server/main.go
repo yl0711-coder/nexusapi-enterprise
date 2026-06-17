@@ -28,7 +28,7 @@ import (
 )
 
 // version 由构建时 -ldflags "-X main.version=..." 注入。
-var version = "3.0.0-m3a"
+var version = "3.1.0-m3b"
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -105,8 +105,10 @@ func run(log *slog.Logger) error {
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	defer workerCancel()
 	if os.Getenv("NEXUS_WORKER_ENABLED") != "false" {
-		qw := worker.NewQuotaWorker(svc, log, time.Duration(atoiOr("NEXUS_WORKER_INTERVAL_SEC", 60))*time.Second, 100)
-		go qw.Run(workerCtx)
+		iv := time.Duration(atoiOr("NEXUS_WORKER_INTERVAL_SEC", 60)) * time.Second
+		go worker.NewQuotaWorker(svc, log, iv, 100).Run(workerCtx)
+		// 结算 worker:只对开了 billing_enabled 的组织扣费(逐组织灰度,默认关)。
+		go worker.NewSettlementWorker(svc, log, iv).Run(workerCtx)
 	}
 
 	h := handler.New(svc, signer, log, version)

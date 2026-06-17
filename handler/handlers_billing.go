@@ -112,6 +112,55 @@ type rechargeRequestReq struct {
 	Note   string `json:"note"`
 }
 
+// GET /organizations/{id}/billing-settings — 计费开关(O/A)。
+func (h *Handler) handleGetBillingSettings(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	orgID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	bs, err := h.svc.GetBillingSettings(r.Context(), c, orgID)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{
+		"billing_enabled": bs.BillingEnabled, "hard_stop_enabled": bs.HardStopEnabled, "low_watermark_quota": bs.LowWatermark,
+	})
+}
+
+// PATCH /organizations/{id}/billing-settings — 设计费灰度开关(仅运营方)。
+type billingSettingsReq struct {
+	BillingEnabled  *bool  `json:"billing_enabled"`
+	HardStopEnabled *bool  `json:"hard_stop_enabled"`
+	LowWatermark    *int64 `json:"low_watermark_quota"`
+}
+
+func (h *Handler) handleSetBillingSettings(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	orgID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	var in billingSettingsReq
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	bs, err := h.svc.SetBillingSettings(r.Context(), c, orgID, service.BillingSettingsInput{
+		BillingEnabled: in.BillingEnabled, HardStopEnabled: in.HardStopEnabled, LowWatermark: in.LowWatermark,
+	})
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{
+		"billing_enabled": bs.BillingEnabled, "hard_stop_enabled": bs.HardStopEnabled, "low_watermark_quota": bs.LowWatermark,
+	})
+}
+
 func (h *Handler) handleRequestRecharge(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())
 	orgID, err := pathInt64(r, "id")

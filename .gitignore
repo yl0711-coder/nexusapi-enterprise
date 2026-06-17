@@ -17,3 +17,9 @@ coverage.*
 .DS_Store
 .idea/
 .vscode/
+
+# 内部沟通文档(测试报告 / 工单 / 测试指南)——不入库;上线前另建干净 git 库
+dev/测试报告-*.md
+dev/测试指南.md
+dev/工单-*/
+dev/工单-*.md

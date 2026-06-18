@@ -29,7 +29,7 @@ import (
 )
 
 // version 由构建时 -ldflags "-X main.version=..." 注入。
-var version = "7.0.0-t17"
+var version = "7.0.1-t17"
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))

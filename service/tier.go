@@ -153,7 +153,13 @@ func (s *Service) validateTierGroup(ctx context.Context, group string, modelSet 
 		return mapUpstream(err)
 	}
 	if _, ok := ratios[group]; !ok {
-		return apperr.InvalidParam(fmt.Sprintf("计费分组 %q 不存在(上游未配),请先在 new-api 建该分组", group))
+		// 区分"分组不存在"与"挂了渠道但未配倍率":后者 new-api 会拦 403,配置期就拦下并提示运营自查(§5)。
+		if g2m, gerr := s.upstream.ListGroupModels(ctx); gerr == nil {
+			if _, hasCh := g2m[group]; hasCh {
+				return apperr.InvalidParam(fmt.Sprintf("计费分组 %q 未配基础倍率(GroupRatio):请先在 new-api 给该分组设倍率,否则令牌会被拦 403", group))
+			}
+		}
+		return apperr.InvalidParam(fmt.Sprintf("计费分组 %q 不存在:请先在 new-api 挂渠道到该分组并配基础倍率(GroupRatio)", group))
 	}
 	if len(modelSet) == 0 {
 		return nil

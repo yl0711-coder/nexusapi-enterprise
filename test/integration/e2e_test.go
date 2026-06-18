@@ -913,8 +913,9 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		t.Log("回归 T17-5 ok: 配层级分组×模型集预检(坏分组/坏模型 422、可路由 201)")
 		// T17-1:开通 vip 档成员 → 令牌分组快照=vip。
 		var vom struct {
-			MemberID     int64 `json:"member_id"`
-			NewapiUserID int64 `json:"newapi_user_id"`
+			MemberID     int64  `json:"member_id"`
+			NewapiUserID int64  `json:"newapi_user_id"`
+			APIKey       string `json:"api_key"`
 		}
 		if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/members", orgID), adminTok, map[string]any{"name": "VIP成员", "tier_id": vtier.ID}, &vom); st != http.StatusCreated {
 			t.Fatalf("T17-1 开通 vip 成员应 201,得 %d", st)
@@ -928,12 +929,23 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		} else {
 			t.Log("回归 T17-1 ok: 开通成员令牌分组快照=vip(非 default)")
 		}
-		// T17-2:org 用户分组的可用分组应已含 vip(否则令牌用 vip 会 403)。
-		usable := readNewapiOption(t, newapiURL, adminToken, adminUID, "GroupSpecialUsableGroup")
+		// T17-2:可用分组写到 new-api 真读的 key(group_ratio_setting.group_special_usable_group),含 org_x→vip。
+		usable := readNewapiOption(t, newapiURL, adminToken, adminUID, "group_ratio_setting.group_special_usable_group")
 		if !strings.Contains(usable, fmt.Sprintf("org_%d", orgID)) || !strings.Contains(usable, "vip") {
-			t.Errorf("T17-2 可用分组应含 org_%d→vip,实得 %s", orgID, usable)
+			t.Errorf("T17-2 可用分组(正确 key)应含 org_%d→vip,实得 %q", orgID, usable)
 		} else {
-			t.Log("回归 T17-2 ok: 业务分组 vip 已加进 org 用户可用分组(防 403)")
+			t.Log("回归 T17-2 ok: 业务分组 vip 写进 new-api 真读的可用分组 key")
+		}
+		// T17-2 必测(验收 P0 教训):用代发 key 真发一次请求,断言不被「无权访问该分组」403。
+		// 集成栈渠道是 mock(上游打不通),但鉴权层(auth.go:386 分组可用性 / 391 分组倍率)会先过——
+		// 只要可用分组写对,就不会是分组 403;mock 上游导致的其它错误(5xx/无可用渠道)均可接受。
+		if vom.APIKey != "" {
+			st, body := chatCall(t, newapiURL, vom.APIKey, "gpt-4o")
+			if st == http.StatusForbidden && (strings.Contains(body, "分组") || strings.Contains(body, "group")) {
+				t.Errorf("T17-2 P0:代发 key 真调用被分组 403(可用分组没写对):st=%d body=%s", st, body)
+			} else {
+				t.Logf("回归 T17-2 真调用 ok: 代发 key 过鉴权分组闸(非分组 403),st=%d", st)
+			}
 		}
 		// T17-1 必测:轮换 vip 成员的 key 后,令牌分组不丢回 default(SQL 直查 newapi.tokens.group)。
 		if newapiSQLDSN != "" {
@@ -1373,6 +1385,28 @@ func seedConsumptionLog(t *testing.T, dsn string, userID int64, model string, qu
 	if err != nil {
 		t.Fatalf("造消费日志失败: %v", err)
 	}
+}
+
+// chatCall 用代发 key 真打一次 new-api /v1/chat/completions(控量),返回状态码 + body。
+// T17-2 真调用验收:断言不被"无权访问分组"403。集成栈渠道是 mock(上游打不通),
+// 故连接错/超时/5xx 均视为"过了鉴权分组闸"(返回 st=0/5xx),只有分组 403 才是回归。
+func chatCall(t *testing.T, base, apiKey, model string) (int, string) {
+	body, _ := json.Marshal(map[string]any{
+		"model":      model,
+		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
+		"max_tokens": 4,
+	})
+	req, _ := http.NewRequest("POST", base+"/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	cli := &http.Client{Timeout: 30 * time.Second}
+	resp, err := cli.Do(req)
+	if err != nil {
+		return 0, "transport_err:" + err.Error() // 连不通上游=已过鉴权分组闸,非 403
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(raw)
 }
 
 // tokenGroupBySQL 直查 newapi.tokens 该用户最新令牌的分组(验证 T17-1 令牌分组真落库)。

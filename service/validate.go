@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/nexusapi-platform/enterprise/pkg/apperr"
 )
@@ -31,6 +32,27 @@ func checkEmail(field, email string) error {
 	}
 	if !emailRe.MatchString(email) {
 		return apperr.InvalidParam(field + " 格式非法")
+	}
+	return nil
+}
+
+// loginNameRe 用户名(非邮箱)登录名:字母/数字/`.`/`_`/`-`,2–64,首尾为字母数字。
+var loginNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}[a-zA-Z0-9]$`)
+
+// checkLoginName 校验成员自定义登录名(T11:可填真实邮箱或用户名)。
+// 含 `@` → 按邮箱格式校验;否则按用户名校验。空串由调用方决定是否走 fallback。
+func checkLoginName(val string) error {
+	if len(val) > maxEmailLen {
+		return apperr.InvalidParam(fmt.Sprintf("登录名超长(上限 %d 字符)", maxEmailLen))
+	}
+	if strings.ContainsRune(val, '@') {
+		if !emailRe.MatchString(val) {
+			return apperr.InvalidParam("登录邮箱格式非法")
+		}
+		return nil
+	}
+	if !loginNameRe.MatchString(val) {
+		return apperr.InvalidParam("登录名须为字母/数字/.或_或-,2–64 位且首尾为字母数字")
 	}
 	return nil
 }

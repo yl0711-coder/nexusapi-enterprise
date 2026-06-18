@@ -439,10 +439,10 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	} else {
 		t.Log("回归 merge-preserve ok: 平台重配折扣后外部 vip/default=0.66 仍存活(只改自己那条)")
 	}
-	// S2 并发写回归:并发写 conc 用户分组下多个不同令牌分组键,单写者锁若失效会丢更新(读-改-写覆盖)。
-	// 断言全部存活。(用 10 并发:足够暴露丢更新,又不过度占用 new-api 全局限流预算。)
+	// S2 并发写回归:20 并发写 conc 用户分组下不同令牌分组键,单写者锁若失效会丢更新(读-改-写覆盖)。
+	// 断言全部存活(new-api 限流已由 compose 抬高,不再受预算干扰)。
 	{
-		const n = 10
+		const n = 20
 		var wg sync.WaitGroup
 		for i := 0; i < n; i++ {
 			wg.Add(1)
@@ -507,11 +507,10 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 
 	// ===== R3 回归:T1 读后写不丢键(连写/并发) + T6 折扣镜像累积一致 =====
 	absEq := func(a, b float64) bool { d := a - b; return d < 1e-9 && d > -1e-9 }
-	// T1-a 同一用户分组"快速连写"(每次新增一个令牌分组):authoritative 写应 n/n 不丢。
-	// (工单 T1 期望连写 10 次;集成里用 3 次——new-api 有按 IP 的全局 API 限流、与本测试其余
-	//  调用共享预算,3 次已足证"连写累积不被上游缓存回退"的性质,避免压爆限流致整套 flaky。)
+	// T1-a 同一用户分组"快速连写"10 次(对应工单 T1"间隔 0ms 连写 10 次"):每次新增一个令牌分组,
+	// authoritative 写 + 写后读校验应 10/10 不丢(new-api 限流已由 compose 抬高,不再受预算干扰)。
 	{
-		const n = 3
+		const n = 10
 		desired := map[string]float64{}
 		for i := 0; i < n; i++ {
 			desired[fmt.Sprintf("g%02d", i)] = 0.3 + float64(i)*0.01
@@ -531,12 +530,11 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 			t.Logf("回归 T1 连写 ok: 同用户分组连写 %d 次 → %d/%d 令牌分组落库值正确(己方键以镜像为准,不被上游缓存回退)", n, got, n)
 		}
 	}
-	// T1-b 批量改价:不同 org 用户分组 0ms 顺序连写(运营方"一把配多客户"的真实路径)。
-	// 每次权威写自己那条 + merge-preserve 其它,锁内读到上一次已提交态 → 应 n/n 累积、vip 不动。
-	// (用 2 个即可证明跨 org 不丢;真·并发跨用户分组写受上游单 JSON+读缓存固有限制,按顺序连写处理,
-	//  真并发残差交 reconcile 兜底。)
+	// T1-b 批量改价:5 个不同 org 用户分组 0ms 顺序连写(运营方"一把配多客户"的真实路径)。
+	// 每次权威写自己那条 + merge-preserve 其它,锁内读到上一次已提交态 → 应 5/5 累积、vip 不动。
+	// (真·并发跨用户分组写受上游单 JSON+读缓存固有限制,生产按顺序连写处理,真并发残差交 reconcile 兜底。)
 	{
-		const n = 2
+		const n = 5
 		for i := 0; i < n; i++ {
 			if err := upstream.SetOrgGroupRatios(ctxBg, fmt.Sprintf("co%02d", i), map[string]float64{"default": 0.5}); err != nil {
 				t.Fatalf("T1 批量连写第 %d 个失败: %v", i, err)
@@ -822,6 +820,74 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 			t.Errorf("T10 删无引用层级应 200,得 %d", st)
 		} else {
 			t.Log("回归 T10 ok: 删无引用层级成功;删默认/被引用档被 409 挡")
+		}
+	}
+
+	// T11 回归:自定义登录名(真实邮箱)→ 可登录;非法登录名 → 422。
+	{
+		custEmail := "real." + randSuffix() + "@client.com"
+		var om struct {
+			LoginEmail      string `json:"login_email"`
+			InitialPassword string `json:"initial_password"`
+		}
+		if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/members", orgID), adminTok,
+			map[string]any{"name": "自定义登录", "email": custEmail, "tier_id": tierResp.ID}, &om); st != http.StatusCreated {
+			t.Fatalf("T11 自定义邮箱开通应 201,得 %d", st)
+		}
+		if om.LoginEmail != custEmail {
+			t.Errorf("T11 登录名应=%s,得 %s", custEmail, om.LoginEmail)
+		}
+		if tok := login(api, custEmail, om.InitialPassword); tok == "" {
+			t.Error("T11 自定义真实邮箱应能登录")
+		} else {
+			t.Log("回归 T11 ok: 自定义真实邮箱作登录名且可登录")
+		}
+		if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/members", orgID), adminTok,
+			map[string]any{"name": "坏登录名", "email": "not valid!!", "tier_id": tierResp.ID}, nil); st != http.StatusUnprocessableEntity {
+			t.Errorf("T11 非法登录名应 422,得 %d", st)
+		} else {
+			t.Log("回归 T11 ok: 非法登录名 → 422")
+		}
+	}
+	// T12 回归:组织归档 → 默认列表隐藏、include_archived 可见;取消归档 → 恢复;非运营方 403。
+	{
+		listHas := func(inclArchived bool) bool {
+			var lr struct {
+				List []struct {
+					ID int64 `json:"id"`
+				} `json:"list"`
+			}
+			url := "/api/v1/organizations?page=1&page_size=100"
+			if inclArchived {
+				url += "&include_archived=true"
+			}
+			api.do("GET", url, opTok, nil, &lr)
+			for _, o := range lr.List {
+				if o.ID == orgID {
+					return true
+				}
+			}
+			return false
+		}
+		if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/archive", orgID), opTok, nil, nil); st != http.StatusOK {
+			t.Fatalf("T12 归档应 200,得 %d", st)
+		}
+		if listHas(false) {
+			t.Error("T12 归档后默认列表不应含该组织")
+		}
+		if !listHas(true) {
+			t.Error("T12 include_archived 应能找到已归档组织")
+		}
+		if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/archive", orgID), adminTok, nil, nil); st != http.StatusForbidden {
+			t.Errorf("T12 非运营方归档应 403,得 %d", st)
+		}
+		if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/unarchive", orgID), opTok, nil, nil); st != http.StatusOK {
+			t.Fatalf("T12 取消归档应 200,得 %d", st)
+		}
+		if !listHas(false) {
+			t.Error("T12 取消归档后默认列表应恢复该组织")
+		} else {
+			t.Log("回归 T12 ok: 归档隐藏+可检索+取消归档恢复+非运营方 403")
 		}
 	}
 

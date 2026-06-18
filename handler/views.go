@@ -19,13 +19,15 @@ type orgView struct {
 	Timezone      string `json:"timezone"`
 	DefaultTierID *int64 `json:"default_tier_id"`
 	BillingMode   string `json:"billing_mode"`
+	Archived      bool   `json:"archived"` // T12:是否已归档
 	CreatedAt     string `json:"created_at"`
 }
 
 func toOrgView(o *model.Organization) orgView {
 	return orgView{
 		ID: o.ID, Name: o.Name, Slug: o.Slug, Status: o.Status, Timezone: o.Timezone,
-		DefaultTierID: o.DefaultTierID, BillingMode: o.BillingMode, CreatedAt: o.CreatedAt.Format(time.RFC3339),
+		DefaultTierID: o.DefaultTierID, BillingMode: o.BillingMode, Archived: o.ArchivedAt != nil,
+		CreatedAt: o.CreatedAt.Format(time.RFC3339),
 	}
 }
 

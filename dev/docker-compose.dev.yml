@@ -39,6 +39,11 @@ services:
     environment:
       SQL_DSN: "root:devroot@tcp(mysql:3306)/newapi"
       TZ: "Asia/Shanghai"
+      # 抬高全局限流,避免联调/烟测高频调用触发 429(rc.4 需 NUM+DURATION 配套才生效)。
+      GLOBAL_API_RATE_LIMIT: "100000"
+      GLOBAL_API_RATE_LIMIT_DURATION: "60"
+      GLOBAL_WEB_RATE_LIMIT: "100000"
+      GLOBAL_WEB_RATE_LIMIT_DURATION: "60"
     volumes:
       - nexus_dev_newapi_data:/data
     ports:

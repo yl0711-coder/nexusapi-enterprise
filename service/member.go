@@ -48,8 +48,14 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 	if in.Name == "" {
 		return nil, apperr.InvalidParam("成员姓名必填")
 	}
-	if err := firstErr(checkLen("姓名", in.Name, maxNameLen), checkLen("邮箱", in.Email, maxEmailLen)); err != nil {
+	if err := checkLen("姓名", in.Name, maxNameLen); err != nil {
 		return nil, err
+	}
+	// T11:自定义登录名(真实邮箱或用户名)提供时校验格式;留空则下面派生合成邮箱 fallback。
+	if in.Email != "" {
+		if err := checkLoginName(in.Email); err != nil {
+			return nil, err
+		}
 	}
 
 	// 团队负责人:只能开到本团队;team_id 缺省套本团队,显式跨团队 → 403。

@@ -43,6 +43,7 @@ type Organization struct {
 	NewapiGroup   *string
 	DefaultTierID *int64
 	BillingMode   string
+	ArchivedAt    *time.Time // 归档时间(NULL=未归档,T12)
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }

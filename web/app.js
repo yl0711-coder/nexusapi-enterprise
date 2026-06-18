@@ -117,19 +117,29 @@ const VIEWS_AFTER = {};
 /* ===================== 运营方 ===================== */
 const VIEWS = {};
 VIEWS.orgs = async () => {
-  const d = await api("GET", "/organizations?page=1&page_size=50", null);
+  const inclArch = !!S.orgShowArchived; // T12:是否显示已归档
+  const d = await api("GET", "/organizations?page=1&page_size=50" + (inclArch ? "&include_archived=true" : ""), null);
   // 过滤掉平台运营方伪组织(slug=_operator),只列真实客户(R2-轻微)。
   const list = (d.list || []).filter(o => o.slug !== "_operator");
   const rows = list.map(o => `<tr data-q="${esc((o.name + " " + o.slug).toLowerCase())}">
     <td><span class="lk" style="display:inline-block;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle" title="${esc(o.name)}" onclick="enterOrg(${o.id},'${esc(o.name)}')">${esc(o.name)}</span><div class="mini">${esc(o.slug)}</div></td>
-    <td>${pill(o.status, o.status === "active" ? "ok" : o.status === "low" ? "warn" : "bad")}</td>
+    <td>${pill(o.status, o.status === "active" ? "ok" : o.status === "low" ? "warn" : "bad")}${o.archived ? ' <span class="tag">已归档</span>' : ''}</td>
     <td>${esc(o.timezone)}</td><td>${esc(o.billing_mode)}</td>
-    <td class="right"><span class="btn sm" onclick="enterOrg(${o.id},'${esc(o.name)}')">进入</span></td></tr>`).join("");
+    <td class="right"><span class="btn sm" onclick="enterOrg(${o.id},'${esc(o.name)}')">进入</span> ${o.archived
+      ? `<span class="btn sm" onclick="doArchiveOrg(${o.id},'${esc(o.name)}',false)">取消归档</span>`
+      : `<span class="btn sm danger" onclick="doArchiveOrg(${o.id},'${esc(o.name)}',true)">归档</span>`}</td></tr>`).join("");
   return head("客户组织", "运营方:管理所有客户组织、入账、计费灰度、支持会话")
-    + `<div class="toolbar"><div class="search"><input id="orgSearch" placeholder="搜索组织名或 slug…" oninput="filterRows('orgSearch','orgTbody')"></div><button class="btn pri" onclick="openCreateOrg()">+ 新建客户组织</button></div>
+    + `<div class="toolbar"><div class="search"><input id="orgSearch" placeholder="搜索组织名或 slug…" oninput="filterRows('orgSearch','orgTbody')"></div>
+       <label class="mini" style="margin:0 10px;cursor:pointer"><input type="checkbox" ${inclArch ? "checked" : ""} onchange="S.orgShowArchived=this.checked;renderView()"> 显示已归档</label>
+       <button class="btn pri" onclick="openCreateOrg()">+ 新建客户组织</button></div>
     <div class="panel"><table><thead><tr><th>组织</th><th>状态</th><th>时区</th><th>计费</th><th></th></tr></thead>
     <tbody id="orgTbody">${rows || '<tr><td colspan=5 class="empty">暂无组织</td></tr>'}</tbody></table></div>`;
 };
+async function doArchiveOrg(id, name, archive) {
+  if (!confirm((archive ? "归档" : "取消归档") + "组织「" + name + "」?" + (archive ? "归档后从默认列表隐藏,数据保留、可恢复。" : ""))) return;
+  try { await api("POST", "/organizations/" + id + (archive ? "/archive" : "/unarchive"), null); toast(archive ? "已归档" : "已取消归档"); renderView(); }
+  catch (e) { toast(e.message); }
+}
 // filterRows 通用前端筛选:按 data-q 包含关键词显隐行(无需重新拉数据)。
 function filterRows(inputId, tbodyId) {
   const q = (document.getElementById(inputId).value || "").trim().toLowerCase();
@@ -269,13 +279,15 @@ async function openAddMember() {
   let tiers = []; try { tiers = (await api("GET", "/organizations/" + S.orgId + "/tiers", null)) || []; } catch (e) {}
   const opts = tiers.map(t => `<option value="${t.id}">${esc(t.name)}${t.is_default ? "(默认)" : ""}</option>`).join("");
   modal("开通成员", `<div class="fld"><label>姓名</label><input id="am_n" placeholder="钱晨"></div>
+    <div class="fld"><label>登录名(真实邮箱/用户名,可选)</label><input id="am_e" placeholder="留空则自动生成"></div>
     <div class="fld"><label>层级</label><select id="am_t">${opts || '<option value="">(先建层级)</option>'}</select></div>
-    <div class="note">系统将建 new-api 用户、代发 API key、下发层级初始额度。明文 key 仅创建后回显一次。</div>`,
+    <div class="note">登录名留空将自动生成。系统将建 new-api 用户、代发 API key、下发层级初始额度。明文 key 仅创建后回显一次。</div>`,
     `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doAddMember()">开通成员</button>`);
 }
 async function doAddMember() {
   try {
     const body = { name: val("am_n") };
+    const em = val("am_e").trim(); if (em) body.email = em; // T11:自定义登录名,留空后端 fallback
     const t = val("am_t"); if (t) body.tier_id = parseInt(t);
     const d = await api("POST", "/organizations/" + S.orgId + "/members", body);
     modal("已开通并代发 Key", `<div class="note">明文 API Key 仅此一次显示,请交付成员并妥善保存:</div>

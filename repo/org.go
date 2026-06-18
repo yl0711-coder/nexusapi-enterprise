@@ -35,7 +35,7 @@ func (s *Store) CreateOrganization(ctx context.Context, o *model.Organization) (
 // GetOrganization 按 id 取组织(未删)。不存在 → ErrNotFound。
 func (s *Store) GetOrganization(ctx context.Context, id int64) (*model.Organization, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, created_at, updated_at
+		`SELECT id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, archived_at, created_at, updated_at
 		 FROM organization WHERE id = ? AND deleted_at IS NULL`, id)
 	return scanOrg(row)
 }
@@ -43,21 +43,25 @@ func (s *Store) GetOrganization(ctx context.Context, id int64) (*model.Organizat
 // GetOrganizationBySlug 按 slug 取组织(运营方组织引导用)。
 func (s *Store) GetOrganizationBySlug(ctx context.Context, slug string) (*model.Organization, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, created_at, updated_at
+		`SELECT id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, archived_at, created_at, updated_at
 		 FROM organization WHERE slug = ? AND deleted_at IS NULL`, slug)
 	return scanOrg(row)
 }
 
-// ListOrganizations 列出全部组织(运营方视角,分页)。
-func (s *Store) ListOrganizations(ctx context.Context, limit, offset int) ([]*model.Organization, int, error) {
+// ListOrganizations 列出组织(运营方视角,分页)。includeArchived=false 时默认隐藏已归档(T12)。
+func (s *Store) ListOrganizations(ctx context.Context, limit, offset int, includeArchived bool) ([]*model.Organization, int, error) {
+	cond := "deleted_at IS NULL"
+	if !includeArchived {
+		cond += " AND archived_at IS NULL"
+	}
 	var total int
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM organization WHERE deleted_at IS NULL`).Scan(&total); err != nil {
+		`SELECT COUNT(*) FROM organization WHERE `+cond).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, created_at, updated_at
-		 FROM organization WHERE deleted_at IS NULL ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
+		`SELECT id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, archived_at, created_at, updated_at
+		 FROM organization WHERE `+cond+` ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -71,6 +75,24 @@ func (s *Store) ListOrganizations(ctx context.Context, limit, offset int) ([]*mo
 		out = append(out, o)
 	}
 	return out, total, rows.Err()
+}
+
+// SetOrgArchived 归档/取消归档组织(T12:软隐藏,不物理删除)。archived=true 置 archived_at=now。
+func (s *Store) SetOrgArchived(ctx context.Context, orgID int64, archived bool) error {
+	var q string
+	if archived {
+		q = `UPDATE organization SET archived_at = CURRENT_TIMESTAMP(3) WHERE id = ? AND deleted_at IS NULL`
+	} else {
+		q = `UPDATE organization SET archived_at = NULL WHERE id = ? AND deleted_at IS NULL`
+	}
+	res, err := s.db.ExecContext(ctx, q, orgID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // OrgDiscount 是组织折扣镜像(09 §1,配置后单向写入 new-api,本表只读回显)。
@@ -193,7 +215,7 @@ type rowScanner interface {
 func scanOrg(r rowScanner) (*model.Organization, error) {
 	var o model.Organization
 	err := r.Scan(&o.ID, &o.Name, &o.Slug, &o.Status, &o.Timezone, &o.NewapiGroup,
-		&o.DefaultTierID, &o.BillingMode, &o.CreatedAt, &o.UpdatedAt)
+		&o.DefaultTierID, &o.BillingMode, &o.ArchivedAt, &o.CreatedAt, &o.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

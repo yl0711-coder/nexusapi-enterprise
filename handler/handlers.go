@@ -47,7 +47,8 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleListOrgs(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())
 	page, size, offset := parsePaging(r, 20)
-	orgs, total, err := h.svc.ListOrgs(r.Context(), c, size, offset)
+	includeArchived := r.URL.Query().Get("include_archived") == "true" // T12:默认隐藏已归档
+	orgs, total, err := h.svc.ListOrgs(r.Context(), c, size, offset, includeArchived)
 	if err != nil {
 		writeErr(w, r, err)
 		return
@@ -57,6 +58,27 @@ func (h *Handler) handleListOrgs(w http.ResponseWriter, r *http.Request) {
 		views = append(views, toOrgView(o))
 	}
 	writeOK(w, r, http.StatusOK, listResp{List: views, Pagination: makePageMeta(page, size, total)})
+}
+
+// POST /organizations/{id}/archive | /unarchive — 归档/取消归档(运营方,T12)。
+func (h *Handler) handleArchiveOrg(w http.ResponseWriter, r *http.Request) {
+	h.archiveOrg(w, r, true)
+}
+func (h *Handler) handleUnarchiveOrg(w http.ResponseWriter, r *http.Request) {
+	h.archiveOrg(w, r, false)
+}
+func (h *Handler) archiveOrg(w http.ResponseWriter, r *http.Request, archived bool) {
+	c, _ := claimsFrom(r.Context())
+	orgID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	if err := h.svc.SetOrgArchived(r.Context(), c, orgID, archived); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{"id": orgID, "archived": archived})
 }
 
 type createOrgReq struct {

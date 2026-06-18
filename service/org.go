@@ -117,12 +117,36 @@ func (s *Service) GetOrg(ctx context.Context, c session.Claims, orgID int64) (*m
 	return org, nil
 }
 
-// ListOrgs 列出全部客户组织(运营方)。
-func (s *Service) ListOrgs(ctx context.Context, c session.Claims, limit, offset int) ([]*model.Organization, int, error) {
+// ListOrgs 列出客户组织(运营方)。includeArchived=false 默认隐藏已归档(T12)。
+func (s *Service) ListOrgs(ctx context.Context, c session.Claims, limit, offset int, includeArchived bool) ([]*model.Organization, int, error) {
 	if err := assertRole(c, session.RoleOperator); err != nil {
 		return nil, 0, err
 	}
-	return s.store.ListOrganizations(ctx, limit, offset)
+	return s.store.ListOrganizations(ctx, limit, offset, includeArchived)
+}
+
+// SetOrgArchived 归档/取消归档组织(T12:仅运营方,软隐藏不物理删除,留痕)。
+func (s *Service) SetOrgArchived(ctx context.Context, c session.Claims, orgID int64, archived bool) error {
+	if err := assertRole(c, session.RoleOperator); err != nil {
+		return err
+	}
+	if _, err := s.store.GetOrganization(ctx, orgID); errors.Is(err, repo.ErrNotFound) {
+		return apperr.NotFound("组织不存在")
+	} else if err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	if err := s.store.SetOrgArchived(ctx, orgID, archived); err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			return apperr.NotFound("组织不存在")
+		}
+		return apperr.Internal("").WithCause(err)
+	}
+	action := "archive_org"
+	if !archived {
+		action = "unarchive_org"
+	}
+	s.audit(ctx, c, orgID, action, "organization", &orgID, nil)
+	return nil
 }
 
 // audit 写一条审计(留痕一等公民,08 §0.4)。detail 已脱敏(绝不含明文 key / 密文)。

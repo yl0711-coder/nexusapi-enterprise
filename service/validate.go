@@ -10,7 +10,8 @@ import (
 // 格式校验(R2-轻微:slug/admin_email 不校验格式 → 可建无法登录的管理员/坏 slug)。
 var (
 	// slug:小写字母/数字/连字符,2–64,首尾非连字符(URL/分组名友好)。
-	slugRe = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$`)
+	// 首尾各一个非连字符字符 + 中间 0–62 → 长度 2–64,单字符不通过(T4)。
+	slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$`)
 	// email:务实校验(非 RFC 全量),挡住明显非法,避免建出登录不了的管理员。
 	emailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 )
@@ -38,8 +39,9 @@ func checkEmail(field, email string) error {
 const (
 	maxNameLen  = 128 // name / display_name VARCHAR(128)
 	maxSlugLen  = 64  // slug VARCHAR(64)
-	maxEmailLen = 191 // login_email VARCHAR(191)
-	maxNoteLen  = 512 // note / reason VARCHAR(512)
+	maxEmailLen      = 191 // login_email VARCHAR(191)
+	maxNoteLen       = 512 // note / reason VARCHAR(512)
+	maxTransferNoLen = 128 // transfer_no 入账幂等键(DB 列 VARCHAR(190),取 128 明确低于列宽,T3)
 	// maxAdjustQuota 单次调额绝对值上限(动钱面防误填天量,R2-M4)。1e14 quota = 2 亿元。
 	maxAdjustQuota int64 = 100_000_000_000_000
 )

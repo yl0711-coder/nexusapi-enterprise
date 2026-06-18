@@ -60,21 +60,19 @@ func (s *Service) ConfigureDiscount(ctx context.Context, c session.Claims, orgID
 	if len(groups) == 0 {
 		groups = []string{"default"}
 	}
-	entries := map[string]discountEntry{}
 
+	// 平台镜像是该 org 全部己方令牌分组折扣的权威集合(T1/T6)。基于既有镜像演进:
+	//   none      → 清空;total → 整体重置为本次分组集;per_group → 把本次分组并入既有镜像(累积)。
+	entries := map[string]discountEntry{}
 	switch in.Mode {
 	case DiscountNone:
-		// 取消折扣:删掉已配令牌分组的特殊倍率条目,回落到主站基础倍率(= 无折扣)。
-		// R2-轻微:删键而非写回 base=1×base,避免 GroupGroupRatio 堆死键(两者价格等效)。
-		prev := s.loadDiscountEntries(ctx, orgID)
-		for g := range prev {
-			if err := s.upstream.DeleteGroupGroupRatio(ctx, userGroup, g); err != nil {
-				return nil, mapUpstream(err)
-			}
-		}
+		// 清空镜像;下面统一把空集权威下发(删该 org 用户分组)。
 	case DiscountTotal, DiscountPerGroup:
 		if in.DiscountPct <= 0 || in.DiscountPct > 1 {
 			return nil, apperr.InvalidParam("折扣率须在 (0,1](如 0.9 = 9 折)")
+		}
+		if in.Mode == DiscountPerGroup {
+			entries = s.loadDiscountEntries(ctx, orgID) // 累积:保留既有已配分组(T6 修发散)
 		}
 		for _, g := range groups {
 			base, ok, err := s.upstream.GetGroupRatio(ctx, g)
@@ -84,14 +82,20 @@ func (s *Service) ConfigureDiscount(ctx context.Context, c session.Claims, orgID
 			if !ok || base <= 0 {
 				base = 1 // 该分组未配基础倍率,按 1 处理
 			}
-			abs := base * in.DiscountPct
-			if err := s.upstream.SetGroupGroupRatio(ctx, userGroup, g, abs); err != nil {
-				return nil, mapUpstream(err)
-			}
-			entries[g] = discountEntry{Pct: in.DiscountPct, Base: base, Abs: abs}
+			entries[g] = discountEntry{Pct: in.DiscountPct, Base: base, Abs: base * in.DiscountPct}
 		}
 	default:
 		return nil, apperr.InvalidParam("折扣模式须为 none/total/per_group")
+	}
+
+	// 以镜像为权威源,一次性把该 org 用户分组下全部特殊倍率覆盖下发(己方键不取上游旧值,
+	// 写后读校验+退避重试;空集→删该用户分组)。镜像与上游因此始终一致。
+	desired := make(map[string]float64, len(entries))
+	for g, e := range entries {
+		desired[g] = e.Abs
+	}
+	if err := s.upstream.SetOrgGroupRatios(ctx, userGroup, desired); err != nil {
+		return nil, mapUpstream(err)
 	}
 
 	entriesJSON, _ := json.Marshal(entries)

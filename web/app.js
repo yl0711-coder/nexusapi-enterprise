@@ -45,7 +45,7 @@ async function boot() {
 
 const NAV = {
   operator: [{ grp: "运营" }, { v: "orgs", ic: "▦", t: "客户组织" }],
-  org_admin: [{ grp: "管理" }, { v: "dash", ic: "◧", t: "概览" }, { v: "members", ic: "☷", t: "成员" }, { v: "teams", ic: "▣", t: "团队" }, { v: "tiers", ic: "◆", t: "层级" }, { v: "approvals", ic: "✓", t: "审批" }, { v: "billing", ic: "¥", t: "余额与计费" }],
+  org_admin: [{ grp: "管理" }, { v: "dash", ic: "◧", t: "概览" }, { v: "members", ic: "☷", t: "成员" }, { v: "teams", ic: "▣", t: "团队" }, { v: "tiers", ic: "◆", t: "层级" }, { v: "approvals", ic: "✓", t: "审批" }, { v: "billing", ic: "¥", t: "余额与计费" }, { v: "mynotif", ic: "✉", t: "通知" }],
   team_leader: [{ grp: "团队" }, { v: "members", ic: "☷", t: "团队成员" }, { v: "approvals", ic: "✓", t: "审批" }],
   member: [{ grp: "我的" }, { v: "myusage", ic: "▦", t: "我的用量" }, { v: "mykey", ic: "⚿", t: "我的 API Key" }, { v: "myreq", ic: "✚", t: "申请增额" }, { v: "mynotif", ic: "✉", t: "通知" }],
 };
@@ -80,7 +80,7 @@ async function updateBadges() {
       const d = await api("GET", "/organizations/" + S.orgId + "/approvals?state=pending&page=1&page_size=1", null);
       setBadge("approvals", (d.pagination || {}).total || 0);
     }
-    if (S.role === "member") {
+    if (S.role === "member" || S.role === "org_admin") {
       const n = await api("GET", "/notifications?page=1&page_size=1", null);
       setBadge("mynotif", n.unread || 0);
     }
@@ -328,13 +328,38 @@ function openCreateTeam() { modal("新建团队", `<div class="fld"><label>团�
 async function doCreateTeam() { try { await api("POST", "/organizations/" + S.orgId + "/teams", { name: val("tm_n") }); closeM(); toast("已创建"); renderView(); } catch (e) { toast(e.message); } }
 VIEWS.tiers = async () => {
   const d = await api("GET", "/organizations/" + S.orgId + "/tiers", null);
+  S.tiersCache = d || []; // 供编辑弹窗回填
   const rows = (d || []).map(t => `<tr><td>${esc(t.name)}${t.is_default ? ' <span class="tag">默认</span>' : ""}</td>
     <td>${t.monthly_limit_quota != null ? money(t.monthly_limit_quota) + " / 月" : '<span class="mini">不限</span>'}</td>
-    <td>${(t.model_set || []).map(m => `<span class="mcap">${esc(m)}</span>`).join("") || '<span class="mini">继承</span>'}</td></tr>`).join("");
+    <td>${(t.model_set || []).map(m => `<span class="mcap">${esc(m)}</span>`).join("") || '<span class="mini">继承</span>'}</td>
+    <td class="right"><span class="btn sm" onclick="openEditTier(${t.id})">编辑</span> <span class="btn sm danger" onclick="doDeleteTier(${t.id},'${esc(t.name)}')">删除</span></td></tr>`).join("");
   return head("层级", "可复用档位 = 模型集 + 月额度 + 单模型日上限")
     + `<div class="toolbar"><button class="btn pri" onclick="openCreateTier()">+ 新建层级</button></div>
-    <div class="panel"><table><thead><tr><th>层级</th><th>月额度</th><th>模型集</th></tr></thead><tbody>${rows || '<tr><td colspan=3 class="empty">暂无层级</td></tr>'}</tbody></table></div>`;
+    <div class="panel"><table><thead><tr><th>层级</th><th>月额度</th><th>模型集</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan=4 class="empty">暂无层级</td></tr>'}</tbody></table></div>`;
 };
+function openEditTier(tid) {
+  const t = (S.tiersCache || []).find(x => x.id === tid); if (!t) return;
+  const ms = (t.model_set || []).join(",");
+  const mq = t.monthly_limit_quota != null ? (t.monthly_limit_quota / 500000) : "";
+  modal("编辑层级", `<div class="fld"><label>层级名称</label><input id="te_n" value="${esc(t.name)}"></div>
+    <div class="fld"><label>月额度(美元,成员当期上限基线)</label><input id="te_q" type="number" value="${mq}"></div>
+    <div class="fld"><label>模型集(逗号分隔,留空=继承)</label><input id="te_m" value="${esc(ms)}"></div>
+    <div class="note">改后引用该层级的成员当期上限按新档重算下发。</div>`,
+    `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doEditTier(${tid})">保存</button>`);
+}
+async function doEditTier(tid) {
+  try {
+    const ms = val("te_m").split(",").map(s => s.trim()).filter(Boolean);
+    const body = { name: val("te_n"), model_set: ms };
+    const q = parseFloat(val("te_q")); if (q > 0) body.monthly_limit = Math.round(q * 500000); // 留空=不改
+    await api("PUT", "/tiers/" + tid, body); closeM(); toast("已保存"); renderView();
+  } catch (e) { toast(e.message); }
+}
+async function doDeleteTier(tid, name) {
+  if (!confirm("确认删除层级「" + name + "」?被成员引用或为默认档将无法删除。")) return;
+  try { await api("DELETE", "/tiers/" + tid, null); toast("已删除"); renderView(); }
+  catch (e) { toast(e.message); }
+}
 function openCreateTier() { modal("新建层级", `<div class="fld"><label>层级名称</label><input id="ti_n" placeholder="标准档"></div>
   <div class="fld"><label>月额度(美元,成员当期上限基线)</label><input id="ti_q" type="number" placeholder="50"></div>
   <div class="fld"><label>模型集(逗号分隔,留空=继承)</label><input id="ti_m" placeholder="gpt-5-mini,claude-sonnet-4-5-20250929"></div>
@@ -352,7 +377,7 @@ VIEWS.approvals = async () => {
   const d = await api("GET", "/organizations/" + S.orgId + "/approvals?page=1&page_size=50", null);
   const rows = (d.list || []).map(a => {
     const can = a.state === "pending" || a.state === "l1_approved";
-    return `<tr><td>#${a.id} ${esc(a.request_type)}${a.is_level2 ? ' <span class="tag">二审</span>' : ""}<div class="mini">申请人 #${a.applicant_id} · ${esc((a.created_at || "").slice(0, 16).replace("T", " "))} · ${esc(a.model || "")} ${money(a.amount_quota)} / ${esc(a.duration)}</div></td>
+    return `<tr><td>#${a.id} ${esc(a.request_type)}${a.is_level2 ? ' <span class="tag">二审</span>' : ""}<div class="mini">${esc(a.applicant_name || ("成员 #" + a.applicant_id))} (#${a.applicant_id}) · ${esc((a.created_at || "").slice(0, 16).replace("T", " "))} · ${esc(a.model || "")} ${money(a.amount_quota)} / ${esc(a.duration)}</div></td>
     <td>${pill(a.state, a.state === "approved" || a.state === "auto_approved" ? "ok" : a.state === "rejected" ? "bad" : "warn")}</td>
     <td class="right">${can ? `<span class="btn sm pri" onclick="decide(${a.id},true)">批准</span> <span class="btn sm danger" onclick="decide(${a.id},false)">驳回</span>` : ""}</td></tr>`;
   }).join("");
@@ -367,14 +392,32 @@ VIEWS.billing = async () => {
     api("GET", "/organizations/" + id + "/recharges?page=1&page_size=10", null),
     api("GET", "/organizations/" + id + "/recharge-requests?page=1&page_size=10", null),
   ]);
+  let pricing = null; try { pricing = await api("GET", "/organizations/" + id + "/pricing", null); } catch (e) {}
   const rrows = (recs.list || []).map(r => `<tr><td>${esc(r.recharged_at.slice(0, 10))}</td><td>${money(r.amount_quota)}</td><td class="mini">${esc(r.operator)}</td></tr>`).join("");
   const qrows = (reqs.list || []).map(r => `<tr><td>${esc(r.request_type)}</td><td>${money(r.amount_quota)}</td><td>${pill(r.status, r.status === "pending" ? "warn" : "ok")}</td></tr>`).join("");
   return head("余额与计费", "预付余额 = 累计充值 − 累计消耗;充值由运营方入账,你可发起申请")
-    + `<div class="cards">${kpi("当前余额", money(bal.balance_quota), "")}${kpi("累计充值", money(bal.total_recharged_quota), "")}${kpi("累计消耗", money(bal.total_consumed_quota), "")}${kpi("", "", "")}</div>
+    + `<div class="cards">${kpi("当前余额", money(bal.balance_quota), "")}${kpi("累计充值", money(bal.total_recharged_quota), "")}${kpi("累计消耗", money(bal.total_consumed_quota), "")}${kpi("累计退款", money(bal.total_refunded_quota || 0), "冲正/退款累计")}</div>
+    ${pricingReadonly(pricing)}
     <div class="toolbar"><button class="btn pri" onclick="openReqTopup()">申请充值</button></div>
     <div class="row2"><div class="panel"><div class="ph">入账记录</div><div class="pb"><table><tbody>${rrows || '<tr><td class="empty">暂无</td></tr>'}</tbody></table></div></div>
     <div class="panel"><div class="ph">我的申请</div><div class="pb"><table><tbody>${qrows || '<tr><td class="empty">暂无</td></tr>'}</tbody></table></div></div></div>`;
 };
+// pricingReadonly 客户侧只读折扣回显(T7):无写控件,数据取 GET /pricing 镜像。折扣率显示为"X 折"。
+function pricingReadonly(p) {
+  const entries = (p && p.entries) || {};
+  const gs = Object.keys(entries);
+  let body;
+  if (!p || p.mode === "none" || gs.length === 0) {
+    body = `<tr><td class="empty">当前无折扣,按标准价计费</td></tr>`;
+  } else {
+    body = gs.map(g => {
+      const e = entries[g] || {};
+      const zhe = e.pct ? (Math.round(e.pct * 100) / 10) : null; // 0.8 → 8 折
+      return `<tr><td>${esc(g)}</td><td>${zhe != null ? zhe + " 折" : "—"}</td><td class="mini">特殊倍率 ${e.abs != null ? e.abs : "—"}(基础 ${e.base != null ? e.base : "—"})</td></tr>`;
+    }).join("");
+  }
+  return `<div class="panel"><div class="ph">当前折扣(只读 · 由运营方配置)</div><div class="pb"><table><thead><tr><th>令牌分组</th><th>折扣</th><th>计价</th></tr></thead><tbody>${body}</tbody></table></div></div>`;
+}
 function openReqTopup() { modal("申请充值", `<div class="fld"><label>申请金额(美元)</label><input id="rq_a" type="number" placeholder="100"></div><div class="fld"><label>说明</label><input id="rq_n" placeholder="需补预付"></div><div class="note">仅发起申请通知运营方,不改余额。</div>`, `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doReqTopup()">提交</button>`); }
 async function doReqTopup() { try { await api("POST", "/organizations/" + S.orgId + "/recharge-requests", { type: "topup", amount_quota: Math.round((parseFloat(val("rq_a")) || 0) * 500000), note: val("rq_n") }); closeM(); toast("已提交申请"); renderView(); } catch (e) { toast(e.message); } }
 

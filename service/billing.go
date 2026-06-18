@@ -31,6 +31,9 @@ func (s *Service) Recharge(ctx context.Context, c session.Claims, orgID int64, i
 	if in.TransferNo == "" {
 		return nil, apperr.InvalidParam("缺少转账唯一号(入账幂等键)")
 	}
+	if err := firstErr(checkLen("转账唯一号", in.TransferNo, maxTransferNoLen), checkLen("备注", in.Note, maxNoteLen)); err != nil {
+		return nil, err // T3:超长返 422,不落库不 500
+	}
 	if _, err := s.store.GetOrganization(ctx, orgID); errors.Is(err, repo.ErrNotFound) {
 		return nil, apperr.NotFound("组织不存在")
 	} else if err != nil {

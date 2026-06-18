@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/nexusapi-platform/enterprise/model"
 	"github.com/nexusapi-platform/enterprise/pkg/apperr"
@@ -48,6 +49,119 @@ func (s *Service) CreateTier(ctx context.Context, c session.Claims, orgID int64,
 	}
 	s.audit(ctx, c, orgID, "create_tier", "tier", &id, map[string]any{"name": in.Name})
 	return s.store.GetTier(ctx, orgID, id)
+}
+
+// UpdateTierInput 改层级入参(T10;nil 字段=不改)。
+type UpdateTierInput struct {
+	Name         *string
+	ModelSet     []string
+	ModelCap     map[string]int64
+	DailyLimit   *int64
+	WeeklyLimit  *int64
+	MonthlyLimit *int64
+	NewapiGroup  *string
+	SetModelSet  bool // 显式置空模型集(区分"不改"与"清空继承")
+	SetModelCap  bool
+}
+
+// UpdateTier 改层级(T10:组织管理员)。改后对引用该层级的成员重算 override 下发(当期上限按新档)。
+func (s *Service) UpdateTier(ctx context.Context, c session.Claims, orgID, tierID int64, in UpdateTierInput) (*model.Tier, error) {
+	if err := assertOrgScope(c, orgID); err != nil {
+		return nil, err
+	}
+	if err := assertRole(c, session.RoleOrgAdmin); err != nil {
+		return nil, err
+	}
+	t, err := s.store.GetTier(ctx, orgID, tierID)
+	if errors.Is(err, repo.ErrNotFound) {
+		return nil, apperr.NotFound("层级不存在")
+	}
+	if err != nil {
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	if in.Name != nil {
+		if *in.Name == "" {
+			return nil, apperr.InvalidParam("层级名称不能为空")
+		}
+		if err := checkLen("层级名称", *in.Name, maxNameLen); err != nil {
+			return nil, err
+		}
+		t.Name = *in.Name
+	}
+	if in.SetModelSet {
+		t.ModelSet = in.ModelSet
+	}
+	if in.SetModelCap {
+		t.ModelCap = in.ModelCap
+	}
+	if in.DailyLimit != nil {
+		t.DailyLimit = in.DailyLimit
+	}
+	if in.WeeklyLimit != nil {
+		t.WeeklyLimit = in.WeeklyLimit
+	}
+	if in.MonthlyLimit != nil {
+		t.MonthlyLimit = in.MonthlyLimit
+	}
+	if in.NewapiGroup != nil {
+		t.NewapiGroup = in.NewapiGroup
+	}
+	if err := s.store.UpdateTier(ctx, t); err != nil {
+		if errors.Is(err, repo.ErrConflict) {
+			return nil, apperr.Conflict("同组织内层级名已存在")
+		}
+		if errors.Is(err, repo.ErrNotFound) {
+			return nil, apperr.NotFound("层级不存在")
+		}
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	// 改层级后:对引用该层级、已就绪的成员重算 override 下发(当期上限按新档,best-effort)。
+	if members, lerr := s.store.ListMembersByTier(ctx, orgID, tierID); lerr == nil {
+		for _, m := range members {
+			if m.BootstrapState == model.BootstrapDone && m.NewapiUserID != 0 {
+				if _, aerr := s.applyMemberOverride(ctx, m); aerr != nil {
+					s.log.Error("改层级后成员 override 重算失败(待对账/重试)", "member_id", m.ID, "tier_id", tierID, "err", aerr)
+				}
+			}
+		}
+	}
+	s.audit(ctx, c, orgID, "update_tier", "tier", &tierID, map[string]any{"name": t.Name})
+	return s.store.GetTier(ctx, orgID, tierID)
+}
+
+// DeleteTier 删层级(T10:组织管理员)。被成员引用 / 是组织默认档 → 拒并提示占用,防误删。
+func (s *Service) DeleteTier(ctx context.Context, c session.Claims, orgID, tierID int64) error {
+	if err := assertOrgScope(c, orgID); err != nil {
+		return err
+	}
+	if err := assertRole(c, session.RoleOrgAdmin); err != nil {
+		return err
+	}
+	t, err := s.store.GetTier(ctx, orgID, tierID)
+	if errors.Is(err, repo.ErrNotFound) {
+		return apperr.NotFound("层级不存在")
+	}
+	if err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	if t.IsDefault {
+		return apperr.New(apperr.CodeConflictDup, 409, "该层级是组织默认档,请先改设其它默认档再删")
+	}
+	used, err := s.store.CountMembersUsingTier(ctx, orgID, tierID)
+	if err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	if used > 0 {
+		return apperr.New(apperr.CodeConflictDup, 409, fmt.Sprintf("该层级仍被 %d 名成员使用,请先迁移成员到其它层级再删", used))
+	}
+	if err := s.store.SoftDeleteTier(ctx, orgID, tierID); err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			return apperr.NotFound("层级不存在")
+		}
+		return apperr.Internal("").WithCause(err)
+	}
+	s.audit(ctx, c, orgID, "delete_tier", "tier", &tierID, nil)
+	return nil
 }
 
 // ListTiers 列出组织下层级(组织管理员)。

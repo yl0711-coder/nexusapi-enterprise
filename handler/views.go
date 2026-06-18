@@ -176,8 +176,9 @@ func toRechargeReqView(rq *model.RechargeRequest) rechargeReqView {
 }
 
 type approvalView struct {
-	ID          int64  `json:"id"`
-	ApplicantID int64  `json:"applicant_id"`
+	ID            int64  `json:"id"`
+	ApplicantID   int64  `json:"applicant_id"`
+	ApplicantName string `json:"applicant_name,omitempty"`
 	TeamID      *int64 `json:"team_id"`
 	RequestType string `json:"request_type"`
 	Model       string `json:"model,omitempty"`
@@ -191,7 +192,7 @@ type approvalView struct {
 
 func toApprovalView(a *model.Approval) approvalView {
 	return approvalView{
-		ID: a.ID, ApplicantID: a.ApplicantID, TeamID: a.TeamID, RequestType: a.RequestType,
+		ID: a.ID, ApplicantID: a.ApplicantID, ApplicantName: a.ApplicantName, TeamID: a.TeamID, RequestType: a.RequestType,
 		Model: a.Payload.Model, Amount: a.Payload.Amount, Duration: a.Payload.Duration, Reason: a.Payload.Reason,
 		State: a.State, IsLevel2: a.IsLevel2, CreatedAt: a.CreatedAt.Format(time.RFC3339),
 	}

@@ -204,6 +204,65 @@ func (h *Handler) handleCreateTier(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, r, http.StatusCreated, toTierView(t))
 }
 
+// updateTierReq 改层级入参(T10;指针/带 set 标记区分"不改"与"清空")。
+type updateTierReq struct {
+	Name         *string          `json:"name"`
+	ModelSet     *[]string        `json:"model_set"` // 传了(含空数组)=改;不传=保持
+	ModelCap     *map[string]int64 `json:"model_cap"`
+	DailyLimit   *int64           `json:"daily_limit"`
+	WeeklyLimit  *int64           `json:"weekly_limit"`
+	MonthlyLimit *int64           `json:"monthly_limit"`
+	NewapiGroup  *string          `json:"newapi_group"`
+}
+
+// PUT /tiers/{id} — 改层级(组织管理员;org 取自会话)。
+func (h *Handler) handleUpdateTier(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	tierID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	var in updateTierReq
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	su := service.UpdateTierInput{
+		Name: in.Name, DailyLimit: in.DailyLimit, WeeklyLimit: in.WeeklyLimit,
+		MonthlyLimit: in.MonthlyLimit, NewapiGroup: in.NewapiGroup,
+	}
+	if in.ModelSet != nil {
+		su.SetModelSet = true
+		su.ModelSet = *in.ModelSet
+	}
+	if in.ModelCap != nil {
+		su.SetModelCap = true
+		su.ModelCap = *in.ModelCap
+	}
+	t, err := h.svc.UpdateTier(r.Context(), c, c.OrgID, tierID, su)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, toTierView(t))
+}
+
+// DELETE /tiers/{id} — 删层级(组织管理员;org 取自会话)。被引用/默认档 → 409。
+func (h *Handler) handleDeleteTier(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	tierID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	if err := h.svc.DeleteTier(r.Context(), c, c.OrgID, tierID); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{"tier_id": tierID, "deleted": true})
+}
+
 func (h *Handler) handleSetDefaultTier(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())
 	tierID, err := pathInt64(r, "id")

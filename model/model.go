@@ -212,6 +212,9 @@ type Approval struct {
 	L2ReviewerID *int64
 	RejectReason *string
 	CreatedAt    time.Time
+
+	// ApplicantName 申请人显示名(瞬态,列表 join 填充,非 approval 表列;T9)。
+	ApplicantName string
 }
 
 // ApprovalPayload 是申请载荷。

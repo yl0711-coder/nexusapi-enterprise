@@ -59,6 +59,8 @@ func (h *Handler) Routes() http.Handler {
 	// 层级。
 	mux.HandleFunc("GET /api/v1/organizations/{id}/tiers", h.requireAuth(h.handleListTiers))
 	mux.HandleFunc("POST /api/v1/organizations/{id}/tiers", h.requireAuth(h.handleCreateTier))
+	mux.HandleFunc("PUT /api/v1/tiers/{id}", h.requireAuth(h.handleUpdateTier))
+	mux.HandleFunc("DELETE /api/v1/tiers/{id}", h.requireAuth(h.handleDeleteTier))
 	mux.HandleFunc("POST /api/v1/tiers/{id}/default", h.requireAuth(h.handleSetDefaultTier))
 
 	// 成员(开通成员 = 代发 key,US-01)。

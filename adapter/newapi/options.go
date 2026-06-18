@@ -90,6 +90,47 @@ func (a *Adapter) mutateGroupGroupRatio(ctx context.Context, apply func(m map[st
 	return nil
 }
 
+// SetOrgGroupRatios 以平台为权威源设某用户分组(org_{id})下全部令牌分组特殊倍率,详见接口注释。
+// 单写者锁内一次"读其它分组 → 整体覆盖己方分组 → 写回":
+//   - 己方用户分组的内层 map 整体由 desired 覆盖(desired 是平台镜像聚合出的全集),绝不把上游读回的
+//     己方旧值 merge 回去 —— 从根上消除 read-after-write 把刚写的己方键回退掉的问题(T1)。
+//   - 其它用户分组(vip 等手工键)原样保留(merge-preserve)。
+// 不做"写后读校验+重写":该上游 option 读走缓存、写后短暂滞后,重写会基于滞后快照回滚已提交状态;
+// 残余不一致交 reconcile 兜底检出告警(只读、不自动改价)。
+func (a *Adapter) SetOrgGroupRatios(ctx context.Context, userGroup string, desired map[string]float64) error {
+	release, lerr := a.locker.Acquire(ctx, "option:GroupGroupRatio")
+	if lerr != nil {
+		return &UpstreamError{Step: stepSetOption, PlatformCode: CodeInternal, Message: "获取折扣写锁失败", class: classRetryable, cause: lerr}
+	}
+	defer release()
+
+	m, err := a.getGroupGroupRatioMap(ctx)
+	if err != nil {
+		return err
+	}
+	if m == nil {
+		m = map[string]map[string]float64{}
+	}
+	if len(desired) == 0 {
+		delete(m, userGroup) // 取消折扣:删整个 org 用户分组(回落基础倍率,不堆死键)
+	} else {
+		inner := make(map[string]float64, len(desired))
+		for g, r := range desired {
+			inner[g] = r
+		}
+		m[userGroup] = inner // 权威覆盖:不采信上游读回的己方键值
+	}
+	val, merr := json.Marshal(m)
+	if merr != nil {
+		return &UpstreamError{Step: stepSetOption, PlatformCode: CodeInternal, Message: "序列化分组特殊倍率失败", class: classNonRetryable, cause: merr}
+	}
+	if _, uerr := a.c.do(ctx, stepSetOption, "PUT", "/api/option/", adminAuth(a.c.cfg),
+		map[string]any{"key": "GroupGroupRatio", "value": string(val)}); uerr != nil {
+		return uerr // 必须显式判空,否则 nil *UpstreamError 装箱成非 nil error(typed-nil 坑)
+	}
+	return nil
+}
+
 func (a *Adapter) getGroupGroupRatioMap(ctx context.Context) (map[string]map[string]float64, error) {
 	var m map[string]map[string]float64
 	if err := a.getOptionJSON(ctx, "GroupGroupRatio", &m); err != nil {

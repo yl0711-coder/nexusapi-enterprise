@@ -96,6 +96,57 @@ func (s *Store) SetDefaultTier(ctx context.Context, orgID, tierID int64) error {
 	return tx.Commit()
 }
 
+// UpdateTier 更新层级可编辑字段(名称/模型集/模型上限/三档限额/分组),强制 org 谓词(T10)。
+// 不动 is_default / status。重名 → ErrConflict;不存在 → ErrNotFound。
+func (s *Store) UpdateTier(ctx context.Context, t *model.Tier) error {
+	var modelSet, modelCap any
+	if len(t.ModelSet) > 0 {
+		b, _ := json.Marshal(t.ModelSet)
+		modelSet = string(b)
+	}
+	if len(t.ModelCap) > 0 {
+		b, _ := json.Marshal(t.ModelCap)
+		modelCap = string(b)
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE tier SET name = ?, model_set = ?, model_cap = ?, daily_limit = ?, weekly_limit = ?, monthly_limit = ?, newapi_group = ?
+		 WHERE id = ? AND org_id = ? AND deleted_at IS NULL`,
+		t.Name, modelSet, modelCap, t.DailyLimit, t.WeeklyLimit, t.MonthlyLimit, t.NewapiGroup, t.ID, t.OrgID)
+	if err != nil {
+		if isDupKey(err) {
+			return ErrConflict
+		}
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// CountMembersUsingTier 统计仍引用该层级的成员数(删层级前占用校验,T10)。
+func (s *Store) CountMembersUsingTier(ctx context.Context, orgID, tierID int64) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM member WHERE org_id = ? AND tier_id = ? AND deleted_at IS NULL`, orgID, tierID).Scan(&n)
+	return n, err
+}
+
+// SoftDeleteTier 软删层级(置 deleted_at),强制 org 谓词。不存在 → ErrNotFound。
+func (s *Store) SoftDeleteTier(ctx context.Context, orgID, id int64) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE tier SET deleted_at = CURRENT_TIMESTAMP(3) WHERE id = ? AND org_id = ? AND deleted_at IS NULL`, id, orgID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func scanTier(r rowScanner) (*model.Tier, error) {
 	var t model.Tier
 	var modelSet, modelCap sql.NullString

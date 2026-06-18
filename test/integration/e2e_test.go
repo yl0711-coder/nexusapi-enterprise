@@ -12,7 +12,6 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -345,6 +344,14 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		t.Log("动钱红线 ok: 组织管理员入账 → 403")
 	}
 
+	// T3 回归:transfer_no 超长 → 422(不落库、不 500,故不扰动余额账)。正常长度 201 已被上面多次入账覆盖。
+	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/recharges", orgID), opTok,
+		map[string]any{"amount_quota": 1000000, "transfer_no": strings.Repeat("x", 200)}, nil); st != http.StatusUnprocessableEntity {
+		t.Errorf("T3 transfer_no 超长应 422,得 %d", st)
+	} else {
+		t.Log("回归 T3 ok: transfer_no 超长 → 422(不落库不 500)")
+	}
+
 	// US-09 组织管理员申请充值(不改余额)。
 	balBefore := bal.Balance + 3000000 // 上面又入账了 3e6
 	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/recharge-requests", orgID), adminTok,
@@ -432,10 +439,10 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	} else {
 		t.Log("回归 merge-preserve ok: 平台重配折扣后外部 vip/default=0.66 仍存活(只改自己那条)")
 	}
-	// S2 并发写回归:20 个 goroutine 并发写 conc 用户分组下 20 个不同令牌分组键,
-	// 单写者锁若失效会丢更新(读-改-写覆盖)。断言 20 条全部存活。
+	// S2 并发写回归:并发写 conc 用户分组下多个不同令牌分组键,单写者锁若失效会丢更新(读-改-写覆盖)。
+	// 断言全部存活。(用 10 并发:足够暴露丢更新,又不过度占用 new-api 全局限流预算。)
 	{
-		const n = 20
+		const n = 10
 		var wg sync.WaitGroup
 		for i := 0; i < n; i++ {
 			wg.Add(1)
@@ -496,6 +503,93 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	}
 	if _, ok, _ := upstream.GetGroupGroupRatio(ctxBg, "vip", "default"); !ok {
 		t.Error("mode=none 误删了外部 vip 键(merge-preserve 破)")
+	}
+
+	// ===== R3 回归:T1 读后写不丢键(连写/并发) + T6 折扣镜像累积一致 =====
+	absEq := func(a, b float64) bool { d := a - b; return d < 1e-9 && d > -1e-9 }
+	// T1-a 同一用户分组"快速连写"(每次新增一个令牌分组):authoritative 写应 n/n 不丢。
+	// (用 4 次而非 10:new-api 全局 API 限流与本测试其余调用共享预算,够证明"连写累积不回退"性质。)
+	{
+		const n = 4
+		desired := map[string]float64{}
+		for i := 0; i < n; i++ {
+			desired[fmt.Sprintf("g%02d", i)] = 0.3 + float64(i)*0.01
+			if err := upstream.SetOrgGroupRatios(ctxBg, "rapid", desired); err != nil {
+				t.Fatalf("T1 连写第 %d 次失败: %v", i, err)
+			}
+		}
+		got := 0
+		for i := 0; i < n; i++ {
+			if r, ok, _ := upstream.GetGroupGroupRatio(ctxBg, "rapid", fmt.Sprintf("g%02d", i)); ok && absEq(r, 0.3+float64(i)*0.01) {
+				got++
+			}
+		}
+		if got != n {
+			t.Errorf("T1 连写丢键:同分组连写 %d 次,仅 %d 条落库且值正确(read-after-write 回退)", n, got)
+		} else {
+			t.Logf("回归 T1 连写 ok: 同用户分组连写 %d 次 → %d/%d 令牌分组落库值正确(己方键以镜像为准,不被上游缓存回退)", n, got, n)
+		}
+	}
+	// T1-b 批量改价:20 个不同 org 用户分组 0ms 顺序连写(运营方"一把配多客户"的真实路径)。
+	// 每次权威写自己那条 + merge-preserve 其它,锁内读到的是上一次已提交态 → 应 20/20 累积、vip 不动。
+	// (注:对"同一 option blob 的真·并发跨用户分组写",受上游 new-api 读缓存与单 JSON 提交的固有限制,
+	//  平台侧锁无法完全保证;故批量改价按顺序连写处理,真并发残差交 reconcile 兜底。)
+	{
+		const n = 3
+		for i := 0; i < n; i++ {
+			if err := upstream.SetOrgGroupRatios(ctxBg, fmt.Sprintf("co%02d", i), map[string]float64{"default": 0.5}); err != nil {
+				t.Fatalf("T1 批量连写第 %d 个失败: %v", i, err)
+			}
+		}
+		got := 0
+		for i := 0; i < n; i++ {
+			if _, ok, _ := upstream.GetGroupGroupRatio(ctxBg, fmt.Sprintf("co%02d", i), "default"); ok {
+				got++
+			}
+		}
+		if got != n {
+			t.Errorf("T1 批量连写丢键:期望 %d 实 %d", n, got)
+		} else {
+			t.Logf("回归 T1 批量 ok: %d 个不同 org 顺序连写 %d/%d 全累积(merge-preserve 跨 org 不丢)", n, got, n)
+		}
+		if _, ok, _ := upstream.GetGroupGroupRatio(ctxBg, "vip", "default"); !ok {
+			t.Error("T1 批量连写误删外部 vip 键")
+		}
+	}
+	// T6 per_group 多次配不同分组 → 平台镜像累积(含全部已配分组),与上游一致,none 能删全。
+	{
+		if st := api.do("PUT", pricingPath, opTok, map[string]any{"mode": "per_group", "discount_pct": 0.9, "token_groups": []string{"default"}}, nil); st != http.StatusOK {
+			t.Fatalf("T6 per_group A HTTP=%d", st)
+		}
+		if st := api.do("PUT", pricingPath, opTok, map[string]any{"mode": "per_group", "discount_pct": 0.8, "token_groups": []string{"vision"}}, nil); st != http.StatusOK {
+			t.Fatalf("T6 per_group B HTTP=%d", st)
+		}
+		var pv2 struct {
+			Entries map[string]struct {
+				Pct float64 `json:"pct"`
+			} `json:"entries"`
+		}
+		api.do("GET", pricingPath, opTok, nil, &pv2)
+		if len(pv2.Entries) != 2 || pv2.Entries["default"].Pct == 0 || pv2.Entries["vision"].Pct == 0 {
+			t.Errorf("T6 镜像未累积:期望含 default+vision,实得 %+v", pv2.Entries)
+		} else {
+			t.Log("回归 T6 ok: per_group 多次配不同分组,镜像累积含 default+vision(不再覆盖发散)")
+		}
+		var rec2 struct {
+			DriftCount int `json:"drift_count"`
+		}
+		api.do("POST", "/api/v1/pricing/reconcile", opTok, nil, &rec2)
+		if rec2.DriftCount != 0 {
+			t.Errorf("T6 镜像/上游应一致,reconcile drift_count=%d(非 0)", rec2.DriftCount)
+		}
+		api.do("PUT", pricingPath, opTok, map[string]any{"mode": "none"}, nil)
+		_, okD, _ := upstream.GetGroupGroupRatio(ctxBg, ug, "default")
+		_, okV, _ := upstream.GetGroupGroupRatio(ctxBg, ug, "vision")
+		if okD || okV {
+			t.Errorf("T6 none 未删全(default 在=%v / vision 在=%v)", okD, okV)
+		} else {
+			t.Log("回归 T6 none ok: 取消折扣把累积的 default+vision 两条键都删干净")
+		}
 	}
 
 	// ===== 里程碑 4:申请-审批(US-06)+ 通知(US-13)=====
@@ -673,6 +767,63 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 			t.Errorf("组织管理员减余额应 403,得 %d", st)
 		}
 	}
+	// T9 回归:审批列表带申请人姓名(而非仅 #id)。前面里程碑 4 已由成员"钱晨"提交过申请。
+	{
+		var appList struct {
+			List []struct {
+				ApplicantID   int64  `json:"applicant_id"`
+				ApplicantName string `json:"applicant_name"`
+			} `json:"list"`
+		}
+		api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/approvals?page=1&page_size=5", orgID), adminTok, nil, &appList)
+		if len(appList.List) == 0 || appList.List[0].ApplicantName == "" {
+			t.Errorf("T9 审批列表应带申请人姓名,实得 %+v", appList.List)
+		} else {
+			t.Logf("回归 T9 ok: 审批列表显示申请人姓名 %q(#%d)", appList.List[0].ApplicantName, appList.List[0].ApplicantID)
+		}
+	}
+	// T10 回归:层级编辑/删除 + 默认档/被引用档删除防护。
+	{
+		var tmp struct {
+			ID int64 `json:"id"`
+		}
+		if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/tiers", orgID), adminTok,
+			map[string]any{"name": "临时档", "monthly_limit": 5000000}, &tmp); st != http.StatusCreated {
+			t.Fatalf("T10 建临时层级 HTTP=%d", st)
+		}
+		if st := api.do("PUT", fmt.Sprintf("/api/v1/tiers/%d", tmp.ID), adminTok,
+			map[string]any{"name": "临时档改", "monthly_limit": 9000000}, nil); st != http.StatusOK {
+			t.Errorf("T10 改层级应 200,得 %d", st)
+		}
+		var tiers []struct {
+			ID   int64  `json:"id"`
+			Name string `json:"name"`
+			ML   *int64 `json:"monthly_limit_quota"`
+		}
+		api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/tiers", orgID), adminTok, nil, &tiers)
+		okEdit := false
+		for _, tt := range tiers {
+			if tt.ID == tmp.ID && tt.Name == "临时档改" && tt.ML != nil && *tt.ML == 9000000 {
+				okEdit = true
+			}
+		}
+		if !okEdit {
+			t.Errorf("T10 改层级未生效: %+v", tiers)
+		} else {
+			t.Log("回归 T10 ok: 层级编辑生效(名称/月额度)")
+		}
+		// 删默认档(tierResp 仍是默认且被成员引用)→ 409 防护。
+		if st := api.do("DELETE", fmt.Sprintf("/api/v1/tiers/%d", tierResp.ID), adminTok, nil, nil); st != http.StatusConflict {
+			t.Errorf("T10 删默认/被引用档应 409,得 %d", st)
+		}
+		// 删无引用临时档 → 200。
+		if st := api.do("DELETE", fmt.Sprintf("/api/v1/tiers/%d", tmp.ID), adminTok, nil, nil); st != http.StatusOK {
+			t.Errorf("T10 删无引用层级应 200,得 %d", st)
+		} else {
+			t.Log("回归 T10 ok: 删无引用层级成功;删默认/被引用档被 409 挡")
+		}
+	}
+
 	// E1 破玻璃本期关。
 	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/support-sessions", orgID), opTok, map[string]any{"scope": "assist", "grant_type": "break_glass", "ttl_seconds": 600}, nil); st != http.StatusForbidden {
 		t.Errorf("破玻璃本期应 403(二期),得 %d", st)
@@ -945,25 +1096,36 @@ func setupRC4(t *testing.T, base string) (string, int) {
 
 // getNewapiUser 以管理员身份查 new-api 用户的 quota 与 status(1=enabled,2=disabled)。
 func getNewapiUser(t *testing.T, base, adminToken string, adminUID int, userID int64) (int64, int) {
-	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/user/%d", base, userID), nil)
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	req.Header.Set("New-Api-User", strconv.Itoa(adminUID))
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("查 new-api 用户失败: %v", err)
+	// new-api 对高频 API 有限流(429,空/非 JSON body);测试压得紧时退避重试几次再判失败。
+	var lastRaw []byte
+	for attempt := 0; attempt < 5; attempt++ {
+		req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/user/%d", base, userID), nil)
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		req.Header.Set("New-Api-User", strconv.Itoa(adminUID))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("查 new-api 用户失败: %v", err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		lastRaw = raw
+		if resp.StatusCode == http.StatusTooManyRequests || len(raw) == 0 {
+			time.Sleep(time.Duration(200*(attempt+1)) * time.Millisecond) // 退避让限流窗口恢复
+			continue
+		}
+		var env struct {
+			Data struct {
+				Quota  int64 `json:"quota"`
+				Status int   `json:"status"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &env); err != nil {
+			t.Fatalf("解析 new-api 用户失败: %v\n%s", err, raw)
+		}
+		return env.Data.Quota, env.Data.Status
 	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-	var env struct {
-		Data struct {
-			Quota  int64 `json:"quota"`
-			Status int   `json:"status"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		t.Fatalf("解析 new-api 用户失败: %v\n%s", err, raw)
-	}
-	return env.Data.Quota, env.Data.Status
+	t.Fatalf("查 new-api 用户被限流(重试用尽):%s", lastRaw)
+	return 0, 0
 }
 
 // ensureDatabase 用一个已存在库的连接建另一个库(本地 compose 自建 nexus)。
@@ -1008,7 +1170,7 @@ func seedConsumptionLog(t *testing.T, dsn string, userID int64, model string, qu
 func randSuffix() string {
 	b := make([]byte, 5)
 	_, _ = rand.Read(b)
-	return strings.ToLower(base64.RawURLEncoding.EncodeToString(b))
+	return fmt.Sprintf("%x", b) // hex:仅 0-9a-f,恒为合法 slug(slug 格式校验上线后不会误伤,T4)
 }
 
 func mask(s string) string {

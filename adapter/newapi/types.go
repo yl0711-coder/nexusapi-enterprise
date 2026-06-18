@@ -101,6 +101,11 @@ type NewapiAdapter interface {
 	// DeleteGroupGroupRatio 删掉某「用户分组×令牌分组」特殊倍率条目(取消折扣回落基础倍率;
 	// merge-preserve + 单写者锁,不堆死键。R2-轻微:mode=none 应删键而非写 base)。
 	DeleteGroupGroupRatio(ctx context.Context, userGroup, tokenGroup string) error
+	// SetOrgGroupRatios 以平台镜像为权威源,一次性把某用户分组(org_{id})下的全部令牌分组特殊倍率
+	// 设为 desired(authoritative replace 该用户分组,绝不采信上游读回的己方旧值),同时 merge-preserve
+	// 其它用户分组(vip 等手工键)。desired 为空 → 删除该用户分组。写后读校验 + 退避重试,
+	// 应对 new-api option 读缓存滞后(read-after-write,T1 动钱)。折扣写路径专用。
+	SetOrgGroupRatios(ctx context.Context, userGroup string, desired map[string]float64) error
 
 	// SetUserGroup 设 new-api 用户分组(读-改-写,quota 不丢);折扣按用户分组归属(A2)。
 	SetUserGroup(ctx context.Context, userID int, group string) error

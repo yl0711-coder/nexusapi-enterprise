@@ -54,18 +54,32 @@ func (s *Store) ListApprovals(ctx context.Context, orgID int64, state string, te
 		return nil, 0, err
 	}
 	pageArgs := append(append([]any{}, args...), limit, offset)
-	rows, err := s.db.QueryContext(ctx, approvalSelect+` WHERE `+cond+` ORDER BY id DESC LIMIT ? OFFSET ?`, pageArgs...)
+	// T9:列表 join 成员名(COALESCE(display_name, login_email)),申请人显示姓名而非 #id。
+	// approval 列加 a. 前缀避免与 join 表歧义;cond/排序里的列同理。
+	condQ := strings.ReplaceAll(cond, "org_id", "a.org_id")
+	condQ = strings.ReplaceAll(condQ, "team_id", "a.team_id")
+	condQ = strings.ReplaceAll(condQ, "applicant_id", "a.applicant_id")
+	condQ = strings.ReplaceAll(condQ, "state", "a.state")
+	q := `SELECT a.id, a.org_id, a.applicant_id, a.team_id, a.request_type, a.payload, a.state, a.is_level2,
+		a.l1_reviewer_id, a.l2_reviewer_id, a.reject_reason, a.created_at,
+		COALESCE(NULLIF(m.display_name, ''), m.login_email, '') AS applicant_name
+		FROM approval a LEFT JOIN member m ON m.id = a.applicant_id
+		WHERE ` + condQ + ` ORDER BY a.id DESC LIMIT ? OFFSET ?`
+	rows, err := s.db.QueryContext(ctx, q, pageArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer rows.Close()
 	var out []*model.Approval
 	for rows.Next() {
-		a, err := scanApproval(rows)
-		if err != nil {
+		var a model.Approval
+		var payload string
+		if err := rows.Scan(&a.ID, &a.OrgID, &a.ApplicantID, &a.TeamID, &a.RequestType, &payload, &a.State, &a.IsLevel2,
+			&a.L1ReviewerID, &a.L2ReviewerID, &a.RejectReason, &a.CreatedAt, &a.ApplicantName); err != nil {
 			return nil, 0, err
 		}
-		out = append(out, a)
+		_ = json.Unmarshal([]byte(payload), &a.Payload)
+		out = append(out, &a)
 	}
 	return out, total, rows.Err()
 }

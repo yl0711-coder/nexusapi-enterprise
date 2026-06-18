@@ -31,7 +31,13 @@ say "确保平台库 nexus 存在"
 $COMPOSE exec -T mysql mysql -uroot -pdevroot \
   -e "CREATE DATABASE IF NOT EXISTS nexus CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;"
 
-# 2) 取 dev new-api 管理员 access_token。
+# 2) 取 dev new-api 管理员 access_token(先等 new-api 就绪,T8:reset 后立即 run-server 偶发 connection reset)。
+say "等待 new-api 就绪($NEWAPI_HOST/api/status)"
+for i in $(seq 1 30); do
+  curl -fsS "$NEWAPI_HOST/api/status" >/dev/null 2>&1 && break
+  [ "$i" = 30 ] && { echo "new-api 30s 内未就绪,先 docker compose -f dev/docker-compose.dev.yml up -d" >&2; exit 1; }
+  sleep 1
+done
 JAR="$(mktemp)"; trap 'rm -f "$JAR"' EXIT
 curl -fsS -c "$JAR" -X POST "$NEWAPI_HOST/api/user/login" -H 'Content-Type: application/json' \
   -d "{\"username\":\"root\",\"password\":\"$ROOT_PASS\"}" >/dev/null

@@ -118,6 +118,24 @@ func (s *Store) ListOrgAdminIDs(ctx context.Context, orgID int64) ([]int64, erro
 	return out, rows.Err()
 }
 
+// ListMembersByTier 列出引用某层级的成员(改层级后重算 override 用,T10)。
+func (s *Store) ListMembersByTier(ctx context.Context, orgID, tierID int64) ([]*model.Member, error) {
+	rows, err := s.db.QueryContext(ctx, memberSelect+` WHERE org_id = ? AND tier_id = ? AND deleted_at IS NULL ORDER BY id`, orgID, tierID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*model.Member
+	for rows.Next() {
+		m, err := scanMember(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // GetMember 取成员,强制 org_id 谓词(跨 org → ErrNotFound)。
 func (s *Store) GetMember(ctx context.Context, orgID, id int64) (*model.Member, error) {
 	row := s.db.QueryRowContext(ctx, memberSelect+` WHERE id = ? AND org_id = ? AND deleted_at IS NULL`, id, orgID)

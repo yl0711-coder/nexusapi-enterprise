@@ -25,6 +25,9 @@ services:
         condition: service_healthy
     environment:
       SQL_DSN: "root:rootpw@tcp(mysql:3306)/newapi"
+      # 抬高全局 API/Web 限流,避免集成 e2e 高频调用触发 429(测试环境专用)。
+      GLOBAL_API_RATE_LIMIT: "100000"
+      GLOBAL_WEB_RATE_LIMIT: "100000"
     tmpfs:
       - /data
     expose:

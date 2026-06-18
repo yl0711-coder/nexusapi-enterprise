@@ -507,10 +507,10 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 
 	// ===== R3 回归:T1 读后写不丢键(连写/并发) + T6 折扣镜像累积一致 =====
 	absEq := func(a, b float64) bool { d := a - b; return d < 1e-9 && d > -1e-9 }
-	// T1-a 同一用户分组"快速连写"(每次新增一个令牌分组):authoritative 写应 n/n 不丢。
-	// (用 4 次而非 10:new-api 全局 API 限流与本测试其余调用共享预算,够证明"连写累积不回退"性质。)
+	// T1-a 同一用户分组"快速连写"10 次(每次新增一个令牌分组):authoritative 写应 10/10 不丢
+	//(对应工单 T1"间隔 0ms 连写 10 次")。new-api 限流已由 compose 抬高,不再受预算干扰。
 	{
-		const n = 4
+		const n = 10
 		desired := map[string]float64{}
 		for i := 0; i < n; i++ {
 			desired[fmt.Sprintf("g%02d", i)] = 0.3 + float64(i)*0.01
@@ -535,7 +535,7 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	// (注:对"同一 option blob 的真·并发跨用户分组写",受上游 new-api 读缓存与单 JSON 提交的固有限制,
 	//  平台侧锁无法完全保证;故批量改价按顺序连写处理,真并发残差交 reconcile 兜底。)
 	{
-		const n = 3
+		const n = 5
 		for i := 0; i < n; i++ {
 			if err := upstream.SetOrgGroupRatios(ctxBg, fmt.Sprintf("co%02d", i), map[string]float64{"default": 0.5}); err != nil {
 				t.Fatalf("T1 批量连写第 %d 个失败: %v", i, err)
@@ -1090,23 +1090,6 @@ func setupRC4(t *testing.T, base string) (string, int) {
 	}
 	if token == "" {
 		t.Fatalf("未取到管理员 access_token,原始: %s", raw)
-	}
-
-	// 抬高 new-api 全局 API 限流,避免测试高频调用触发 429(键不存在则被忽略,无害)。best-effort。
-	for _, kv := range []struct{ k, v string }{
-		{"GlobalApiRateLimitNum", "100000"},
-		{"GlobalApiRateLimitDuration", "60"},
-		{"GlobalWebRateLimitNum", "100000"},
-		{"GlobalWebRateLimitDuration", "60"},
-	} {
-		ob, _ := json.Marshal(map[string]string{"key": kv.k, "value": kv.v})
-		oreq, _ := http.NewRequest("PUT", base+"/api/option/", bytes.NewReader(ob))
-		oreq.Header.Set("Authorization", "Bearer "+token)
-		oreq.Header.Set("New-Api-User", strconv.Itoa(uid))
-		oreq.Header.Set("Content-Type", "application/json")
-		if oresp, oerr := hc.Do(oreq); oerr == nil {
-			oresp.Body.Close()
-		}
 	}
 	return token, uid
 }

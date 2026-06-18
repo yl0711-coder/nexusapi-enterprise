@@ -50,13 +50,14 @@ type tierView struct {
 	ModelSet     []string         `json:"model_set"`
 	ModelCap     map[string]int64 `json:"model_cap,omitempty"`
 	MonthlyLimit *int64           `json:"monthly_limit_quota"`
+	NewapiGroup  *string          `json:"newapi_group"` // 计费分组(T17-1;nil=回落组织默认/default)
 	IsDefault    bool             `json:"is_default"`
 	Status       string           `json:"status"`
 }
 
 func toTierView(t *model.Tier) tierView {
 	return tierView{ID: t.ID, OrgID: t.OrgID, Name: t.Name, ModelSet: t.ModelSet, ModelCap: t.ModelCap,
-		MonthlyLimit: t.MonthlyLimit, IsDefault: t.IsDefault, Status: t.Status}
+		MonthlyLimit: t.MonthlyLimit, NewapiGroup: t.NewapiGroup, IsDefault: t.IsDefault, Status: t.Status}
 }
 
 // memberView 脱敏成员视图:key 只回显 key_masked,绝不含 access_token/password。
@@ -69,6 +70,7 @@ type memberView struct {
 	DisplayName    *string `json:"display_name"`
 	Role           string  `json:"role"`
 	TierID         *int64  `json:"tier_id"`
+	NewapiGroup    *string `json:"newapi_group"` // 令牌计价分组快照(T17-1)
 	Status         string  `json:"status"`
 	KeyMasked      *string `json:"key_masked"`
 	BootstrapState string  `json:"bootstrap_state"`
@@ -78,7 +80,7 @@ type memberView struct {
 func toMemberView(m *model.Member) memberView {
 	return memberView{
 		ID: m.ID, OrgID: m.OrgID, TeamID: m.TeamID, NewapiUserID: m.NewapiUserID,
-		LoginEmail: m.LoginEmail, DisplayName: m.DisplayName, Role: m.Role, TierID: m.TierID,
+		LoginEmail: m.LoginEmail, DisplayName: m.DisplayName, Role: m.Role, TierID: m.TierID, NewapiGroup: m.NewapiGroup,
 		Status: m.Status, KeyMasked: m.KeyMasked, BootstrapState: m.BootstrapState,
 		CreatedAt: m.CreatedAt.Format(time.RFC3339),
 	}

@@ -97,6 +97,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/organizations/{id}/pricing", h.requireAuth(h.handleGetPricing))
 	mux.HandleFunc("PUT /api/v1/organizations/{id}/pricing", h.requireAuth(h.handleConfigureDiscount))
 	mux.HandleFunc("POST /api/v1/pricing/reconcile", h.requireAuth(h.handleReconcileDiscounts)) // 手动折扣对账(运营方,G)
+	mux.HandleFunc("GET /api/v1/pricing/groups", h.requireAuth(h.handleListBillingGroups))      // 计费分组选择器(T17-6)
+	mux.HandleFunc("PUT /api/v1/organizations/{id}/default-token-group", h.requireAuth(h.handleSetOrgDefaultTokenGroup))
 
 	// 申请-审批(里程碑4,US-06)+ 通知(US-13)+ 成员自助。
 	mux.HandleFunc("POST /api/v1/approvals", h.requireAuth(h.handleSubmitApproval))

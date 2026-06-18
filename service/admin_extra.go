@@ -30,6 +30,39 @@ func (s *Service) UpdateOrgSettings(ctx context.Context, c session.Claims, orgID
 	return s.store.GetOrganization(ctx, orgID)
 }
 
+// SetOrgDefaultTokenGroup 设组织级默认令牌计价分组(D1 两级的回落层,T17;仅运营方·动钱相邻)。
+// group 为空/nil → 清空回落 default;非空 → 校验该分组在上游存在再写。改后影响新开通成员的回落分组。
+func (s *Service) SetOrgDefaultTokenGroup(ctx context.Context, c session.Claims, orgID int64, group *string) (*model.Organization, error) {
+	if err := assertRole(c, session.RoleOperator); err != nil {
+		return nil, err
+	}
+	if _, err := s.store.GetOrganization(ctx, orgID); errors.Is(err, repo.ErrNotFound) {
+		return nil, apperr.NotFound("组织不存在")
+	} else if err != nil {
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	if group != nil && *group != "" && *group != "default" {
+		ratios, err := s.upstream.ListGroupRatios(ctx)
+		if err != nil {
+			return nil, mapUpstream(err)
+		}
+		if _, ok := ratios[*group]; !ok {
+			return nil, apperr.InvalidParam("计费分组不存在(上游未配)")
+		}
+	}
+	if group != nil && *group == "" {
+		group = nil // 空串视为清空
+	}
+	if err := s.store.SetOrgDefaultTokenGroup(ctx, orgID, group); err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			return nil, apperr.NotFound("组织不存在")
+		}
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	s.audit(ctx, c, orgID, "set_org_default_token_group", "organization", &orgID, map[string]any{"group": group})
+	return s.store.GetOrganization(ctx, orgID)
+}
+
 // GetApprovalRules 取审批阈值(O/A)。
 func (s *Service) GetApprovalRules(ctx context.Context, c session.Claims, orgID int64) (*repo.ApprovalRules, error) {
 	if err := assertOrgScope(c, orgID); err != nil {

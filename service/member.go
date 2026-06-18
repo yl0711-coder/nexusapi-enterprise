@@ -95,6 +95,8 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 	if err != nil {
 		return nil, err
 	}
+	// 解析令牌计价分组(D1 两级:tier ?? org 默认 ?? default,T17-1)。
+	grp := resolveTokenGroup(tier, org)
 
 	// 自动派生登录邮箱(若未提供)。
 	email := in.Email
@@ -121,12 +123,14 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 	}
 
 	displayName := in.Name
+	grpSnap := grp
 	prov := &model.Member{
 		OrgID:                orgID,
 		TeamID:               in.TeamID,
 		LoginEmail:           email,
 		DisplayName:          &displayName,
 		Role:                 string(session.RoleMember),
+		NewapiGroup:          &grpSnap, // 令牌分组快照(T17-1)
 		PlatformPasswordHash: &platHash,
 		MemberPasswordEnc:    []byte(newapiPwEnc),
 	}
@@ -183,12 +187,22 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 	if err := s.upstream.SetUserGroup(ctx, res.NewapiUserID, orgUserGroup(orgID)); err != nil {
 		s.log.Warn("设成员 new-api 用户分组失败(可后续补)", "member_id", memberID, "err", err)
 	}
-	// 令牌 model_limits = 层级模型集(B2:网关数据面限模型,真拦截、不依赖平台在线)。best-effort。
-	if tier != nil && len(tier.ModelSet) > 0 {
+	// T17-2:把业务令牌分组加进该 org 用户可用分组(§3 硬约束,不补则令牌用业务分组时 403)。best-effort。
+	if err := s.upstream.AddOrgUsableGroup(ctx, orgUserGroup(orgID), grp); err != nil {
+		s.log.Warn("加成员可用分组失败(令牌用业务分组会 403,需补)", "member_id", memberID, "group", grp, "err", err)
+	}
+	// T17-3/Q1:该 org 若已配 total 折扣,新落到的分组自动补折扣(否则新分组回原价、客户被多收)。best-effort。
+	s.ensureTotalDiscountCoversGroup(ctx, orgID, grp)
+	// 令牌设计价分组 = grp(T17-1)+ model_limits = 层级模型集(B2:网关数据面限模型,真拦截)。best-effort。
+	// grp=default 且无模型集时是无意义写,跳过。
+	if grp != "default" || (tier != nil && len(tier.ModelSet) > 0) {
 		cred := newapi.MemberCred{NewapiUserID: res.NewapiUserID, AccessToken: res.AccessToken}
-		spec := newapi.TokenSpec{Name: deriveTokenName(memberID, 1), UnlimitedQuota: true, ExpiredTime: -1, Group: "default", ModelLimits: tier.ModelSet}
+		spec := newapi.TokenSpec{Name: deriveTokenName(memberID, 1), UnlimitedQuota: true, ExpiredTime: -1, Group: grp}
+		if tier != nil {
+			spec.ModelLimits = tier.ModelSet
+		}
 		if err := s.upstream.UpdateToken(ctx, cred, res.TokenID, spec); err != nil {
-			s.log.Warn("设令牌 model_limits 失败(可后续补)", "member_id", memberID, "err", err)
+			s.log.Warn("设令牌分组/model_limits 失败(可后续补)", "member_id", memberID, "err", err)
 		}
 	}
 
@@ -280,6 +294,26 @@ func (s *Service) GetMember(ctx context.Context, c session.Claims, orgID, member
 	return m, nil
 }
 
+// resolveTokenGroup 解析成员生效令牌计价分组(D1 两级,T17-1):
+// tier.NewapiGroup ?? org.DefaultTokenGroup ?? "default"。
+func resolveTokenGroup(tier *model.Tier, org *model.Organization) string {
+	if tier != nil && tier.NewapiGroup != nil && *tier.NewapiGroup != "" {
+		return *tier.NewapiGroup
+	}
+	if org != nil && org.DefaultTokenGroup != nil && *org.DefaultTokenGroup != "" {
+		return *org.DefaultTokenGroup
+	}
+	return "default"
+}
+
+// memberTokenGroup 取成员令牌分组快照(轮换/白名单复用,防丢回 default;空=default)。
+func memberTokenGroup(m *model.Member) string {
+	if m != nil && m.NewapiGroup != nil && *m.NewapiGroup != "" {
+		return *m.NewapiGroup
+	}
+	return "default"
+}
+
 // SetKeyIPWhitelist 设自己 key 的 IP 白名单(E22,token allow_ips,支持单 IP/CIDR;就地更新不旋转 key)。
 // 拦截由 new-api 网关数据面执行,与平台可用性解耦(03 §3.4.2)。MVP 仅对本人。
 func (s *Service) SetKeyIPWhitelist(ctx context.Context, c session.Claims, orgID, memberID int64, allowIPs string) error {
@@ -304,7 +338,8 @@ func (s *Service) SetKeyIPWhitelist(ctx context.Context, c session.Claims, orgID
 		return apperr.Internal("").WithCause(err)
 	}
 	cred := newapi.MemberCred{NewapiUserID: int(m.NewapiUserID), AccessToken: accessToken}
-	spec := newapi.TokenSpec{Name: deriveTokenName(memberID, m.KeyRotation), UnlimitedQuota: true, ExpiredTime: -1, AllowIPs: allowIPs}
+	// 重申令牌分组快照,防白名单更新把令牌分组丢回 default(T17-1/Q2)。
+	spec := newapi.TokenSpec{Name: deriveTokenName(memberID, m.KeyRotation), UnlimitedQuota: true, ExpiredTime: -1, AllowIPs: allowIPs, Group: memberTokenGroup(m)}
 	if err := s.upstream.UpdateToken(ctx, cred, int(*m.NewapiTokenID), spec); err != nil {
 		return mapUpstream(err)
 	}
@@ -342,7 +377,8 @@ func (s *Service) RotateKey(ctx context.Context, c session.Claims, orgID, member
 	}
 	cred := newapi.MemberCred{NewapiUserID: int(m.NewapiUserID), AccessToken: accessToken}
 	nextRotation := m.KeyRotation + 1
-	spec := newapi.TokenSpec{Name: deriveTokenName(memberID, nextRotation), UnlimitedQuota: true, ExpiredTime: -1}
+	// 轮换重申令牌分组快照,防新 token 丢回 default(T17-1/Q2 必测)。
+	spec := newapi.TokenSpec{Name: deriveTokenName(memberID, nextRotation), UnlimitedQuota: true, ExpiredTime: -1, Group: memberTokenGroup(m)}
 
 	newID, newKey, berr := s.upstream.RotateToken(ctx, cred, int(*m.NewapiTokenID), spec)
 	if berr != nil {

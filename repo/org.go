@@ -35,7 +35,7 @@ func (s *Store) CreateOrganization(ctx context.Context, o *model.Organization) (
 // GetOrganization 按 id 取组织(未删)。不存在 → ErrNotFound。
 func (s *Store) GetOrganization(ctx context.Context, id int64) (*model.Organization, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, archived_at, created_at, updated_at
+		`SELECT id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, default_token_group, archived_at, created_at, updated_at
 		 FROM organization WHERE id = ? AND deleted_at IS NULL`, id)
 	return scanOrg(row)
 }
@@ -43,7 +43,7 @@ func (s *Store) GetOrganization(ctx context.Context, id int64) (*model.Organizat
 // GetOrganizationBySlug 按 slug 取组织(运营方组织引导用)。
 func (s *Store) GetOrganizationBySlug(ctx context.Context, slug string) (*model.Organization, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, archived_at, created_at, updated_at
+		`SELECT id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, default_token_group, archived_at, created_at, updated_at
 		 FROM organization WHERE slug = ? AND deleted_at IS NULL`, slug)
 	return scanOrg(row)
 }
@@ -60,7 +60,7 @@ func (s *Store) ListOrganizations(ctx context.Context, limit, offset int, includ
 		return nil, 0, err
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, archived_at, created_at, updated_at
+		`SELECT id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, default_token_group, archived_at, created_at, updated_at
 		 FROM organization WHERE `+cond+` ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, 0, err
@@ -201,6 +201,19 @@ func (s *Store) UpdateOrgStatus(ctx context.Context, orgID int64, status string)
 	return err
 }
 
+// SetOrgDefaultTokenGroup 设组织级默认令牌计价分组(D1 两级;nil 入参不改用 COALESCE 不便,直接置)。
+func (s *Store) SetOrgDefaultTokenGroup(ctx context.Context, orgID int64, group *string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE organization SET default_token_group = ? WHERE id = ? AND deleted_at IS NULL`, group, orgID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetOrgDefaultTier 设组织默认层级(US-01 套默认层级用)。
 func (s *Store) SetOrgDefaultTier(ctx context.Context, orgID, tierID int64) error {
 	_, err := s.db.ExecContext(ctx,
@@ -215,7 +228,7 @@ type rowScanner interface {
 func scanOrg(r rowScanner) (*model.Organization, error) {
 	var o model.Organization
 	err := r.Scan(&o.ID, &o.Name, &o.Slug, &o.Status, &o.Timezone, &o.NewapiGroup,
-		&o.DefaultTierID, &o.BillingMode, &o.ArchivedAt, &o.CreatedAt, &o.UpdatedAt)
+		&o.DefaultTierID, &o.BillingMode, &o.DefaultTokenGroup, &o.ArchivedAt, &o.CreatedAt, &o.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

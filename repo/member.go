@@ -22,10 +22,10 @@ type MemberFilter struct {
 // service 用此 id 派生确定性 username 后再 bootstrap(10 §2.5),成功后调 FinalizeBootstrap。
 func (s *Store) CreateMemberProvisional(ctx context.Context, m *model.Member) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO member (org_id, team_id, login_email, display_name, role, tier_id,
+		`INSERT INTO member (org_id, team_id, login_email, display_name, role, tier_id, newapi_group,
 		    status, platform_password_hash, bootstrap_state)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		m.OrgID, m.TeamID, m.LoginEmail, m.DisplayName, m.Role, m.TierID,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.OrgID, m.TeamID, m.LoginEmail, m.DisplayName, m.Role, m.TierID, m.NewapiGroup,
 		model.MemberStatusProvisioning, m.PlatformPasswordHash, model.BootstrapPending)
 	if err != nil {
 		if isDupKey(err) {
@@ -136,6 +136,13 @@ func (s *Store) ListMembersByTier(ctx context.Context, orgID, tierID int64) ([]*
 	return out, rows.Err()
 }
 
+// SetMemberNewapiGroup 刷新成员令牌分组快照(切档时同步,T17-1/Q2)。
+func (s *Store) SetMemberNewapiGroup(ctx context.Context, orgID, memberID int64, group *string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE member SET newapi_group = ? WHERE id = ? AND org_id = ? AND deleted_at IS NULL`, group, memberID, orgID)
+	return err
+}
+
 // GetMember 取成员,强制 org_id 谓词(跨 org → ErrNotFound)。
 func (s *Store) GetMember(ctx context.Context, orgID, id int64) (*model.Member, error) {
 	row := s.db.QueryRowContext(ctx, memberSelect+` WHERE id = ? AND org_id = ? AND deleted_at IS NULL`, id, orgID)
@@ -194,14 +201,14 @@ func (s *Store) ListMembers(ctx context.Context, orgID int64, f MemberFilter) ([
 	return out, total, rows.Err()
 }
 
-const memberSelect = `SELECT id, org_id, team_id, newapi_user_id, login_email, display_name, role, tier_id,
+const memberSelect = `SELECT id, org_id, team_id, newapi_user_id, login_email, display_name, role, tier_id, newapi_group,
 	status, expire_at, platform_password_hash, access_token_enc, member_password_enc, bootstrapped_at,
 	newapi_token_id, key_masked, key_rotation, bootstrap_state, created_at, updated_at FROM member`
 
 func scanMember(r rowScanner) (*model.Member, error) {
 	var m model.Member
 	var newapiUserID sql.NullInt64
-	err := r.Scan(&m.ID, &m.OrgID, &m.TeamID, &newapiUserID, &m.LoginEmail, &m.DisplayName, &m.Role, &m.TierID,
+	err := r.Scan(&m.ID, &m.OrgID, &m.TeamID, &newapiUserID, &m.LoginEmail, &m.DisplayName, &m.Role, &m.TierID, &m.NewapiGroup,
 		&m.Status, &m.ExpireAt, &m.PlatformPasswordHash, &m.AccessTokenEnc, &m.MemberPasswordEnc, &m.BootstrappedAt,
 		&m.NewapiTokenID, &m.KeyMasked, &m.KeyRotation, &m.BootstrapState, &m.CreatedAt, &m.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {

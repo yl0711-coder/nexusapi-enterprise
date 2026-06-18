@@ -41,11 +41,12 @@ type Organization struct {
 	Status        string
 	Timezone      string
 	NewapiGroup   *string
-	DefaultTierID *int64
-	BillingMode   string
-	ArchivedAt    *time.Time // 归档时间(NULL=未归档,T12)
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	DefaultTierID     *int64
+	BillingMode       string
+	DefaultTokenGroup *string    // 组织级默认令牌计价分组(D1 两级;nil=回落 default)
+	ArchivedAt        *time.Time // 归档时间(NULL=未归档,T12)
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 // Team 对应 team 表(09 §2)。
@@ -88,6 +89,7 @@ type Member struct {
 	DisplayName          *string
 	Role                 string
 	TierID               *int64
+	NewapiGroup          *string // 令牌计价分组快照(开通时解析,T17-1;nil=default)
 	Status               string
 	ExpireAt             *time.Time
 	PlatformPasswordHash *string

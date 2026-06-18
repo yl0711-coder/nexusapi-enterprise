@@ -36,6 +36,13 @@ func (s *Service) CreateTier(ctx context.Context, c session.Claims, orgID int64,
 	if err := checkLen("层级名称", in.Name, maxNameLen); err != nil {
 		return nil, err
 	}
+	// T17-5/D4:配了计费分组则配置期硬预检(分组存在 + 模型集 ⊆ 分组可用模型),不满足 422,
+	// 别等开通/调用才 503。default 不校验(回落默认、天然存在)。
+	if in.NewapiGroup != nil {
+		if err := s.validateTierGroup(ctx, *in.NewapiGroup, in.ModelSet); err != nil {
+			return nil, err
+		}
+	}
 	id, err := s.store.CreateTier(ctx, &model.Tier{
 		OrgID: orgID, Name: in.Name, ModelSet: in.ModelSet, ModelCap: in.ModelCap,
 		DailyLimit: in.DailyLimit, WeeklyLimit: in.WeeklyLimit, MonthlyLimit: in.MonthlyLimit,
@@ -106,6 +113,12 @@ func (s *Service) UpdateTier(ctx context.Context, c session.Claims, orgID, tierI
 	if in.NewapiGroup != nil {
 		t.NewapiGroup = in.NewapiGroup
 	}
+	// T17-5/D4:改了分组或模型集,按改后的有效组合做配置期硬预检(分组存在 + 模型集 ⊆ 分组可用模型)。
+	if t.NewapiGroup != nil {
+		if err := s.validateTierGroup(ctx, *t.NewapiGroup, t.ModelSet); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.store.UpdateTier(ctx, t); err != nil {
 		if errors.Is(err, repo.ErrConflict) {
 			return nil, apperr.Conflict("同组织内层级名已存在")
@@ -127,6 +140,42 @@ func (s *Service) UpdateTier(ctx context.Context, c session.Claims, orgID, tierI
 	}
 	s.audit(ctx, c, orgID, "update_tier", "tier", &tierID, map[string]any{"name": t.Name})
 	return s.store.GetTier(ctx, orgID, tierID)
+}
+
+// validateTierGroup 配置期校验计费分组(T17-5/D4):分组须存在 + 模型集 ⊆ 该分组可用模型。
+// group 为空 / default 免校验(回落默认、天然存在);模型集为空(继承)免模型校验。数据源 /api/pricing(D6)。
+func (s *Service) validateTierGroup(ctx context.Context, group string, modelSet []string) error {
+	if group == "" || group == "default" {
+		return nil
+	}
+	ratios, err := s.upstream.ListGroupRatios(ctx)
+	if err != nil {
+		return mapUpstream(err)
+	}
+	if _, ok := ratios[group]; !ok {
+		return apperr.InvalidParam(fmt.Sprintf("计费分组 %q 不存在(上游未配),请先在 new-api 建该分组", group))
+	}
+	if len(modelSet) == 0 {
+		return nil
+	}
+	g2m, err := s.upstream.ListGroupModels(ctx)
+	if err != nil {
+		return mapUpstream(err)
+	}
+	avail := map[string]bool{}
+	for _, m := range g2m[group] {
+		avail[m] = true
+	}
+	var missing []string
+	for _, m := range modelSet {
+		if !avail[m] {
+			missing = append(missing, m)
+		}
+	}
+	if len(missing) > 0 {
+		return apperr.InvalidParam(fmt.Sprintf("计费分组 %q 无以下模型的可用渠道:%v;请调整模型集或换分组", group, missing))
+	}
+	return nil
 }
 
 // DeleteTier 删层级(T10:组织管理员)。被成员引用 / 是组织默认档 → 拒并提示占用,防误删。

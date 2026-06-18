@@ -109,4 +109,12 @@ type NewapiAdapter interface {
 
 	// SetUserGroup 设 new-api 用户分组(读-改-写,quota 不丢);折扣按用户分组归属(A2)。
 	SetUserGroup(ctx context.Context, userID int, group string) error
+
+	// 计费分组能力(T17-4):
+	// ListGroupRatios 读「分组 → 基础倍率」(系统现有计费分组);
+	// ListGroupModels 读「分组 → 可用模型」(走 /api/pricing 反转,配置期预检 D4);
+	// AddOrgUsableGroup 把业务分组加进某 org 用户分组的可用分组(§3 硬约束,不补则 403)。
+	ListGroupRatios(ctx context.Context) (map[string]float64, error)
+	ListGroupModels(ctx context.Context) (map[string][]string, error)
+	AddOrgUsableGroup(ctx context.Context, userGroup, group string) error
 }

@@ -31,6 +31,43 @@ func (h *Handler) handleGetPricing(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, r, http.StatusOK, pricingView(v))
 }
 
+// GET /pricing/groups — 列系统计费分组 + 基础倍率 + 可用模型(层级配分组选择器,T17-6)。
+func (h *Handler) handleListBillingGroups(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	gs, err := h.svc.ListBillingGroups(r.Context(), c)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	if gs == nil {
+		gs = []service.BillingGroup{}
+	}
+	writeOK(w, r, http.StatusOK, gs)
+}
+
+// PUT /organizations/{id}/default-token-group — 设组织级默认令牌计价分组(运营方,D1 回落层)。
+func (h *Handler) handleSetOrgDefaultTokenGroup(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	orgID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	var in struct {
+		Group *string `json:"group"`
+	}
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	o, err := h.svc.SetOrgDefaultTokenGroup(r.Context(), c, orgID, in.Group)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, toOrgView(o))
+}
+
 // POST /pricing/reconcile — 手动触发折扣对账(仅运营方,只读告警,G)。
 func (h *Handler) handleReconcileDiscounts(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())

@@ -58,7 +58,14 @@ func (s *Service) ConfigureDiscount(ctx context.Context, c session.Claims, orgID
 	userGroup := orgUserGroup(orgID)
 	groups := in.TokenGroups
 	if len(groups) == 0 {
-		groups = []string{"default"}
+		// total(整体折扣)默认覆盖「该 org 在用的全部令牌分组集」(T17-3/Q1),而非写死 default;
+		// per_group 缺省仍回落 default。
+		if in.Mode == DiscountTotal {
+			groups = s.orgInUseTokenGroups(ctx, orgID)
+		}
+		if len(groups) == 0 {
+			groups = []string{"default"}
+		}
 	}
 
 	// 平台镜像是该 org 全部己方令牌分组折扣的权威集合(T1/T6)。基于既有镜像演进:
@@ -107,6 +114,33 @@ func (s *Service) ConfigureDiscount(ctx context.Context, c session.Claims, orgID
 	return s.GetPricing(ctx, c, orgID)
 }
 
+// BillingGroup 计费分组信息(层级配置页选择器用,T17-6/D4)。
+type BillingGroup struct {
+	Group  string   `json:"group"`
+	Ratio  float64  `json:"ratio"`  // 基础倍率
+	Models []string `json:"models"` // 该分组可用模型(/api/pricing 反转)
+}
+
+// ListBillingGroups 列系统计费分组 + 基础倍率 + 各分组可用模型(供层级配分组选择器 + 预检,O/A)。
+func (s *Service) ListBillingGroups(ctx context.Context, c session.Claims) ([]BillingGroup, error) {
+	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
+		return nil, err
+	}
+	ratios, err := s.upstream.ListGroupRatios(ctx)
+	if err != nil {
+		return nil, mapUpstream(err)
+	}
+	g2m, err := s.upstream.ListGroupModels(ctx)
+	if err != nil {
+		return nil, mapUpstream(err)
+	}
+	out := make([]BillingGroup, 0, len(ratios))
+	for g, r := range ratios {
+		out = append(out, BillingGroup{Group: g, Ratio: r, Models: g2m[g]})
+	}
+	return out, nil
+}
+
 // GetPricing 读折扣镜像 + new-api 当前实际特殊倍率回显(O/A;客户只读)。
 func (s *Service) GetPricing(ctx context.Context, c session.Claims, orgID int64) (*PricingView, error) {
 	if err := assertOrgScope(c, orgID); err != nil {
@@ -130,6 +164,81 @@ func (s *Service) GetPricing(ctx context.Context, c session.Claims, orgID int64)
 		}
 	}
 	return v, nil
+}
+
+// orgInUseTokenGroups 枚举该 org 在用的令牌计价分组集(去重):各 tier 的 newapi_group 经
+// resolveTokenGroup(tier??org默认??default)解析。total 折扣按此逐格配(T17-3/Q1)。
+func (s *Service) orgInUseTokenGroups(ctx context.Context, orgID int64) []string {
+	org, err := s.store.GetOrganization(ctx, orgID)
+	if err != nil {
+		return nil
+	}
+	tiers, err := s.store.ListTiers(ctx, orgID)
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	add := func(g string) {
+		if g != "" && !seen[g] {
+			seen[g] = true
+			out = append(out, g)
+		}
+	}
+	add(resolveTokenGroup(nil, org)) // 组织默认(无 tier 时成员落到的分组)
+	for _, t := range tiers {
+		add(resolveTokenGroup(t, org))
+	}
+	return out
+}
+
+// ensureTotalDiscountCoversGroup 该 org 后续新用到一个分组时,把已有的 total 折扣自动补到该分组
+// (T17-3/Q1:否则新分组回原价、客户被多收)。仅 total 模式、仅"补"(价格只降不升,安全方向)。
+// best-effort:开通成员落到新分组时调。
+func (s *Service) ensureTotalDiscountCoversGroup(ctx context.Context, orgID int64, group string) {
+	if group == "" || group == "default" {
+		return
+	}
+	d, err := s.store.GetOrgDiscount(ctx, orgID)
+	if err != nil || d.Mode != DiscountTotal {
+		return // 非 total 不自动补(per_group 是显式逐格,none 无折扣)
+	}
+	entries := s.loadDiscountEntries(ctx, orgID)
+	if _, ok := entries[group]; ok {
+		return // 已覆盖
+	}
+	if len(entries) == 0 {
+		return // total 但无镜像条目(异常),不猜折扣率,交对账告警
+	}
+	var pct float64
+	for _, e := range entries { // total 各分组同折扣率,取其一
+		pct = e.Pct
+		break
+	}
+	base, ok, gerr := s.upstream.GetGroupRatio(ctx, group)
+	if gerr != nil {
+		s.log.Warn("自动补 total 折扣读基础倍率失败(交对账)", "org_id", orgID, "group", group, "err", gerr)
+		return
+	}
+	if !ok || base <= 0 {
+		base = 1
+	}
+	entries[group] = discountEntry{Pct: pct, Base: base, Abs: base * pct}
+	desired := make(map[string]float64, len(entries))
+	for g, e := range entries {
+		desired[g] = e.Abs
+	}
+	if err := s.upstream.SetOrgGroupRatios(ctx, orgUserGroup(orgID), desired); err != nil {
+		s.log.Warn("自动补 total 折扣下发失败(交对账)", "org_id", orgID, "group", group, "err", err)
+		return
+	}
+	entriesJSON, _ := json.Marshal(entries)
+	ug := orgUserGroup(orgID)
+	if err := s.store.UpdateOrgDiscount(ctx, orgID, DiscountTotal, &ug, nil, entriesJSON); err != nil {
+		s.log.Warn("自动补 total 折扣持久化失败(交对账)", "org_id", orgID, "group", group, "err", err)
+		return
+	}
+	s.auditSystem(ctx, orgID, "discount_total_autoextend", "organization", &orgID, map[string]any{"group": group, "pct": pct}, "ok")
 }
 
 // loadDiscountEntries 读平台存的折扣镜像(map[令牌分组]entry)。

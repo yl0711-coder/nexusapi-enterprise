@@ -891,6 +891,74 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		}
 	}
 
+	// ===== T17 计费分组竖切回归 =====
+	setupBillingGroupVip(t, newapiURL, adminToken, adminUID)
+	{
+		tiersPath := fmt.Sprintf("/api/v1/organizations/%d/tiers", orgID)
+		// T17-5:配层级分组校验。不存在的分组 → 422。
+		if st := api.do("POST", tiersPath, adminTok, map[string]any{"name": "T17坏分组", "newapi_group": "ghost-grp"}, nil); st != http.StatusUnprocessableEntity {
+			t.Errorf("T17-5 不存在分组应 422,得 %d", st)
+		}
+		// vip 分组 + 该分组无可用渠道的模型 → 422。
+		if st := api.do("POST", tiersPath, adminTok, map[string]any{"name": "T17坏模型", "newapi_group": "vip", "model_set": []string{"ghost-model-xyz"}}, nil); st != http.StatusUnprocessableEntity {
+			t.Errorf("T17-5 分组无该模型渠道应 422,得 %d", st)
+		}
+		// vip + 该分组可路由的 gpt-4o → 201。
+		var vtier struct {
+			ID int64 `json:"id"`
+		}
+		if st := api.do("POST", tiersPath, adminTok, map[string]any{"name": "VIP档", "newapi_group": "vip", "model_set": []string{"gpt-4o"}, "monthly_limit": 25000000}, &vtier); st != http.StatusCreated {
+			t.Fatalf("T17-5 vip+gpt-4o 应 201,得 %d", st)
+		}
+		t.Log("回归 T17-5 ok: 配层级分组×模型集预检(坏分组/坏模型 422、可路由 201)")
+		// T17-1:开通 vip 档成员 → 令牌分组快照=vip。
+		var vom struct {
+			MemberID     int64 `json:"member_id"`
+			NewapiUserID int64 `json:"newapi_user_id"`
+		}
+		if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/members", orgID), adminTok, map[string]any{"name": "VIP成员", "tier_id": vtier.ID}, &vom); st != http.StatusCreated {
+			t.Fatalf("T17-1 开通 vip 成员应 201,得 %d", st)
+		}
+		var mv struct {
+			NewapiGroup *string `json:"newapi_group"`
+		}
+		api.do("GET", fmt.Sprintf("/api/v1/members/%d", vom.MemberID), adminTok, nil, &mv)
+		if mv.NewapiGroup == nil || *mv.NewapiGroup != "vip" {
+			t.Errorf("T17-1 成员令牌分组快照应=vip,得 %v", mv.NewapiGroup)
+		} else {
+			t.Log("回归 T17-1 ok: 开通成员令牌分组快照=vip(非 default)")
+		}
+		// T17-2:org 用户分组的可用分组应已含 vip(否则令牌用 vip 会 403)。
+		usable := readNewapiOption(t, newapiURL, adminToken, adminUID, "GroupSpecialUsableGroup")
+		if !strings.Contains(usable, fmt.Sprintf("org_%d", orgID)) || !strings.Contains(usable, "vip") {
+			t.Errorf("T17-2 可用分组应含 org_%d→vip,实得 %s", orgID, usable)
+		} else {
+			t.Log("回归 T17-2 ok: 业务分组 vip 已加进 org 用户可用分组(防 403)")
+		}
+		// T17-1 必测:轮换 vip 成员的 key 后,令牌分组不丢回 default(SQL 直查 newapi.tokens.group)。
+		if newapiSQLDSN != "" {
+			vMemberTok, _ := signer.Issue(session.Claims{MemberID: vom.MemberID, OrgID: orgID, Role: session.RoleMember})
+			if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/key:rotate", vom.MemberID), vMemberTok, nil, nil); st != http.StatusOK {
+				t.Errorf("T17-1 轮换 vip 成员 key 应 200,得 %d", st)
+			}
+			if g := tokenGroupBySQL(t, newapiSQLDSN, vom.NewapiUserID); g != "vip" {
+				t.Errorf("T17-1 必测:轮换后令牌分组应仍=vip,实得 %q(丢回 default 即回归)", g)
+			} else {
+				t.Log("回归 T17-1 ok: 轮换 key 后令牌分组仍=vip(不丢回 default)")
+			}
+		}
+		// T17-3:对 vip 配 per_group 折扣 → GroupGroupRatio[org_X][vip] 写入(命中折扣)。
+		if st := api.do("PUT", fmt.Sprintf("/api/v1/organizations/%d/pricing", orgID), opTok, map[string]any{"mode": "per_group", "discount_pct": 0.8, "token_groups": []string{"vip"}}, nil); st != http.StatusOK {
+			t.Fatalf("T17-3 配 vip 折扣应 200,得 %d", st)
+		}
+		ggr := readNewapiOption(t, newapiURL, adminToken, adminUID, "GroupGroupRatio")
+		if !strings.Contains(ggr, fmt.Sprintf("org_%d", orgID)) || !strings.Contains(ggr, "vip") {
+			t.Errorf("T17-3 GroupGroupRatio 应含 org_%d/vip,实得 %s", orgID, ggr)
+		} else {
+			t.Log("回归 T17-3 ok: 非 default 分组 vip 的 per_group 折扣写入 GroupGroupRatio(命中)")
+		}
+	}
+
 	// E1 破玻璃本期关。
 	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/support-sessions", orgID), opTok, map[string]any{"scope": "assist", "grant_type": "break_glass", "ttl_seconds": 600}, nil); st != http.StatusForbidden {
 		t.Errorf("破玻璃本期应 403(二期),得 %d", st)
@@ -1161,6 +1229,79 @@ func setupRC4(t *testing.T, base string) (string, int) {
 	return token, uid
 }
 
+// newapiAdminReq 以管理员身份直打 new-api(测试搭非 default 分组场景用)。返回响应体。
+func newapiAdminReq(t *testing.T, method, base, path, adminToken string, adminUID int, body any) []byte {
+	var rd io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		rd = bytes.NewReader(b)
+	}
+	req, _ := http.NewRequest(method, base+path, rd)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("New-Api-User", strconv.Itoa(adminUID))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("直打 new-api %s %s 失败: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	return raw
+}
+
+// readNewapiOption 读 new-api 某 option 的值(字符串)。
+func readNewapiOption(t *testing.T, base, adminToken string, adminUID int, key string) string {
+	raw := newapiAdminReq(t, "GET", base, "/api/option/", adminToken, adminUID, nil)
+	var env struct {
+		Data []struct {
+			Key   string `json:"key"`
+			Value string `json:"value"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(raw, &env)
+	for _, o := range env.Data {
+		if o.Key == key {
+			return o.Value
+		}
+	}
+	return ""
+}
+
+// setupBillingGroupVip 在测试 new-api 建非 default 计费分组 vip(GroupRatio 0.5 + 一个渠道服务 gpt-4o
+// 于 default,vip → /api/pricing 把 gpt-4o 列进 vip,供 T17 竖切验证)。
+func setupBillingGroupVip(t *testing.T, base, adminToken string, adminUID int) {
+	newapiAdminReq(t, "PUT", base, "/api/option/", adminToken, adminUID,
+		map[string]string{"key": "GroupRatio", "value": `{"default":1,"vip":0.5,"enterprise":0.85}`})
+	ch := map[string]any{
+		"name": "T17-vip-ch", "type": 1, "key": "sk-mock-t17-DONOTUSE", "base_url": "https://mock-upstream.local",
+		"models": "gpt-4o", "groups": []string{"default", "vip"}, "group": "default,vip",
+		"model_mapping": "", "setting": "", "status_code_mapping": "", "auto_ban": 1, "weight": 0, "priority": 0, "tag": "",
+	}
+	newapiAdminReq(t, "POST", base, "/api/channel/", adminToken, adminUID, map[string]any{"mode": "single", "channel": ch})
+	// 等 /api/pricing 反映新渠道(vip 含 gpt-4o);abilities/pricing 可能有缓存延迟。
+	for i := 0; i < 15; i++ {
+		raw := newapiAdminReq(t, "GET", base, "/api/pricing", adminToken, adminUID, nil)
+		var env struct {
+			Data []struct {
+				ModelName    string   `json:"model_name"`
+				EnableGroups []string `json:"enable_groups"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(raw, &env)
+		for _, m := range env.Data {
+			if m.ModelName == "gpt-4o" {
+				for _, g := range m.EnableGroups {
+					if g == "vip" {
+						return
+					}
+				}
+			}
+		}
+		time.Sleep(time.Second)
+	}
+	t.Log("警告:/api/pricing 15s 内未反映 vip→gpt-4o,T17-5 用例可能受影响")
+}
+
 // getNewapiUser 以管理员身份查 new-api 用户的 quota 与 status(1=enabled,2=disabled)。
 func getNewapiUser(t *testing.T, base, adminToken string, adminUID int, userID int64) (int64, int) {
 	// new-api 对高频 API 有限流(429,空/非 JSON body);测试压得紧时退避重试几次再判失败。
@@ -1232,6 +1373,20 @@ func seedConsumptionLog(t *testing.T, dsn string, userID int64, model string, qu
 	if err != nil {
 		t.Fatalf("造消费日志失败: %v", err)
 	}
+}
+
+// tokenGroupBySQL 直查 newapi.tokens 该用户最新令牌的分组(验证 T17-1 令牌分组真落库)。
+func tokenGroupBySQL(t *testing.T, dsn string, userID int64) string {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("连 newapi 库失败: %v", err)
+	}
+	defer db.Close()
+	var g string
+	if err := db.QueryRow("SELECT `group` FROM tokens WHERE user_id = ? ORDER BY id DESC LIMIT 1", userID).Scan(&g); err != nil {
+		t.Fatalf("查令牌分组失败: %v", err)
+	}
+	return g
 }
 
 func randSuffix() string {

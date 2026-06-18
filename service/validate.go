@@ -63,7 +63,7 @@ const (
 	maxSlugLen  = 64  // slug VARCHAR(64)
 	maxEmailLen      = 191 // login_email VARCHAR(191)
 	maxNoteLen       = 512 // note / reason VARCHAR(512)
-	maxTransferNoLen = 128 // transfer_no 入账幂等键(DB 列 VARCHAR(190),取 128 明确低于列宽,T3)
+	maxTransferNoLen = 128 // transfer_no 入账幂等键,与 DB 列 VARCHAR(128) 一致(T3/T16:此前注释误写 190)
 	// maxAdjustQuota 单次调额绝对值上限(动钱面防误填天量,R2-M4)。1e14 quota = 2 亿元。
 	maxAdjustQuota int64 = 100_000_000_000_000
 )

@@ -17,6 +17,12 @@ jobs:
     services:
       newapi:
         image: calciumion/new-api:v1.0.0-rc.4
+        # 抬高全局 API/Web 限流,避免 e2e 高频调用触发 429(rc.4 需 NUM+DURATION 配套才生效)。
+        env:
+          GLOBAL_API_RATE_LIMIT: "100000"
+          GLOBAL_API_RATE_LIMIT_DURATION: "60"
+          GLOBAL_WEB_RATE_LIMIT: "100000"
+          GLOBAL_WEB_RATE_LIMIT_DURATION: "60"
         ports:
           - "3000:3000"
       mysql:

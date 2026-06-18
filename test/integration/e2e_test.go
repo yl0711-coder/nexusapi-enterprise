@@ -1091,6 +1091,23 @@ func setupRC4(t *testing.T, base string) (string, int) {
 	if token == "" {
 		t.Fatalf("未取到管理员 access_token,原始: %s", raw)
 	}
+
+	// 抬高 new-api 全局 API 限流,避免测试高频调用触发 429(键不存在则被忽略,无害)。best-effort。
+	for _, kv := range []struct{ k, v string }{
+		{"GlobalApiRateLimitNum", "100000"},
+		{"GlobalApiRateLimitDuration", "60"},
+		{"GlobalWebRateLimitNum", "100000"},
+		{"GlobalWebRateLimitDuration", "60"},
+	} {
+		ob, _ := json.Marshal(map[string]string{"key": kv.k, "value": kv.v})
+		oreq, _ := http.NewRequest("PUT", base+"/api/option/", bytes.NewReader(ob))
+		oreq.Header.Set("Authorization", "Bearer "+token)
+		oreq.Header.Set("New-Api-User", strconv.Itoa(uid))
+		oreq.Header.Set("Content-Type", "application/json")
+		if oresp, oerr := hc.Do(oreq); oerr == nil {
+			oresp.Body.Close()
+		}
+	}
 	return token, uid
 }
 

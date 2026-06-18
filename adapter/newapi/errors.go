@@ -68,13 +68,6 @@ func classifyHTTP(step string, status int, sanitizedMsg string) *UpstreamError {
 		if e.Message == "" {
 			e.Message = "上游鉴权失效"
 		}
-	case status == http.StatusTooManyRequests:
-		// 429 限流 = 可退避重试(不是语义失败);让批量改价等高频写自动自限速,不硬失败。
-		e.class = classRetryable
-		e.PlatformCode = CodeUpstreamDown
-		if e.Message == "" {
-			e.Message = "上游限流,请稍后重试"
-		}
 	case status >= 400 && status < 500:
 		// 4xx = 业务/语义失败,不可重试。
 		e.class = classNonRetryable

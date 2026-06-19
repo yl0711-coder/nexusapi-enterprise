@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"strconv"
+	"strings"
 
 	"github.com/nexusapi-platform/enterprise/model"
 	"github.com/nexusapi-platform/enterprise/pkg/apperr"
@@ -128,7 +130,36 @@ func (s *Service) ListRecharges(ctx context.Context, c session.Claims, orgID int
 	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
 		return nil, 0, err
 	}
-	return s.store.ListRecharges(ctx, orgID, limit, offset)
+	recs, total, err := s.store.ListRecharges(ctx, orgID, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	// T14:把 operator:<id> 解析成可读姓名(与审批"显申请人姓名"同口径),小缓存避免重复查。
+	nameCache := map[int64]string{}
+	for _, r := range recs {
+		if id, ok := parseActorID(r.Operator); ok {
+			n, cached := nameCache[id]
+			if !cached {
+				n, _ = s.store.GetMemberNameByID(ctx, id)
+				nameCache[id] = n
+			}
+			r.OperatorName = n
+		}
+	}
+	return recs, total, nil
+}
+
+// parseActorID 从 "operator:7" / "member:7" 等 actor 串解析出成员 id。
+func parseActorID(actor string) (int64, bool) {
+	i := strings.LastIndexByte(actor, ':')
+	if i < 0 || i == len(actor)-1 {
+		return 0, false
+	}
+	id, err := strconv.ParseInt(actor[i+1:], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return id, true
 }
 
 // RequestRechargeInput 申请充值/退款入参(US-09/US-12)。

@@ -155,14 +155,15 @@ type Balance struct {
 
 // Recharge 对应 recharge 表(09 §8)。transfer_no 唯一 = 入账幂等。
 type Recharge struct {
-	ID          int64
-	OrgID       int64
-	Amount      int64
-	AmountCNY   *int64
-	TransferNo  string
-	Operator    string
-	Note        *string
-	RechargedAt time.Time
+	ID           int64
+	OrgID        int64
+	Amount       int64
+	AmountCNY    *int64
+	TransferNo   string
+	Operator     string
+	OperatorName string // 操作者显示名(瞬态,T14;由 operator:id 解析,非表列)
+	Note         *string
+	RechargedAt  time.Time
 }
 
 // 申请类型 / 状态。

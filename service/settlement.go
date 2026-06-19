@@ -44,8 +44,10 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 	}
 
 	// 1) 分页读窗口内消费 logs,按桶聚合(只收 billing_enabled 组织的成员)。
+	// log-id 级去重(修少收 bug):只处理 id > 水位的日志,每条只扣一次;边界重读(同 ts)靠此跳过。
 	aggs := map[string]*bucketAgg{}
 	var maxProcessedTS int64 = since
+	maxLogID := cur.LastSettledLogID
 	drained := false
 	flagCache := map[int64]bool{} // orgID -> billing_enabled
 	memberCache := map[int64]*model.Member{}
@@ -58,6 +60,12 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 		for _, e := range entries {
 			if e.CreatedAt > maxProcessedTS {
 				maxProcessedTS = e.CreatedAt
+			}
+			if e.ID <= cur.LastSettledLogID {
+				continue // 已结算过(水位去重),绝不重扣
+			}
+			if e.ID > maxLogID {
+				maxLogID = e.ID
 			}
 			if e.Quota <= 0 {
 				continue
@@ -108,22 +116,19 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 		}
 	}
 
-	// 2) 去重落账 + 累计每组织新增消耗 + 收集本次新落账桶(供单模型软限额检测)。
+	// 2) 落账(桶累计)+ 累计每组织新增消耗。本轮聚合的都是 id>水位 的新日志,每条只扣一次 → 全额计扣。
 	perOrg := map[int64]int64{}
 	var settled []*bucketAgg
 	for _, a := range aggs {
-		inserted, err := s.store.UpsertLedgerBucket(ctx, &repo.LedgerBucket{
+		if err := s.store.AddToLedgerBucket(ctx, &repo.LedgerBucket{
 			OrgID: a.orgID, MemberID: a.memberID, NewapiUserID: a.newapiUserID, TeamID: a.teamID,
 			ModelName: a.model, TimeBucket: a.bucket, ConsumedQuota: a.consumed,
 			LogMaxTS: time.Unix(a.maxTS, 0).UTC(),
-		})
-		if err != nil {
+		}); err != nil {
 			return 0, err
 		}
-		if inserted {
-			perOrg[a.orgID] += a.consumed
-			settled = append(settled, a)
-		}
+		perOrg[a.orgID] += a.consumed
+		settled = append(settled, a)
 	}
 
 	// 3) 逐组织扣余额 + 守恒断言 + 状态/硬停。
@@ -159,13 +164,14 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 		s.checkModelSoftLimit(ctx, a)
 	}
 
-	// 4) 推进水位:全部读尽 → 推到 until;否则推到已处理的最大 ts(dedup 兜底重叠)。
+	// 4) 推进水位:ts 全部读尽 → 推到 until;否则推到已处理的最大 ts;log 水位推到本轮处理的最大 id
+	//    (边界同 ts 重读靠 log 水位去重,不重扣)。
 	target := maxProcessedTS
 	if drained {
 		target = until
 	}
-	if target > since {
-		if _, err := s.store.AdvanceCursor(ctx, 0, target, cur.Version); err != nil {
+	if target > since || maxLogID > cur.LastSettledLogID {
+		if _, err := s.store.AdvanceCursor(ctx, 0, target, maxLogID, cur.Version); err != nil {
 			s.log.Error("推进结算水位失败", "err", err)
 		}
 	}
@@ -236,6 +242,92 @@ func (s *Service) checkModelSoftLimit(ctx context.Context, a *bucketAgg) {
 		s.auditSystem(ctx, a.orgID, "model_soft_limit_exceeded", "member", &a.memberID,
 			map[string]any{"model": a.model, "today": sumToday, "cap": cap}, "ok")
 	}
+}
+
+// billingReconcileTolerance 计费对账容差(quota):小额误差(in-flight 跨桶等)不告警。
+const billingReconcileTolerance int64 = 0
+
+// ReconcileBilling 计费对账(守恒断言的真账版,修少收 bug 的 part-b):
+// 对"上一个完整小时",逐组织比对 new-api.logs 真实总额 vs usage_ledger 该小时桶总额,
+// 不一致(尤其平台 < 真账 = 少收)即告警(日志 + 审计 + 通知运营)。只读、不补扣,人工核对。
+// 整点对齐使比对精确;只读一小时窗口(绝不全表)。
+func (s *Service) ReconcileBilling(ctx context.Context) error {
+	now := s.now()
+	hourEnd := hourBucket(now.Unix())    // 当前小时开始
+	hourStart := hourEnd.Add(-time.Hour) // 上一个完整小时开始
+
+	// 1) new-api logs 上个小时各组织真实消耗(只收 billing_enabled 组织的平台成员)。
+	logByOrg := map[int64]int64{}
+	memberCache := map[int64]*model.Member{}
+	flagCache := map[int64]bool{}
+	since, until := hourStart.Unix(), hourEnd.Unix()-1
+	for page := 1; page <= settlementMaxPages; page++ {
+		entries, total, err := s.upstream.ReadConsumptionLogs(ctx, since, until, page, 100)
+		if err != nil {
+			return mapUpstream(err)
+		}
+		for _, e := range entries {
+			if e.Quota <= 0 {
+				continue
+			}
+			m := memberCache[int64(e.UserID)]
+			if m == nil {
+				mm, merr := s.store.GetMemberByNewapiUserID(ctx, int64(e.UserID))
+				if errors.Is(merr, repo.ErrNotFound) {
+					memberCache[int64(e.UserID)] = &model.Member{}
+					continue
+				}
+				if merr != nil {
+					return mapUpstream(merr)
+				}
+				memberCache[int64(e.UserID)] = mm
+				m = mm
+			}
+			if m.ID == 0 {
+				continue
+			}
+			billing, ok := flagCache[m.OrgID]
+			if !ok {
+				f, ferr := s.store.GetOrgBillingFlags(ctx, m.OrgID)
+				if ferr != nil {
+					return ferr
+				}
+				billing = f.BillingEnabled
+				flagCache[m.OrgID] = billing
+			}
+			if !billing {
+				continue
+			}
+			logByOrg[m.OrgID] += e.Quota
+		}
+		if page*100 >= total {
+			break
+		}
+	}
+
+	// 2) usage_ledger 同小时桶各组织已结算消耗。
+	ledgerByOrg, err := s.store.SumLedgerByOrgForBucket(ctx, hourStart)
+	if err != nil {
+		return err
+	}
+
+	// 3) 逐组织比对;平台 < 真账(少收)或偏差超容差 → 告警(只报不补)。
+	for orgID, logged := range logByOrg {
+		settled := ledgerByOrg[orgID]
+		diff := logged - settled // >0 = 少收
+		if diff > billingReconcileTolerance || diff < -billingReconcileTolerance {
+			s.log.Error("计费对账不一致(疑少收/多收,人工核对)",
+				"org_id", orgID, "hour", hourStart.Format(time.RFC3339), "newapi_logs", logged, "ledger", settled, "diff", diff)
+			s.auditSystem(ctx, orgID, "billing_reconcile_mismatch", "balance", &orgID, map[string]any{
+				"hour": hourStart.Format(time.RFC3339), "newapi_logs": logged, "ledger": settled, "diff": diff,
+			}, "mismatch")
+			for _, adminID := range s.orgAdminIDs(ctx, orgID) {
+				s.notify(ctx, orgID, adminID, "billing_alert", "计费对账异常",
+					"检测到本组织计费与上游用量不一致,运营方将核对处理")
+			}
+		}
+	}
+	return nil
 }
 
 // hourBucket 把 unix 秒取整到小时桶(UTC)。

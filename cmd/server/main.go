@@ -29,7 +29,7 @@ import (
 )
 
 // version 由构建时 -ldflags "-X main.version=..." 注入。
-var version = "7.0.1-t17"
+var version = "7.1.0-billingfix"
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -56,6 +56,18 @@ func run(log *slog.Logger) error {
 	sessionKey := os.Getenv("NEXUS_SESSION_KEY")
 	if len(sessionKey) < 16 {
 		return errors.New("缺少 NEXUS_SESSION_KEY(会话签名密钥,>=16 字节)")
+	}
+	// 安全:拒绝生产误用 dev 默认密钥(会话密钥泄露=可伪造任意角色会话提权)。
+	// dev/测试显式 NEXUS_ALLOW_DEV_KEYS=true 放行;生产绝不设此开关。
+	if os.Getenv("NEXUS_ALLOW_DEV_KEYS") != "true" {
+		devSessionKeys := map[string]bool{"dev-only-session-signing-key-32bytes!!": true}
+		devMasterKeys := map[string]bool{"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=": true}
+		if devSessionKeys[sessionKey] {
+			return errors.New("NEXUS_SESSION_KEY 是 dev 默认值,生产禁用(会话密钥泄露可伪造提权);请注入真随机密钥")
+		}
+		if devMasterKeys[masterKey] {
+			return errors.New("NEXUS_MASTER_KEY 是 dev 默认值,生产禁用;请注入真随机主密钥")
+		}
 	}
 
 	keyring, err := crypto.NewKeyringFromBase64(envOr("NEXUS_MASTER_KEY_ID", "v1"), masterKey)

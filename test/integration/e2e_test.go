@@ -1029,6 +1029,41 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		t.Log("3b 去重 ok: 同一桶重复结算不再扣")
 	}
 
+	// 🔴 阻断 bug 回归(灰度前 NO-GO 项):同一小时桶第 2 笔消费,分两次结算必须也全额入账。
+	// 修复前 UpsertLedgerBucket 的 INSERT IGNORE 命中已存在小时桶 → inserted=false → 该笔永不扣(系统性少收)。
+	// 真实流量里第 2 笔是后到的,故用结算滞后窗口(5s)模拟"后到 → 下一次结算窗口"。
+	{
+		balB2 := readBal()
+		nowSec := time.Now().Unix()
+		seedConsumptionLog(t, newapiSQLDSN, uid, "gpt-5-mini", 1500000, nowSec-3) // 同小时、新日志(更高 id)
+		time.Sleep(4 * time.Second)                                              // 等过滞后窗口,使该日志进入下一次结算窗口
+		d, derr := svc.RunSettlement(ctx)
+		if derr != nil {
+			t.Fatalf("同小时第二笔结算失败: %v", derr)
+		}
+		if d != 1500000 || readBal() != balB2-1500000 {
+			t.Errorf("🔴 少收回归:同小时第2笔应入账 1.5e6,实 deducted=%d 余额 %d→%d(0/不变即 bug 复现)", d, balB2, readBal())
+		} else {
+			t.Log("回归(阻断bug) ok: 同一小时桶第2笔分两次结算也全额入账(log-id 水位去重,不再丢)")
+		}
+		// 守恒真账版:平台已结算总消耗 == new-api.logs 真实总额(本组织/成员)。
+		// 注意:usage_ledger 在 nexus 库(store.DB()),logs 在 newapi 库(newapiSQLDSN)——别查错库。
+		var consumed int64
+		store.DB().QueryRowContext(ctx, "SELECT total_consumed FROM company_balance WHERE org_id=?", orgID).Scan(&consumed)
+		ndb, derr2 := sql.Open("mysql", newapiSQLDSN)
+		if derr2 != nil {
+			t.Fatalf("连 newapi 库失败: %v", derr2)
+		}
+		var logSum int64
+		ndb.QueryRowContext(ctx, "SELECT COALESCE(SUM(quota),0) FROM logs WHERE user_id=? AND type=2", uid).Scan(&logSum)
+		ndb.Close()
+		if consumed != logSum {
+			t.Errorf("🔴 计费对账:平台 total_consumed=%d != new-api.logs 真实总额=%d(少收/多收)", consumed, logSum)
+		} else {
+			t.Logf("回归 计费对账(守恒真账版) ok: 平台 total_consumed == new-api.logs = %d", consumed)
+		}
+	}
+
 	// 硬停:开 hard_stop,造一笔超过余额的消耗,重置游标(去重保证 4e6 不再扣),结算 → 余额≤0 → 成员被 disable+quota0。
 	api.do("PATCH", fmt.Sprintf("/api/v1/organizations/%d/billing-settings", orgID), opTok,
 		map[string]any{"hard_stop_enabled": true}, nil)

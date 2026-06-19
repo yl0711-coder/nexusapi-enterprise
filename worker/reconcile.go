@@ -40,14 +40,16 @@ func (w *ReconcileWorker) Run(ctx context.Context) {
 		case <-t.C:
 			rc, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			drifts, err := w.svc.ReconcileDiscounts(rc)
-			cancel()
 			if err != nil {
 				w.log.Error("折扣对账失败(下轮重试)", "err", err)
-				continue
-			}
-			if len(drifts) == 0 {
+			} else if len(drifts) == 0 {
 				w.log.Debug("折扣对账:无漂移")
 			}
+			// 计费对账(守恒真账版):对上个完整小时比对 new-api.logs vs usage_ledger,少收即告警。
+			if berr := w.svc.ReconcileBilling(rc); berr != nil {
+				w.log.Error("计费对账失败(下轮重试)", "err", berr)
+			}
+			cancel()
 		}
 	}
 }

@@ -136,6 +136,17 @@ func (s *Store) ListMembersByTier(ctx context.Context, orgID, tierID int64) ([]*
 	return out, rows.Err()
 }
 
+// GetMemberNameByID 取成员显示名(姓名优先,回落登录名;跨 org,操作者名解析用,T14)。不存在返空。
+func (s *Store) GetMemberNameByID(ctx context.Context, id int64) (string, error) {
+	var name string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(NULLIF(display_name, ''), login_email, '') FROM member WHERE id = ?`, id).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return name, err
+}
+
 // SetMemberNewapiGroup 刷新成员令牌分组快照(切档时同步,T17-1/Q2)。
 func (s *Store) SetMemberNewapiGroup(ctx context.Context, orgID, memberID int64, group *string) error {
 	_, err := s.db.ExecContext(ctx,

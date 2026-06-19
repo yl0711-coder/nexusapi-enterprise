@@ -431,7 +431,7 @@ VIEWS.billing = async () => {
     api("GET", "/organizations/" + id + "/recharge-requests?page=1&page_size=10", null),
   ]);
   let pricing = null; try { pricing = await api("GET", "/organizations/" + id + "/pricing", null); } catch (e) {}
-  const rrows = (recs.list || []).map(r => `<tr><td>${esc(r.recharged_at.slice(0, 10))}</td><td>${money(r.amount_quota)}</td><td class="mini">${esc(r.operator)}</td></tr>`).join("");
+  const rrows = (recs.list || []).map(r => `<tr><td>${esc(r.recharged_at.slice(0, 10))}</td><td>${money(r.amount_quota)}</td><td class="mini">${esc(r.operator_name || r.operator)}</td></tr>`).join("");
   const qrows = (reqs.list || []).map(r => `<tr><td>${esc(r.request_type)}</td><td>${money(r.amount_quota)}</td><td>${pill(r.status, r.status === "pending" ? "warn" : "ok")}</td></tr>`).join("");
   return head("余额与计费", "预付余额 = 累计充值 − 累计消耗;充值由运营方入账,你可发起申请")
     + `<div class="cards">${kpi("当前余额", money(bal.balance_quota), "")}${kpi("累计充值", money(bal.total_recharged_quota), "")}${kpi("累计消耗", money(bal.total_consumed_quota), "")}${kpi("累计退款", money(bal.total_refunded_quota || 0), "冲正/退款累计")}</div>

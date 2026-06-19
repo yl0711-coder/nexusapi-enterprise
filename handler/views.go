@@ -147,14 +147,15 @@ func toBalanceView(b *model.Balance) balanceView {
 type rechargeView struct {
 	ID          int64  `json:"id"`
 	AmountQuota int64  `json:"amount_quota"`
-	TransferNo  string `json:"transfer_no"`
-	Operator    string `json:"operator"`
-	Note        string `json:"note,omitempty"`
-	RechargedAt string `json:"recharged_at"`
+	TransferNo   string `json:"transfer_no"`
+	Operator     string `json:"operator"`
+	OperatorName string `json:"operator_name,omitempty"` // 可读操作者名(T14)
+	Note         string `json:"note,omitempty"`
+	RechargedAt  string `json:"recharged_at"`
 }
 
 func toRechargeView(r *model.Recharge) rechargeView {
-	v := rechargeView{ID: r.ID, AmountQuota: r.Amount, TransferNo: r.TransferNo, Operator: r.Operator, RechargedAt: r.RechargedAt.Format(time.RFC3339)}
+	v := rechargeView{ID: r.ID, AmountQuota: r.Amount, TransferNo: r.TransferNo, Operator: r.Operator, OperatorName: r.OperatorName, RechargedAt: r.RechargedAt.Format(time.RFC3339)}
 	if r.Note != nil {
 		v.Note = *r.Note
 	}

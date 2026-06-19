@@ -10,18 +10,20 @@ import (
 )
 
 // Cursor 是结算水位(settlement_cursor 一行)。org_id=0 为全局 leader 水位。
+// LastSettledLogID:已结算到的最大 new-api 日志 id(log-id 级去重,修少收 bug)。
 type Cursor struct {
-	OrgID         int64
-	LastSettledTS int64
-	Version       int64
+	OrgID            int64
+	LastSettledTS    int64
+	LastSettledLogID int64
+	Version          int64
 }
 
 // GetOrCreateCursor 取(或建)结算水位行。
 func (s *Store) GetOrCreateCursor(ctx context.Context, orgID int64) (*Cursor, error) {
 	var c Cursor
 	err := s.db.QueryRowContext(ctx,
-		`SELECT org_id, last_settled_ts, version FROM settlement_cursor WHERE org_id = ?`, orgID).
-		Scan(&c.OrgID, &c.LastSettledTS, &c.Version)
+		`SELECT org_id, last_settled_ts, last_settled_log_id, version FROM settlement_cursor WHERE org_id = ?`, orgID).
+		Scan(&c.OrgID, &c.LastSettledTS, &c.LastSettledLogID, &c.Version)
 	if err == nil {
 		return &c, nil
 	}
@@ -32,15 +34,17 @@ func (s *Store) GetOrCreateCursor(ctx context.Context, orgID int64) (*Cursor, er
 		`INSERT INTO settlement_cursor (org_id, last_settled_ts) VALUES (?, 0)`, orgID); ierr != nil && !isDupKey(ierr) {
 		return nil, ierr
 	}
-	return &Cursor{OrgID: orgID, LastSettledTS: 0, Version: 0}, nil
+	return &Cursor{OrgID: orgID, LastSettledTS: 0, LastSettledLogID: 0, Version: 0}, nil
 }
 
-// AdvanceCursor 乐观推进水位到 ts(仅当 version 未变且新 ts 更大)。
-func (s *Store) AdvanceCursor(ctx context.Context, orgID, newTS, version int64) (bool, error) {
+// AdvanceCursor 乐观推进水位(ts 与 log_id 都单调前进,GREATEST 防回退)。version 乐观锁防并发。
+func (s *Store) AdvanceCursor(ctx context.Context, orgID, newTS, newLogID, version int64) (bool, error) {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE settlement_cursor
-		    SET last_settled_ts = ?, last_run_at = CURRENT_TIMESTAMP(3), version = version + 1
-		  WHERE org_id = ? AND version = ? AND ? > last_settled_ts`, newTS, orgID, version, newTS)
+		    SET last_settled_ts = GREATEST(last_settled_ts, ?),
+		        last_settled_log_id = GREATEST(last_settled_log_id, ?),
+		        last_run_at = CURRENT_TIMESTAMP(3), version = version + 1
+		  WHERE org_id = ? AND version = ?`, newTS, newLogID, orgID, version)
 	if err != nil {
 		return false, err
 	}
@@ -60,19 +64,18 @@ type LedgerBucket struct {
 	LogMaxTS      time.Time
 }
 
-// UpsertLedgerBucket 去重插入一条结算桶:命中去重键(org+user+model+桶)→ 不重复累加。
-// 返回是否为本次新插入(true=计入扣费;false=重复,已结算过)。
-func (s *Store) UpsertLedgerBucket(ctx context.Context, b *LedgerBucket) (bool, error) {
-	res, err := s.db.ExecContext(ctx,
-		`INSERT IGNORE INTO usage_ledger
+// AddToLedgerBucket 把本轮新增消耗累加进结算桶(org+user+model+小时桶)。
+// 去重已由 log-id 水位在 service 层保证(每条日志只扣一次),故这里对桶做累加而非 INSERT IGNORE——
+// 修少收 bug 的关键:同一小时桶后续运行的新增 delta 不再被丢弃。usage_ledger 仅作看板/软限额聚合。
+func (s *Store) AddToLedgerBucket(ctx context.Context, b *LedgerBucket) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO usage_ledger
 		    (org_id, member_id, newapi_user_id, team_id, model_name, time_bucket, consumed_quota, log_max_ts)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON DUPLICATE KEY UPDATE consumed_quota = consumed_quota + VALUES(consumed_quota),
+		                         log_max_ts = GREATEST(log_max_ts, VALUES(log_max_ts))`,
 		b.OrgID, b.MemberID, b.NewapiUserID, b.TeamID, b.ModelName, b.TimeBucket, b.ConsumedQuota, b.LogMaxTS)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n == 1, nil
+	return err
 }
 
 // DeductBalance 乐观扣减组织余额:total_consumed += amount,balance 重算。返回扣后余额。
@@ -158,6 +161,25 @@ func (s *Store) SumMemberModelToday(ctx context.Context, orgID, newapiUserID int
 		return 0, err
 	}
 	return q.Int64, nil
+}
+
+// SumLedgerByOrgForBucket 汇总某整点小时桶各组织的已结算消耗(计费对账用,只读)。
+func (s *Store) SumLedgerByOrgForBucket(ctx context.Context, bucket time.Time) (map[int64]int64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT org_id, SUM(consumed_quota) FROM usage_ledger WHERE time_bucket = ? GROUP BY org_id`, bucket)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]int64{}
+	for rows.Next() {
+		var orgID, q int64
+		if err := rows.Scan(&orgID, &q); err != nil {
+			return nil, err
+		}
+		out[orgID] = q
+	}
+	return out, rows.Err()
 }
 
 // GetMemberByNewapiUserID 按 new-api user_id 反查成员(结算把 log 映射到成员/组织)。无 org 谓词(leader 跨租户)。

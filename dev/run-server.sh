@@ -54,6 +54,8 @@ docker run -d --name nexus-ent-dev --network "$NET" -p 18080:8080 \
   -e NEXUS_DB_DSN="root:devroot@tcp(mysql:3306)/nexus?parseTime=true&loc=UTC&charset=utf8mb4" \
   -e NEXUS_MASTER_KEY="$MASTER_KEY" \
   -e NEXUS_SESSION_KEY="$SESSION_KEY" \
+  -e NEXUS_ALLOW_DEV_KEYS="true" \
+  `# dev 专用:放行上面的 dev 默认密钥(生产绝不设此开关,启动会拒 dev 默认值)` \
   -e NEWAPI_BASE_URL="http://newapi:3000" \
   -e NEWAPI_ADMIN_TOKEN="$ADMIN_TOKEN" \
   -e NEWAPI_ADMIN_USER_ID="1" \

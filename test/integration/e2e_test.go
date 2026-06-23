@@ -1097,7 +1097,90 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		t.Logf("3b 解硬停 ok: 充值后成员 quota 重算恢复=%d", q)
 	}
 
-	t.Log("里程碑 3b e2e 全通过:读logs扣费 + 去重防重复扣 + 守恒 + 硬停(逐组织开关)+ 充值解硬停恢复")
+	// ===== GZ-01 D2:路径B 时间窗分块——单窗口 > 2000 条不截断、逐拍排空、零少收(现有用例未覆盖新分块代码)=====
+	{
+		api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/recharges", orgID), opTok,
+			map[string]any{"amount_quota": 100000000, "transfer_no": "TR-D2-" + randSuffix()}, nil)
+		balBefore := readBal()
+		const n = 2050
+		const qEach = 1000
+		base := time.Now().Unix() - 200 // backlog 起点(在 5s 滞后窗口之前)
+		// ts 水位设到 backlog 之前(保留 log-id 水位,旧日志靠它去重),让这批新日志全进同一大窗口触发分块。
+		if _, err := store.DB().ExecContext(ctx, "UPDATE settlement_cursor SET last_settled_ts=? WHERE org_id=0", base-10); err != nil {
+			t.Fatalf("D2 设游标 ts: %v", err)
+		}
+		seedManyLogs(t, newapiSQLDSN, uid, "gpt-d2", qEach, n, base, 150) // 2050 条散布 150s → 单窗 >2000 须分块
+		var total int64
+		drained := false
+		for i := 0; i < 40; i++ {
+			d, derr := svc.RunSettlement(ctx)
+			if derr != nil {
+				t.Fatalf("D2 第 %d 拍结算失败: %v", i, derr)
+			}
+			total += d
+			if d == 0 {
+				drained = true
+				break
+			}
+		}
+		want := int64(n) * qEach
+		switch {
+		case !drained:
+			t.Errorf("🔴 GZ-01 D2:40 拍内未排空,分块可能未推进(已结 %d/%d)", total, want)
+		case total != want:
+			t.Errorf("🔴 GZ-01 D2 少收:backlog %d 条应全额结算 %d,实结 %d(差 %d)", n, want, total, want-total)
+		case readBal() != balBefore-want:
+			t.Errorf("🔴 GZ-01 D2 余额对不上:%d→期望 %d,实 %d", balBefore, balBefore-want, readBal())
+		default:
+			t.Logf("GZ-01 D2 路径B ok: %d 条 backlog(散布150s、单窗>2000)逐拍分块全额结算 %d,零少收、余额一致", n, total)
+		}
+	}
+
+	// ===== GZ-01 D1:结算事务原子性——扣余额中途失败→整批回滚(不半提交 ledger、不推水位)、恢复后可重做 =====
+	{
+		var rech, cons, bal, low, ver, refunded int64
+		if err := store.DB().QueryRowContext(ctx,
+			"SELECT total_recharged,total_consumed,balance,low_watermark,version,total_refunded FROM company_balance WHERE org_id=?", orgID).
+			Scan(&rech, &cons, &bal, &low, &ver, &refunded); err != nil {
+			t.Fatalf("D1 读余额行: %v", err)
+		}
+		nowSec := time.Now().Unix()
+		if _, err := store.DB().ExecContext(ctx, "UPDATE settlement_cursor SET last_settled_ts=? WHERE org_id=0", nowSec-20); err != nil {
+			t.Fatalf("D1 设游标 ts: %v", err)
+		}
+		seedConsumptionLog(t, newapiSQLDSN, uid, "gpt-d1", 777, nowSec-10)
+		var logIDBefore int64
+		store.DB().QueryRowContext(ctx, "SELECT last_settled_log_id FROM settlement_cursor WHERE org_id=0").Scan(&logIDBefore)
+		// 故障注入:删该组织余额行 → 事务内 DeductBalanceTx 返 ErrNotFound → WithTx 整批回滚。
+		if _, err := store.DB().ExecContext(ctx, "DELETE FROM company_balance WHERE org_id=?", orgID); err != nil {
+			t.Fatalf("D1 删余额行: %v", err)
+		}
+		if _, err := svc.RunSettlement(ctx); err == nil {
+			t.Errorf("🔴 GZ-01 D1:删余额行后结算应报错回滚,却成功了")
+		}
+		var logIDAfter int64
+		store.DB().QueryRowContext(ctx, "SELECT last_settled_log_id FROM settlement_cursor WHERE org_id=0").Scan(&logIDAfter)
+		if logIDAfter != logIDBefore {
+			t.Errorf("🔴 GZ-01 D1:回滚后 cursor log_id 不应推进(%d→%d)", logIDBefore, logIDAfter)
+		}
+		// 恢复余额行后重做:那条 777 应全额入账(证明回滚无永久丢失、可重做、无双扣)。
+		if _, err := store.DB().ExecContext(ctx,
+			"INSERT INTO company_balance (org_id,total_recharged,total_consumed,balance,low_watermark,version,total_refunded) VALUES (?,?,?,?,?,?,?)",
+			orgID, rech, cons, bal, low, ver, refunded); err != nil {
+			t.Fatalf("D1 恢复余额行: %v", err)
+		}
+		d, err := svc.RunSettlement(ctx)
+		if err != nil {
+			t.Fatalf("D1 恢复后重跑失败: %v", err)
+		}
+		if d != 777 {
+			t.Errorf("🔴 GZ-01 D1:恢复后重做应结算 777,实 %d", d)
+		} else {
+			t.Log("GZ-01 D1 原子回滚 ok: 扣余额失败→整批回滚(cursor 未推进、ledger 未半提交)→恢复后重做全额入账")
+		}
+	}
+
+	t.Log("里程碑 3b e2e 全通过:读logs扣费 + 去重防重复扣 + 守恒 + 硬停(逐组织开关)+ 充值解硬停恢复 + GZ-01 D2路径B + D1原子回滚")
 }
 
 // ---- helpers ----
@@ -1419,6 +1502,39 @@ func seedConsumptionLog(t *testing.T, dsn string, userID int64, model string, qu
 		userID, createdAt, model, quota)
 	if err != nil {
 		t.Fatalf("造消费日志失败: %v", err)
+	}
+}
+
+// seedManyLogs 批量造 count 条 type=2 消费日志(created_at 在 [baseTS, baseTS+spreadSec] 均匀散布),
+// 用于 GZ-01 D2 路径B 测试(单窗口 >2000 条须分块逐拍排空)。分批多行 INSERT,远快于逐条。
+func seedManyLogs(t *testing.T, dsn string, userID int64, model string, quotaEach int64, count int, baseTS, spreadSec int64) {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("连 newapi 库失败: %v", err)
+	}
+	defer db.Close()
+	const batch = 500
+	const cols = "(user_id, created_at, type, content, username, token_name, model_name, quota, " +
+		"prompt_tokens, completion_tokens, use_time, is_stream, channel_id, channel_name, token_id, `group`, ip, request_id, other)"
+	for start := 0; start < count; start += batch {
+		end := start + batch
+		if end > count {
+			end = count
+		}
+		var sb strings.Builder
+		sb.WriteString("INSERT INTO logs " + cols + " VALUES ")
+		args := make([]any, 0, (end-start)*4)
+		for i := start; i < end; i++ {
+			if i > start {
+				sb.WriteString(",")
+			}
+			sb.WriteString("(?, ?, 2, '', '', '', ?, ?, 100, 200, 1, 0, 0, '', 0, 'default', '', '', '')")
+			ts := baseTS + int64(i)*spreadSec/int64(count)
+			args = append(args, userID, ts, model, quotaEach)
+		}
+		if _, err := db.Exec(sb.String(), args...); err != nil {
+			t.Fatalf("批量造日志失败: %v", err)
+		}
 	}
 }
 

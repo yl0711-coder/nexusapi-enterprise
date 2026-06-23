@@ -139,9 +139,14 @@ func tierPeriodLimit(t *model.Tier, period string) (int64, bool) {
 // 在此按组织计费状态统一决策最终值(gateByOrgStatus:应硬停则 0),使进程内只有一个逻辑写者、
 // 按 DB 状态收敛——消除"settlement 写 0 vs quota-worker 写正常额"的并发无序覆盖(GZ-04 D1/D2)。
 func (s *Service) applyMemberOverride(ctx context.Context, m *model.Member) (int64, error) {
-	// GZ-04 返工·方案①:per-org 串行化"读状态→决策→下发"三步,消除 settlement converge 与 quota-worker
-	// 两 goroutine 在 status 翻转拍的 TOCTOU(旧值覆盖新值)。同组织串行、跨组织并发不受影响;
-	// computeOverride 也纳入锁内,使"基线+grant 读取→下发"对同成员一致。多节点需换分布式锁(另议)。
+	// GZ-04 返工·方案①:per-org 串行化"读状态→决策→下发"三步,**消除两 goroutine(settlement converge /
+	// quota-worker)对同成员 override 的下发侧互覆盖**(旧值覆盖新值)。同组织串行、跨组织并发不受影响;
+	// computeOverride 也纳入锁内,使"基线+grant 读取→下发"对同成员一致。
+	// 据实更正(五总监复核):翻 status 旗标的 UpdateOrgStatus(billing.go)在本锁之外,故"翻转拍"那一瞬
+	// 并非靠本锁消除——而是 recomputeOrgStatus 翻 stopped 后紧接着 convergeOrgQuotas 下发 0 来**收敛兜底**
+	// (最终落 0、不停在错值)。另:本锁持锁跨 ManageUserQuota 的 HTTP,故同组织下发串行有延迟。
+	// 多节点:进程内锁失效,需换分布式锁;"翻旗标在锁外靠 converge 收敛 + 持锁跨 HTTP 串行延迟"已记入
+	// 多节点改造已知项(见 ADR-多节点worker选主-租约fencing.md)。
 	release, lerr := s.quotaLocker.Acquire(ctx, fmt.Sprintf("quota-override:org:%d", m.OrgID))
 	if lerr != nil {
 		return 0, apperr.Internal("").WithCause(lerr)

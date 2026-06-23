@@ -48,7 +48,9 @@ services:
       - nexus_dev_newapi_data:/data
     ports:
       - "13000:3000"
-    restart: unless-stopped
+    # 本机 dev 不设自动重启:依赖挂掉/Docker 重启时直接停着不动,不 crash loop、不自动拉起、不占资源
+    # (用时手动 docker compose up,不用时 stop)。生产侧的重启策略另在生产 compose 配,与此无关。
+    restart: "no"
 
 volumes:
   nexus_dev_mysql:

@@ -49,8 +49,11 @@ say "已取 new-api 管理员 token"
 # 3) 跑 server(接 dev 网络,容器内用服务名连 mysql/newapi)。
 docker rm -f nexus-ent-dev >/dev/null 2>&1 || true
 docker run -d --name nexus-ent-dev --network "$NET" -p 18080:8080 \
-  --memory=350m --cpus=1 --restart unless-stopped \
+  --memory=350m --cpus=1 --restart no \
+  `# 本机 dev 不设自动重启(省资源,挂了不 crash loop、不开机自启);用时手动 run-server.sh 起` \
   -e LISTEN_ADDR=":8080" \
+  -e NEXUS_WORKER_INTERVAL_SEC="${WORKER_INTERVAL:-60}" \
+  `# 可选:WORKER_INTERVAL=5 bash dev/run-server.sh 缩短结算/配额周期,方便联调真账验;默认 60` \
   -e NEXUS_DB_DSN="root:devroot@tcp(mysql:3306)/nexus?parseTime=true&loc=UTC&charset=utf8mb4" \
   -e NEXUS_MASTER_KEY="$MASTER_KEY" \
   -e NEXUS_SESSION_KEY="$SESSION_KEY" \

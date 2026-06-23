@@ -25,16 +25,9 @@ jobs:
           GLOBAL_WEB_RATE_LIMIT_DURATION: "60"
         ports:
           - "3000:3000"
-      mysql:
-        image: mysql:8.0
-        env:
-          MYSQL_ROOT_PASSWORD: rootpw
-          MYSQL_DATABASE: nexus
-        ports:
-          - "3306:3306"
-        options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -prootpw"
-          --health-interval=5s --health-timeout=5s --health-retries=20
+    # 注:集成测试(含扣费/对账段)改用 test/docker-compose.integration.yml 自包含栈跑(见下方步骤),
+    # 其内置独立 MySQL(newapi 库)+ depends_on 顺序 + NEXUS_IT_NEWAPI_SQL_DSN,故此处不再起 GHA mysql 服务。
+    # newapi GHA 服务仅供"真机契约测试"用(SQLite,无需 MySQL)。
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -56,11 +49,12 @@ jobs:
           NEWAPI_CONTRACT_BASE_URL: http://localhost:3000
           NEWAPI_CONTRACT_AUTO_SETUP: "1"
         run: go test ./adapter/newapi/ -run Contract -v
-      - name: 集成测试 e2e(MySQL + rc.4,US-01 开通成员)
-        env:
-          NEXUS_IT_DSN: "root:rootpw@tcp(127.0.0.1:3306)/nexus?parseTime=true&loc=UTC&charset=utf8mb4"
-          NEXUS_IT_NEWAPI_URL: "http://localhost:3000"
-        run: go test ./test/integration/ -run Integration -v -count=1 -timeout 240s
+      - name: 集成测试 e2e(MySQL + rc.4 + 扣费/去重/守恒/对账段,自包含集成 compose)
+        # 改用 test/docker-compose.integration.yml:newapi 连独立 MySQL(newapi 库),测试容器内置
+        # NEXUS_IT_NEWAPI_SQL_DSN → 向 newapi.logs 造 type=2 消费日志,**真跑结算扣费/去重/守恒/对账**
+        # (GZ-01 涉钱回归保护;此前 GHA newapi 用 SQLite 致扣费段被 if newapiSQLDSN=="" 整段跳过)。
+        # compose 自带 depends_on(mysql healthy)解决启动顺序,tmpfs 一次性不落盘,本地已验证全通过。
+        run: docker compose -f test/docker-compose.integration.yml up --build --abort-on-container-exit --exit-code-from tests
 
   image:
     needs: test

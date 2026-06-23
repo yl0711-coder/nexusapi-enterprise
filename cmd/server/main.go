@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 	_ "time/tzdata" // 嵌入时区库(distroless 无 tzdata,周期重置按组织时区需要,B3)
@@ -115,16 +116,20 @@ func run(log *slog.Logger) error {
 	}
 
 	// quota-worker(leader 单写者:扫 grant 到期反向,03 §3.4)。MVP 单实例默认开。
+	// GZ-02 修复2:worker 在 WaitGroup 下启动,关闭时先 cancel + 等当前 tick 收尾、再 drain HTTP。
+	// defer workerCancel() 仅作早退路径(worker 启动后到信号等待之间若异常 return)的兜底;
+	// 正常关闭由下方信号处理段显式 workerCancel() 保证「先于 srv.Shutdown」的正确顺序。
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	defer workerCancel()
+	var workerWG sync.WaitGroup
 	if os.Getenv("NEXUS_WORKER_ENABLED") != "false" {
 		iv := time.Duration(atoiOr("NEXUS_WORKER_INTERVAL_SEC", 60)) * time.Second
-		go worker.NewQuotaWorker(svc, log, iv, 100).Run(workerCtx)
+		startWorker(&workerWG, func() { worker.NewQuotaWorker(svc, log, iv, 100).Run(workerCtx) })
 		// 结算 worker:只对开了 billing_enabled 的组织扣费(逐组织灰度,默认关)。
-		go worker.NewSettlementWorker(svc, log, iv).Run(workerCtx)
+		startWorker(&workerWG, func() { worker.NewSettlementWorker(svc, log, iv).Run(workerCtx) })
 		// 对账 worker(G):折扣镜像 vs new-api 实际特殊倍率,只读告警不改价。低频(默认 10min)。
 		rv := time.Duration(atoiOr("NEXUS_RECONCILE_INTERVAL_SEC", 600)) * time.Second
-		go worker.NewReconcileWorker(svc, log, rv).Run(workerCtx)
+		startWorker(&workerWG, func() { worker.NewReconcileWorker(svc, log, rv).Run(workerCtx) })
 	}
 
 	h := handler.New(svc, signer, log, version)
@@ -146,9 +151,41 @@ func run(log *slog.Logger) error {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	log.Info("收到退出信号,优雅关闭中...")
+	// GZ-02 修复2:先停 worker 并等当前 tick 收尾(避免结算被拦腰砍断 → 下轮对账误报),再 drain HTTP。
+	// 1) 取消 workerCtx,让各 worker 的 select 看到 Done 后退出循环;正在跑的 tick 因派生 ctx 取消而提前结束。
+	workerCancel()
+	// 2) 等当前正在跑的 tick 收尾。给一个总收尾上限,避免某个 tick 卡死导致永不退出。
+	//    上限须 >= 最长 tick 超时(settlement 45s),并与生产 compose stop_grace_period 对齐(GZ-02 修复3)。
+	waitWorkers(&workerWG, log, 50*time.Second)
+	// 3) 再 drain HTTP。
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutCancel()
 	return srv.Shutdown(shutCtx)
+}
+
+// startWorker 在 WaitGroup 下启动一个 worker goroutine,使关闭路径能等它收尾(GZ-02 修复2)。
+func startWorker(wg *sync.WaitGroup, run func()) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		run()
+	}()
+}
+
+// waitWorkers 等所有 worker goroutine 收尾,最长等 timeout;超时则记录并放行,
+// 避免单个卡死 tick 导致进程永不退出(GZ-02 修复2)。
+func waitWorkers(wg *sync.WaitGroup, log *slog.Logger, timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		log.Info("worker 已全部收尾")
+	case <-time.After(timeout):
+		log.Warn("等待 worker 收尾超时,继续关闭", "timeout", timeout.String())
+	}
 }
 
 func envOr(key, def string) string {

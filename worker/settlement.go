@@ -38,14 +38,16 @@ func (w *SettlementWorker) Run(ctx context.Context) {
 			w.log.Info("settlement-worker 退出")
 			return
 		case <-t.C:
-			c, cancel := context.WithTimeout(ctx, 45*time.Second)
-			n, err := w.svc.RunSettlement(c)
-			cancel()
-			if err != nil {
-				w.log.Error("settlement 扣费失败", "err", err)
-			} else if n > 0 {
-				w.log.Info("settlement 扣费", "deducted_quota", n)
-			}
+			safeTick(w.log, "settlement", func() {
+				c, cancel := context.WithTimeout(ctx, 45*time.Second)
+				n, err := w.svc.RunSettlement(c)
+				cancel()
+				if err != nil {
+					w.log.Error("settlement 扣费失败", "err", err)
+				} else if n > 0 {
+					w.log.Info("settlement 扣费", "deducted_quota", n)
+				}
+			})
 		}
 	}
 }

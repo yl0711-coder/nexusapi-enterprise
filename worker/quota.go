@@ -35,7 +35,7 @@ func NewQuotaWorker(svc *service.Service, log *slog.Logger, interval time.Durati
 // Run 阻塞运行循环直到 ctx 取消。先立即跑一轮,再按 interval 周期跑。
 func (w *QuotaWorker) Run(ctx context.Context) {
 	w.log.Info("quota-worker 启动", "interval", w.interval.String(), "batch", w.batch)
-	w.tick(ctx)
+	safeTick(w.log, "quota", func() { w.tick(ctx) })
 	t := time.NewTicker(w.interval)
 	defer t.Stop()
 	for {
@@ -44,7 +44,7 @@ func (w *QuotaWorker) Run(ctx context.Context) {
 			w.log.Info("quota-worker 退出")
 			return
 		case <-t.C:
-			w.tick(ctx)
+			safeTick(w.log, "quota", func() { w.tick(ctx) })
 		}
 	}
 }

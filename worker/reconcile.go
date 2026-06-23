@@ -38,18 +38,24 @@ func (w *ReconcileWorker) Run(ctx context.Context) {
 			w.log.Info("reconcile-worker 退出")
 			return
 		case <-t.C:
-			rc, cancel := context.WithTimeout(ctx, 2*time.Minute)
-			drifts, err := w.svc.ReconcileDiscounts(rc)
-			if err != nil {
-				w.log.Error("折扣对账失败(下轮重试)", "err", err)
-			} else if len(drifts) == 0 {
-				w.log.Debug("折扣对账:无漂移")
-			}
-			// 计费对账(守恒真账版):对上个完整小时比对 new-api.logs vs usage_ledger,少收即告警。
-			if berr := w.svc.ReconcileBilling(rc); berr != nil {
-				w.log.Error("计费对账失败(下轮重试)", "err", berr)
-			}
-			cancel()
+			safeTick(w.log, "reconcile", func() {
+				rc, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				drifts, err := w.svc.ReconcileDiscounts(rc)
+				if err != nil {
+					w.log.Error("折扣对账失败(下轮重试)", "err", err)
+				} else if len(drifts) == 0 {
+					w.log.Debug("折扣对账:无漂移")
+				}
+				// 计费对账(守恒真账版):对上个完整小时比对 new-api.logs vs usage_ledger,少收即告警。
+				if berr := w.svc.ReconcileBilling(rc); berr != nil {
+					w.log.Error("计费对账失败(下轮重试)", "err", berr)
+				}
+				// 余额-台账对账(GZ-01 D4):校验 company_balance.total_consumed == Σusage_ledger,兜住少收盲区。
+				if lerr := w.svc.ReconcileBalanceLedger(rc); lerr != nil {
+					w.log.Error("余额-台账对账失败(下轮重试)", "err", lerr)
+				}
+				cancel()
+			})
 		}
 	}
 }

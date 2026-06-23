@@ -1180,7 +1180,58 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		}
 	}
 
-	t.Log("里程碑 3b e2e 全通过:读logs扣费 + 去重防重复扣 + 守恒 + 硬停(逐组织开关)+ 充值解硬停恢复 + GZ-01 D2路径B + D1原子回滚")
+	// ===== GZ-03 返工复测:④建token成功后⑤失败 → 收口禁用孤儿 + 回写user_id + 孤儿消费不漏扣且告警 =====
+	{
+		os.Setenv("NEXUS_IT_FAULT_REVEAL_FAIL", "1") // 仅测试:令第⑤步失败,走收口路径
+		var failResp map[string]any
+		// 用组织管理员开通(运营方无开通权会被 403 挡在 bootstrap 之前)。
+		stFail := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/members", orgID), adminTok,
+			map[string]any{"name": "孤儿测试", "team_id": teamResp.ID, "tier_id": tierResp.ID}, &failResp)
+		os.Unsetenv("NEXUS_IT_FAULT_REVEAL_FAIL") // 立即复原,绝不影响后续
+		if stFail == http.StatusCreated {
+			t.Fatalf("GZ-03:注入⑤失败后开通应失败,却返回 201")
+		}
+		// 收口后:墓碑行 bootstrap_state=failed 且已回写 newapi_user_id(洞3 修复)。
+		var orphanMemberID, orphanUID int64
+		if err := store.DB().QueryRowContext(ctx,
+			"SELECT id, newapi_user_id FROM member WHERE org_id=? AND bootstrap_state='failed' AND newapi_user_id IS NOT NULL ORDER BY id DESC LIMIT 1", orgID).
+			Scan(&orphanMemberID, &orphanUID); err != nil {
+			t.Fatalf("🔴 GZ-03 洞3:未找到回写 newapi_user_id 的墓碑行(回写未生效?): %v", err)
+		}
+		t.Logf("GZ-03:⑤失败收口 → 墓碑行 member=%d 回写 newapi_user_id=%d", orphanMemberID, orphanUID)
+		// 洞1:不留活跃孤儿——该 new-api 用户应已被禁用(status != 1)。
+		if _, st := getNewapiUser(t, newapiURL, adminToken, adminUID, orphanUID); st == 1 {
+			t.Errorf("🔴 GZ-03 洞1:收口后孤儿 new-api 用户仍 active(status=1),应被禁用")
+		} else {
+			t.Logf("GZ-03 洞1 ok: 孤儿 new-api 用户已禁用(status=%d)", st)
+		}
+		// 洞3:造孤儿消费 → 结算应认领计费(回写后反查得到、不漏扣)+ 落孤儿告警。
+		nowSec := time.Now().Unix()
+		if _, err := store.DB().ExecContext(ctx, "UPDATE settlement_cursor SET last_settled_ts=? WHERE org_id=0", nowSec-20); err != nil {
+			t.Fatalf("GZ-03 设游标: %v", err)
+		}
+		seedConsumptionLog(t, newapiSQLDSN, orphanUID, "gpt-orphan", 333, nowSec-10)
+		balB := readBal()
+		d, derr := svc.RunSettlement(ctx)
+		if derr != nil {
+			t.Fatalf("GZ-03 孤儿消费结算失败: %v", derr)
+		}
+		if d != 333 || readBal() != balB-333 {
+			t.Errorf("🔴 GZ-03 洞3 漏扣:孤儿消费 333 应被认领计费(不漏扣),实 deducted=%d 余额 %d→%d", d, balB, readBal())
+		} else {
+			t.Log("GZ-03 洞3 ok: 孤儿消费被结算认领计费(回写 user_id 后反查得到,不再静默漏扣)")
+		}
+		var alertCnt int
+		store.DB().QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM audit_log WHERE action='orphan_consumption' AND target_id=?", orphanMemberID).Scan(&alertCnt)
+		if alertCnt == 0 {
+			t.Errorf("🔴 GZ-03 洞3:孤儿消费应触发 orphan_consumption 告警(审计),未见")
+		} else {
+			t.Logf("GZ-03 洞3 ok: 孤儿消费告警已落审计(orphan_consumption × %d)", alertCnt)
+		}
+	}
+
+	t.Log("里程碑 3b e2e 全通过:读logs扣费 + 去重防重复扣 + 守恒 + 硬停(逐组织开关)+ 充值解硬停恢复 + GZ-01 D2路径B + D1原子回滚 + GZ-03 ⑤失败收口/不漏扣/告警")
 }
 
 // ---- helpers ----

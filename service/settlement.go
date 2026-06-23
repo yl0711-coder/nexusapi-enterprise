@@ -2,14 +2,18 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
 
-	"github.com/nexusapi-platform/enterprise/adapter/newapi"
 	"github.com/nexusapi-platform/enterprise/model"
 	"github.com/nexusapi-platform/enterprise/repo"
 )
+
+// errConcurrentSettlement 表示推进水位时 version 已被并发写者改动(AdvanceCursor 未命中),
+// 须整批回滚(GZ-01 修复3)。单节点单写者下不应发生;多节点由选主治,此处兜底正确性。
+var errConcurrentSettlement = errors.New("结算水位推进未命中(并发写者),整批回滚")
 
 // settlementLagSec 是结算滞后窗口:只结算 now-lag 之前的 log,避开 in-flight 写入(03 §4 软边界)。
 const settlementLagSec int64 = 5
@@ -27,10 +31,11 @@ type bucketAgg struct {
 	maxTS                         int64
 }
 
-// RunSettlement 是计费结算的单次扫描(leader 单写者,03 §3.1):
-// 读 new-api 消费 logs(小窗口增量,绝不全表)→ 按 (org,user,model,小时桶) 聚合 →
-// usage_ledger 去重落账(命中去重键不重复扣)→ 扣对应组织 company_balance(乐观锁)→
-// 守恒断言 → 推进水位 → 余额到 0 且开了硬停才硬停。**只结算开了 billing_enabled 的组织。**
+// RunSettlement 是计费结算的单次扫描(leader 单写者,03 §3.1 / GZ-01 原子化版):
+// 选一个不超限的时间子窗口(路径B,永不截断少收)→ 读 new-api 消费 logs 按 (org,user,model,小时桶) 聚合 →
+// 在一个事务里原子提交:usage_ledger 落账 + 扣对应组织 company_balance(乐观锁,FOR UPDATE)+ 推进水位;
+// 任一步失败或水位推进未命中即整批回滚、本轮不推水位、下轮干净重做(无双计无双扣)。
+// 提交后再做守恒断言 / 状态-硬停 / 软限额 / 审计(绝不在持事务时调 new-api)。**只结算开了 billing_enabled 的组织。**
 // 返回本次新落账的总消耗(quota)。
 func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 	cur, err := s.store.GetOrCreateCursor(ctx, 0) // org_id=0 全局 leader 水位
@@ -43,24 +48,38 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 		return 0, nil // 窗口为空
 	}
 
-	// 1) 分页读窗口内消费 logs,按桶聚合(只收 billing_enabled 组织的成员)。
-	// log-id 级去重(修少收 bug):只处理 id > 水位的日志,每条只扣一次;边界重读(同 ts)靠此跳过。
+	// 路径B(GZ-01 修复2):上游 /api/log/ 写死 id desc(升序不可行),故绝不"截断后按已读最大 ts 推进"
+	// (那会把未读到的最旧日志永久挡在窗外=少收)。改为:选一个 [since, untilSub] 子窗口使其日志数
+	// <= settlementMaxPages*100(能一次完整读尽),只完整结算该子窗口、水位推到 untilSub;大 backlog 逐块排空。
+	untilSub := until
+	for {
+		_, total, perr := s.upstream.ReadConsumptionLogs(ctx, since, untilSub, 1, 100)
+		if perr != nil {
+			return 0, mapUpstream(perr)
+		}
+		if total <= settlementMaxPages*100 {
+			break // 该子窗口可一次读尽
+		}
+		if untilSub <= since+1 {
+			// 单秒 > 2000 条的极端(当前流量不会到):告警,只能尽力处理这一秒(避免死循环卡住水位)。
+			s.log.Error("结算单秒日志数超上限,可能截断(极端,请关注)", "since", since, "total", total)
+			break
+		}
+		untilSub = since + (untilSub-since)/2 // 二分缩小子窗口
+	}
+
+	// 1) 完整读 [since, untilSub] 并按桶聚合(只收 billing_enabled 组织的成员)。
+	//    log-id 级去重:只处理 id > 水位的日志,每条只扣一次;边界同 ts 重读靠此跳过。
 	aggs := map[string]*bucketAgg{}
-	var maxProcessedTS int64 = since
 	maxLogID := cur.LastSettledLogID
-	drained := false
 	flagCache := map[int64]bool{} // orgID -> billing_enabled
 	memberCache := map[int64]*model.Member{}
-
 	for page := 1; page <= settlementMaxPages; page++ {
-		entries, total, err := s.upstream.ReadConsumptionLogs(ctx, since, until, page, 100)
-		if err != nil {
-			return 0, mapUpstream(err)
+		entries, total, rerr := s.upstream.ReadConsumptionLogs(ctx, since, untilSub, page, 100)
+		if rerr != nil {
+			return 0, mapUpstream(rerr)
 		}
 		for _, e := range entries {
-			if e.CreatedAt > maxProcessedTS {
-				maxProcessedTS = e.CreatedAt
-			}
 			if e.ID <= cur.LastSettledLogID {
 				continue // 已结算过(水位去重),绝不重扣
 			}
@@ -111,41 +130,61 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 			}
 		}
 		if page*100 >= total {
-			drained = true
 			break
 		}
 	}
 
-	// 2) 落账(桶累计)+ 累计每组织新增消耗。本轮聚合的都是 id>水位 的新日志,每条只扣一次 → 全额计扣。
+	// 聚合每组织新增消耗 + 留存桶(软限额用)。本轮都是 id>水位 的新日志,每条只扣一次 → 全额计扣。
 	perOrg := map[int64]int64{}
 	var settled []*bucketAgg
 	for _, a := range aggs {
-		if err := s.store.AddToLedgerBucket(ctx, &repo.LedgerBucket{
-			OrgID: a.orgID, MemberID: a.memberID, NewapiUserID: a.newapiUserID, TeamID: a.teamID,
-			ModelName: a.model, TimeBucket: a.bucket, ConsumedQuota: a.consumed,
-			LogMaxTS: time.Unix(a.maxTS, 0).UTC(),
-		}); err != nil {
-			return 0, err
-		}
 		perOrg[a.orgID] += a.consumed
 		settled = append(settled, a)
 	}
 
-	// 3) 逐组织扣余额 + 守恒断言 + 状态/硬停。
+	// 2) 一个事务原子提交:落账 + 逐组织扣余额(读回) + 推水位到 untilSub(GZ-01 修复1/3)。
+	//    任一步失败或 AdvanceCursor 未命中 → 回滚,本轮不推水位、不计扣,下轮干净重做。
+	postBal := map[int64]*model.Balance{}
 	var totalDeducted int64
-	for orgID, amount := range perOrg {
-		if amount <= 0 {
-			continue
+	txErr := s.store.WithTx(ctx, func(tx *sql.Tx) error {
+		for _, a := range aggs {
+			if err := s.store.AddToLedgerBucketTx(ctx, tx, &repo.LedgerBucket{
+				OrgID: a.orgID, MemberID: a.memberID, NewapiUserID: a.newapiUserID, TeamID: a.teamID,
+				ModelName: a.model, TimeBucket: a.bucket, ConsumedQuota: a.consumed,
+				LogMaxTS: time.Unix(a.maxTS, 0).UTC(),
+			}); err != nil {
+				return err
+			}
 		}
-		bal, err := s.store.DeductBalance(ctx, orgID, amount)
-		if errors.Is(err, repo.ErrOptimisticLock) {
-			s.log.Warn("结算扣余额乐观锁冲突,下轮重试", "org_id", orgID)
-			continue
+		for orgID, amount := range perOrg {
+			if amount <= 0 {
+				continue
+			}
+			bal, err := s.store.DeductBalanceTx(ctx, tx, orgID, amount)
+			if err != nil {
+				return err // 含 ErrOptimisticLock(FOR UPDATE 下不应发生)/ErrNotFound;整批回滚
+			}
+			postBal[orgID] = bal
+			totalDeducted += amount
 		}
+		// 水位推到 untilSub(子窗口已完整读尽);ok=false 即有并发写者改了 version,整批回滚(GZ-01 修复3)。
+		ok, err := s.store.AdvanceCursorTx(ctx, tx, 0, untilSub, maxLogID, cur.Version)
 		if err != nil {
-			return totalDeducted, err
+			return err
 		}
-		totalDeducted += amount
+		if !ok {
+			return errConcurrentSettlement
+		}
+		return nil
+	})
+	if txErr != nil {
+		// 回滚:本轮不推水位、不计扣,下一轮干净重做(无半截 ledger、无双扣)。
+		s.log.Error("结算事务回滚(下轮重做)", "err", txErr, "since", since, "until_sub", untilSub)
+		return 0, txErr
+	}
+
+	// 3) 提交后副作用(绝不在持事务时调 new-api/HTTP):守恒断言 + 状态/硬停 + 软限额 + 审计。
+	for orgID, bal := range postBal {
 		// 守恒断言:balance 必须 == total_recharged - total_refunded - total_consumed(R2-S1)。
 		if bal.Balance != bal.TotalRecharged-bal.TotalRefunded-bal.TotalConsumed {
 			s.log.Error("守恒断言失败!", "org_id", orgID, "balance", bal.Balance,
@@ -155,57 +194,32 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 			s.log.Error("结算后重算组织状态失败", "org_id", orgID, "err", err)
 		}
 		s.auditSystem(ctx, orgID, "settlement_deduct", "balance", &orgID, map[string]any{
-			"deducted": amount, "balance_after": bal.Balance,
+			"deducted": perOrg[orgID], "balance_after": bal.Balance,
 		}, "ok")
 	}
-
-	// 3.5) 单模型日上限软限额检测(E4:跨阈值则告警;默认仅告警,收权限可配)。
+	// 单模型日上限软限额检测(E4:跨阈值则告警;默认仅告警,收权限可配)。
 	for _, a := range settled {
 		s.checkModelSoftLimit(ctx, a)
-	}
-
-	// 4) 推进水位:ts 全部读尽 → 推到 until;否则推到已处理的最大 ts;log 水位推到本轮处理的最大 id
-	//    (边界同 ts 重读靠 log 水位去重,不重扣)。
-	target := maxProcessedTS
-	if drained {
-		target = until
-	}
-	if target > since || maxLogID > cur.LastSettledLogID {
-		if _, err := s.store.AdvanceCursor(ctx, 0, target, maxLogID, cur.Version); err != nil {
-			s.log.Error("推进结算水位失败", "err", err)
-		}
 	}
 	return totalDeducted, nil
 }
 
-// hardStopOrg 硬停:把组织内全部就绪成员 quota override 为 0(逐组织开关已开时才调,03 §3.1)。
-func (s *Service) hardStopOrg(ctx context.Context, orgID int64) error {
+// convergeOrgQuotas 对组织全部就绪成员经唯一下发出口 applyMemberOverride 重算下发(GZ-04 方案②即时收敛触发):
+// 用于 recomputeOrgStatus 翻 stopped 进/出旗标后让硬停(→0)/恢复(→正常额)当拍生效。
+// 硬停值由 applyMemberOverride 内的 gateByOrgStatus 按组织状态统一决策,故仍是单写者、不与 quota-worker 对撞
+// (取代旧 hardStopOrg/restoreOrgQuotas 的"直接写0/直接下发"——那是绕过单一出口的双写者隐患,已删)。
+func (s *Service) convergeOrgQuotas(ctx context.Context, orgID int64) {
 	members, err := s.store.ListActiveOverridableMembers(ctx, orgID)
 	if err != nil {
-		return err
-	}
-	for _, m := range members {
-		if err := s.upstream.ManageUserQuota(ctx, int(m.NewapiUserID), newapi.QuotaOverride, 0); err != nil {
-			s.log.Error("硬停 override 0 失败", "member_id", m.ID, "err", err)
-		}
-	}
-	s.auditSystem(ctx, orgID, "hard_stop", "organization", &orgID, map[string]any{"members": len(members)}, "ok")
-	return nil
-}
-
-// restoreOrgQuotas 解硬停:充值后把成员 quota 重算下发恢复(03 §3.3)。
-func (s *Service) restoreOrgQuotas(ctx context.Context, orgID int64) error {
-	members, err := s.store.ListActiveOverridableMembers(ctx, orgID)
-	if err != nil {
-		return err
+		s.log.Error("即时收敛:列成员失败", "org_id", orgID, "err", err)
+		return
 	}
 	for _, m := range members {
 		if _, err := s.applyMemberOverride(ctx, m); err != nil {
-			s.log.Error("恢复成员 quota 失败", "member_id", m.ID, "err", err)
+			s.log.Error("即时收敛:下发成员 quota 失败", "org_id", orgID, "member_id", m.ID, "err", err)
 		}
 	}
-	s.auditSystem(ctx, orgID, "restore_quota", "organization", &orgID, map[string]any{"members": len(members)}, "ok")
-	return nil
+	s.auditSystem(ctx, orgID, "converge_quota", "organization", &orgID, map[string]any{"members": len(members)}, "ok")
 }
 
 // checkModelSoftLimit 检测某成员某模型今日累计是否刚跨过层级 model_cap;跨过则告警(E4,默认仅告警)。
@@ -326,6 +340,41 @@ func (s *Service) ReconcileBilling(ctx context.Context) error {
 					"检测到本组织计费与上游用量不一致,运营方将核对处理")
 			}
 		}
+	}
+	return nil
+}
+
+// ReconcileBalanceLedger 余额-台账真账对账(GZ-01 修复4 / 治 D4):校验每组织
+// company_balance.total_consumed == SUM(usage_ledger.consumed_quota)。GZ-01 把"落账+扣余额"收进同一
+// 事务后两者天然一致;本对账是纵深防御,兜住任何未预期分歧(尤其"ledger 写了但余额没扣"的少收——
+// 这类 ReconcileBilling 发现不了,因为它比的是 logs↔ledger)。只读、不补扣,不一致即告警人工核对。
+// 注:比的是累计值,若灰度前历史数据已有分歧会一并报出(可后续设基线;本期作信息性告警)。
+func (s *Service) ReconcileBalanceLedger(ctx context.Context) error {
+	ledger, err := s.store.SumLedgerConsumedByOrg(ctx)
+	if err != nil {
+		return err
+	}
+	consumed, err := s.store.ListOrgTotalConsumed(ctx)
+	if err != nil {
+		return err
+	}
+	seen := map[int64]bool{}
+	for orgID := range consumed {
+		seen[orgID] = true
+	}
+	for orgID := range ledger {
+		seen[orgID] = true
+	}
+	for orgID := range seen {
+		tc, lg := consumed[orgID], ledger[orgID]
+		if tc == lg {
+			continue
+		}
+		s.log.Error("余额-台账对账不一致(GZ-01 D4,人工核对)",
+			"org_id", orgID, "total_consumed", tc, "ledger_sum", lg, "diff", tc-lg)
+		s.auditSystem(ctx, orgID, "balance_ledger_mismatch", "balance", &orgID, map[string]any{
+			"total_consumed": tc, "ledger_sum": lg, "diff": tc - lg,
+		}, "mismatch")
 	}
 	return nil
 }

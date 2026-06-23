@@ -311,20 +311,14 @@ func (s *Service) recomputeOrgStatus(ctx context.Context, orgID int64, b *model.
 		return err
 	}
 
-	// 硬停:逐组织开关,默认关(用户拍板 2026-06-17)。开了才在 stopped 进/出时 override 成员 quota。
+	// GZ-04 方案②:settlement 不再直接下发 override(消除双写者),这里只翻组织状态旗标(上面已落库)。
+	// 硬停仍是逐组织开关、默认关(用户拍板 2026-06-17)。开了 hard_stop 且状态涉及 stopped 进/出时,
+	// 触发一次"即时收敛"——逐成员经唯一下发出口 applyMemberOverride 按新状态重算下发(应硬停→0,恢复→正常额),
+	// 硬停/恢复当拍生效;其余状态变化(active↔low)不改下发值,无需收敛。
 	flags, ferr := s.store.GetOrgBillingFlags(ctx, orgID)
 	hardStop := ferr == nil && flags.HardStopEnabled
-	if hardStop {
-		switch {
-		case target == model.OrgStatusStopped:
-			if err := s.hardStopOrg(ctx, orgID); err != nil {
-				s.log.Error("硬停失败", "org_id", orgID, "err", err)
-			}
-		case org.Status == model.OrgStatusStopped: // 从 stopped 恢复
-			if err := s.restoreOrgQuotas(ctx, orgID); err != nil {
-				s.log.Error("解硬停恢复 quota 失败", "org_id", orgID, "err", err)
-			}
-		}
+	if hardStop && (target == model.OrgStatusStopped || org.Status == model.OrgStatusStopped) {
+		s.convergeOrgQuotas(ctx, orgID)
 	}
 	hsState := "disabled"
 	if hardStop {

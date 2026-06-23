@@ -133,13 +133,42 @@ func tierPeriodLimit(t *model.Tier, period string) (int64, bool) {
 
 // applyMemberOverride 重算并经 adapter(限速出口)把成员 override quota 下发到 new-api。
 // 返回下发的 override 值。new-api 用户必须已 bootstrap(有 newapi_user_id)。
+//
+// GZ-04 方案②:这是配额下发的**唯一出口**(重置/到期反向/恢复/人工调额/开通/审批/层级变更全经此)。
+// 在此按组织计费状态统一决策最终值(gateByOrgStatus:应硬停则 0),使进程内只有一个逻辑写者、
+// 按 DB 状态收敛——消除"settlement 写 0 vs quota-worker 写正常额"的并发无序覆盖(GZ-04 D1/D2)。
 func (s *Service) applyMemberOverride(ctx context.Context, m *model.Member) (int64, error) {
 	override, err := s.computeOverride(ctx, m)
 	if err != nil {
 		return 0, err
 	}
-	if err := s.upstream.ManageUserQuota(ctx, int(m.NewapiUserID), newapi.QuotaOverride, override); err != nil {
+	final, err := s.gateByOrgStatus(ctx, m.OrgID, override)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.upstream.ManageUserQuota(ctx, int(m.NewapiUserID), newapi.QuotaOverride, final); err != nil {
 		return 0, mapUpstream(err)
+	}
+	return final, nil
+}
+
+// gateByOrgStatus 按组织计费状态把 override clamp 到硬停值(GZ-04 方案②的"按状态决策"):
+// 组织 status==stopped 且 hard_stop_enabled → 0;否则原值。每次下发前重读 DB 状态——
+// 这是单写者收敛的唯一依据(任何写者读到的都是同一份最新状态,故不会互相覆盖出错)。
+func (s *Service) gateByOrgStatus(ctx context.Context, orgID, override int64) (int64, error) {
+	org, err := s.store.GetOrganization(ctx, orgID)
+	if err != nil {
+		return 0, err
+	}
+	if org.Status != model.OrgStatusStopped {
+		return override, nil
+	}
+	flags, err := s.store.GetOrgBillingFlags(ctx, orgID)
+	if err != nil {
+		return 0, err
+	}
+	if flags.HardStopEnabled {
+		return 0, nil // 应硬停:即使算出来是正常额度也下发 0
 	}
 	return override, nil
 }

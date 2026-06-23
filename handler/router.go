@@ -122,8 +122,8 @@ func (h *Handler) Routes() http.Handler {
 	// /api/v1/* 之外的路径走内嵌静态前端;/ 返回 index.html。
 	mux.Handle("GET /", http.FileServerFS(web.FS))
 
-	// 中间件链:request_id → 访问日志/指标 → recover → mux。
-	return withRequestID(h.accessLog(h.recoverPanic(mux)))
+	// 中间件链:request_id → 安全头 → 访问日志/指标 → recover → mux(GZ-05 修复D:安全头挂最外层)。
+	return withRequestID(securityHeaders(h.accessLog(h.recoverPanic(mux))))
 }
 
 func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {

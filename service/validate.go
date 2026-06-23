@@ -76,6 +76,24 @@ func checkLen(field, val string, max int) error {
 	return nil
 }
 
+// checkName 在长度基础上加 HTML/JS 危险字符二道闸(GZ-05 修复A 后端二道闸),用于 name/display_name
+// 类落库字段。即便前端某处遗漏转义,带 < > " ' ` \ 或控制字符的名称也进不了库。
+// 用黑名单(非白名单)以免误伤中英文/数字/空格/常见标点等合法名称。
+func checkName(field, val string, max int) error {
+	if err := checkLen(field, val, max); err != nil {
+		return err
+	}
+	if strings.ContainsAny(val, "<>\"'`\\") {
+		return apperr.InvalidParam(field + " 含非法字符(不允许 < > \" ' ` \\)")
+	}
+	for _, r := range val {
+		if r < 0x20 || r == 0x7f {
+			return apperr.InvalidParam(field + " 含控制字符")
+		}
+	}
+	return nil
+}
+
 // firstErr 返回第一个非 nil 错误。
 func firstErr(errs ...error) error {
 	for _, e := range errs {

@@ -33,7 +33,7 @@ func (s *Service) CreateTier(ctx context.Context, c session.Claims, orgID int64,
 	if in.Name == "" {
 		return nil, apperr.InvalidParam("层级名称必填")
 	}
-	if err := checkLen("层级名称", in.Name, maxNameLen); err != nil {
+	if err := checkName("层级名称", in.Name, maxNameLen); err != nil {
 		return nil, err
 	}
 	// T17-5/D4:配了计费分组则配置期硬预检(分组存在 + 模型集 ⊆ 分组可用模型),不满足 422,
@@ -90,7 +90,7 @@ func (s *Service) UpdateTier(ctx context.Context, c session.Claims, orgID, tierI
 		if *in.Name == "" {
 			return nil, apperr.InvalidParam("层级名称不能为空")
 		}
-		if err := checkLen("层级名称", *in.Name, maxNameLen); err != nil {
+		if err := checkName("层级名称", *in.Name, maxNameLen); err != nil {
 			return nil, err
 		}
 		t.Name = *in.Name

@@ -18,6 +18,13 @@ func (s *Service) UpdateOrgSettings(ctx context.Context, c session.Claims, orgID
 	if err := assertRole(c, session.RoleOrgAdmin); err != nil {
 		return nil, err
 	}
+	// GZ-05 修复A:update 路径此前对 name 连长度都不校,直接落库 → 配合前端 onclick 拼参可存储型 XSS。
+	// 这里补 checkName(长度 + HTML/JS 危险字符二道闸)。
+	if name != nil {
+		if err := checkName("组织名称", *name, maxNameLen); err != nil {
+			return nil, err
+		}
+	}
 	if defaultTierID != nil {
 		if _, err := s.store.GetTier(ctx, orgID, *defaultTierID); errors.Is(err, repo.ErrNotFound) {
 			return nil, apperr.InvalidParam("默认层级不存在")

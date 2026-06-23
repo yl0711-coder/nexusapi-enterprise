@@ -88,12 +88,20 @@ func (s *Service) OpenSupportSession(ctx context.Context, c session.Claims, orgI
 
 // CloseSupportSession 结束支持会话。
 func (s *Service) CloseSupportSession(ctx context.Context, c session.Claims, sid int64) error {
+	// GZ-05 修复B:此前零鉴权,任意登录用户可遍历 sid 关闭他人进行中的支持会话(DoS)。
+	// 收紧为:运营方角色 + 仅发起该会话的运营方本人可关闭(否则 NotFound,不泄露会话存在性)。
+	if err := assertRole(c, session.RoleOperator); err != nil {
+		return err
+	}
 	ss, err := s.store.GetSupportSession(ctx, sid)
 	if errors.Is(err, repo.ErrNotFound) {
 		return apperr.NotFound("会话不存在")
 	}
 	if err != nil {
 		return apperr.Internal("").WithCause(err)
+	}
+	if ss.Actor != fmt.Sprintf("operator:%d", c.MemberID) {
+		return apperr.NotFound("会话不存在")
 	}
 	if err := s.store.RevokeSupportSession(ctx, sid); err != nil {
 		return apperr.Internal("").WithCause(err)
@@ -104,6 +112,10 @@ func (s *Service) CloseSupportSession(ctx context.Context, c session.Claims, sid
 
 // GetSupportSession 查会话状态。
 func (s *Service) GetSupportSession(ctx context.Context, c session.Claims, sid int64) (*model.SupportSession, error) {
+	// GZ-05 修复B:此前零鉴权,任意登录用户可遍历 sid 读他人支持会话详情(信息泄露)。收紧为仅运营方可读。
+	if err := assertRole(c, session.RoleOperator); err != nil {
+		return nil, err
+	}
 	ss, err := s.store.GetSupportSession(ctx, sid)
 	if errors.Is(err, repo.ErrNotFound) {
 		return nil, apperr.NotFound("会话不存在")

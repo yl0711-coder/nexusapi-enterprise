@@ -14,7 +14,9 @@ async function api(method, path, body) {
   return j.data;
 }
 const money = q => "$" + (q / 500000).toLocaleString(undefined, { maximumFractionDigits: 2 }); // quota→美元(锚定 500000=$1)
-const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+// GZ-05 修复A:补单引号与反引号转义。' → &#39; 放进单引号 JS 串内即变普通文本,无法闭合 onclick 参数;
+// ` → &#96; 顺手堵掉模板串反引号面。对「文本内容」与「双引号属性」渲染无副作用。
+const esc = s => String(s == null ? "" : s).replace(/[&<>"'`]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "`": "&#96;" }[c]));
 const roleCN = r => ({ operator: "运营方", org_admin: "组织管理员", team_leader: "团队负责人", member: "成员" }[r] || r);
 
 /* ---------- 登录 ---------- */

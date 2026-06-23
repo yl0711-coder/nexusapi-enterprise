@@ -37,7 +37,7 @@ func (s *Service) CreateOrg(ctx context.Context, c session.Claims, in CreateOrgI
 	if in.Name == "" || in.Slug == "" || in.AdminEmail == "" {
 		return nil, apperr.InvalidParam("组织名称 / slug / 管理员邮箱必填")
 	}
-	if err := firstErr(checkLen("组织名称", in.Name, maxNameLen),
+	if err := firstErr(checkName("组织名称", in.Name, maxNameLen),
 		checkSlug(in.Slug), checkEmail("管理员邮箱", in.AdminEmail)); err != nil {
 		return nil, err
 	}

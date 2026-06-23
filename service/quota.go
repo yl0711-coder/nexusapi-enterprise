@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/nexusapi-platform/enterprise/adapter/newapi"
@@ -138,6 +139,14 @@ func tierPeriodLimit(t *model.Tier, period string) (int64, bool) {
 // 在此按组织计费状态统一决策最终值(gateByOrgStatus:应硬停则 0),使进程内只有一个逻辑写者、
 // 按 DB 状态收敛——消除"settlement 写 0 vs quota-worker 写正常额"的并发无序覆盖(GZ-04 D1/D2)。
 func (s *Service) applyMemberOverride(ctx context.Context, m *model.Member) (int64, error) {
+	// GZ-04 返工·方案①:per-org 串行化"读状态→决策→下发"三步,消除 settlement converge 与 quota-worker
+	// 两 goroutine 在 status 翻转拍的 TOCTOU(旧值覆盖新值)。同组织串行、跨组织并发不受影响;
+	// computeOverride 也纳入锁内,使"基线+grant 读取→下发"对同成员一致。多节点需换分布式锁(另议)。
+	release, lerr := s.quotaLocker.Acquire(ctx, fmt.Sprintf("quota-override:org:%d", m.OrgID))
+	if lerr != nil {
+		return 0, apperr.Internal("").WithCause(lerr)
+	}
+	defer release()
 	override, err := s.computeOverride(ctx, m)
 	if err != nil {
 		return 0, err

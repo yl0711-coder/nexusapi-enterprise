@@ -9,6 +9,7 @@ import (
 
 	"github.com/nexusapi-platform/enterprise/adapter/newapi"
 	"github.com/nexusapi-platform/enterprise/pkg/crypto"
+	"github.com/nexusapi-platform/enterprise/pkg/lock"
 	"github.com/nexusapi-platform/enterprise/pkg/session"
 	"github.com/nexusapi-platform/enterprise/repo"
 )
@@ -23,6 +24,10 @@ type Service struct {
 	keyring *crypto.Keyring
 	signer  *session.Signer
 	log     *slog.Logger
+
+	// quotaLocker 串行化同一组织的 override 下发(GZ-04 返工·方案①):消除 settlement converge 与
+	// quota-worker 两 goroutine 在 gateByOrgStatus"读状态→决策→下发"上的 TOCTOU。进程内锁,多节点需换分布式锁。
+	quotaLocker lock.KeyedLocker
 
 	// memberRole 是开通成员时给 new-api 用户的角色(普通用户)。
 	memberRole string
@@ -44,12 +49,13 @@ func New(d Deps) *Service {
 		log = slog.Default()
 	}
 	return &Service{
-		store:      d.Store,
-		upstream:   d.Upstream,
-		keyring:    d.Keyring,
-		signer:     d.Signer,
-		log:        log,
-		memberRole: "", // new-api 普通用户角色,空 = 默认普通用户
+		store:       d.Store,
+		upstream:    d.Upstream,
+		keyring:     d.Keyring,
+		signer:      d.Signer,
+		log:         log,
+		quotaLocker: lock.NewInProcessLocker(),
+		memberRole:  "", // new-api 普通用户角色,空 = 默认普通用户
 	}
 }
 

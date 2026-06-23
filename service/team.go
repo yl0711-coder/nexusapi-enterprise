@@ -27,7 +27,7 @@ func (s *Service) CreateTeam(ctx context.Context, c session.Claims, orgID int64,
 	if in.Name == "" {
 		return nil, apperr.InvalidParam("团队名称必填")
 	}
-	if err := checkLen("团队名称", in.Name, maxNameLen); err != nil {
+	if err := checkName("团队名称", in.Name, maxNameLen); err != nil {
 		return nil, err
 	}
 	id, err := s.store.CreateTeam(ctx, &model.Team{OrgID: orgID, Name: in.Name, DefaultTierID: in.DefaultTierID})

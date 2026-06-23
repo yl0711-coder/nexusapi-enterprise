@@ -48,7 +48,7 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 	if in.Name == "" {
 		return nil, apperr.InvalidParam("成员姓名必填")
 	}
-	if err := checkLen("姓名", in.Name, maxNameLen); err != nil {
+	if err := checkName("姓名", in.Name, maxNameLen); err != nil {
 		return nil, err
 	}
 	// T11:自定义登录名(真实邮箱或用户名)提供时校验格式;留空则下面派生合成邮箱 fallback。
@@ -154,9 +154,19 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 		DisplayName: in.Name,
 	})
 	if berr != nil {
-		// 补偿:标 bootstrap 失败(adapter 已 disable 上游半成品用户)。不展示半截账号。
-		if merr := s.store.MarkBootstrapFailed(ctx, orgID, memberID); merr != nil {
-			s.log.Error("标记 bootstrap 失败也失败", "member_id", memberID, "err", merr)
+		// GZ-03 修复(收口路线):区分失败步骤。②③ adapter 已禁用用户(无孤儿,res 为空);
+		// ④⑤ 用户已 active(res 带 NewapiUserID)——new-api 侧会留下平台不认识的活跃孤儿(失管 + 漏扣)。
+		// 这里立即收口禁用该孤儿(SetUserStatus false),绝不留 active 可调用孤儿;再标失败并释放邮箱(墓碑改写)。
+		if res.NewapiUserID != 0 {
+			if derr := s.upstream.SetUserStatus(ctx, res.NewapiUserID, false); derr != nil {
+				s.log.Error("收口禁用开通失败的孤儿用户失败(需人工核 new-api)", "member_id", memberID, "newapi_user_id", res.NewapiUserID, "err", derr)
+			} else {
+				s.log.Warn("开通部分失败,已收口禁用孤儿用户", "member_id", memberID, "newapi_user_id", res.NewapiUserID)
+			}
+		}
+		// 标 bootstrap 失败 + 释放 login_email(墓碑改写),允许同邮箱重开(缺陷3)。
+		if merr := s.store.MarkBootstrapFailedAndRelease(ctx, orgID, memberID, int64(res.NewapiUserID)); merr != nil {
+			s.log.Error("标记 bootstrap 失败/释放邮箱失败", "member_id", memberID, "err", merr)
 		}
 		s.audit(ctx, c, orgID, "open_member", "member", &memberID, map[string]any{"name": in.Name, "result": "bootstrap_failed"})
 		return nil, mapUpstream(berr)

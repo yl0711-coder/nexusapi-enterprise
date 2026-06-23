@@ -60,6 +60,23 @@ func (s *Store) MarkBootstrapFailed(ctx context.Context, orgID, memberID int64) 
 	return err
 }
 
+// MarkBootstrapFailedAndRelease 标 bootstrap 失败,并把 login_email 墓碑改写(前缀 failed-{id}-,LEFT 截到列宽 191)
+// 以释放 uk_member_org_email 占用、允许同邮箱重开(GZ-03 缺陷3)。newapiUserID>0(④⑤ 收口了 active 孤儿)
+// 时状态记 disabled(孤儿已在 new-api 禁用);=0(②③ 无孤儿)记 provisioning。墓碑保留原邮箱便于审计。
+func (s *Store) MarkBootstrapFailedAndRelease(ctx context.Context, orgID, memberID, newapiUserID int64) error {
+	status := model.MemberStatusProvisioning
+	if newapiUserID > 0 {
+		status = model.MemberStatusDisabled
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE member
+		    SET bootstrap_state = ?, status = ?,
+		        login_email = LEFT(CONCAT('failed-', id, '-', login_email), 191)
+		  WHERE id = ? AND org_id = ?`,
+		model.BootstrapFailed, status, memberID, orgID)
+	return err
+}
+
 // UpdateMemberKey 轮换后回填新令牌 id / 脱敏 key / 轮换计数(US-07)。
 func (s *Store) UpdateMemberKey(ctx context.Context, orgID, memberID, tokenID int64, keyMasked string, rotation int) error {
 	_, err := s.db.ExecContext(ctx,

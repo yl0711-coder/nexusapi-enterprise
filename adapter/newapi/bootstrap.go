@@ -88,7 +88,8 @@ func (a *Adapter) BootstrapMember(ctx context.Context, in BootstrapInput) (Boots
 		// 仅标 token 缺失、异步重试;但本 adapter 无平台库,统一交由调用方据返回的
 		// 失败步骤决定。这里不 disable,直接返错(凭证有效,成员显示"配置中")。
 		a.c.log("WARN", "bootstrap.create_token_failed_user_ok", map[string]any{"user_id": userID})
-		return BootstrapResult{}, err
+		// GZ-03:带回 res(含 NewapiUserID)以便调用方收口禁用该 active 用户(否则留下活跃孤儿,失管+漏扣)。
+		return res, err
 	}
 	res.TokenID = tokenID
 

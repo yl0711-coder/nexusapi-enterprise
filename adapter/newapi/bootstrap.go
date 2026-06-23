@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 )
 
 // BootstrapMember 开通成员代发 key 全链路(10 §2.1 / §5.6 / 05 §5.6):
@@ -94,6 +95,11 @@ func (a *Adapter) BootstrapMember(ctx context.Context, in BootstrapInput) (Boots
 	res.TokenID = tokenID
 
 	key, err := a.RevealTokenKey(ctx, cred, tokenID)
+	if err == nil && os.Getenv("NEXUS_IT_FAULT_REVEAL_FAIL") == "1" {
+		// 仅集成测试故障注入(生产绝不设此 env):令第⑤步 RevealTokenKey 报失败,走收口路径以复测
+		// GZ-03 返工(④建 token 成功后⑤失败 → 收口禁用孤儿 + 回写 user_id + 漏扣告警)。此时 token 已真建。
+		err = &UpstreamError{Step: stepRevealKey, PlatformCode: CodeInternal, Message: "注入故障:RevealTokenKey 失败(仅测试)", class: classNonRetryable}
+	}
 	if err != nil {
 		// 取 key 失败:token 已建,可独立重试取;不回滚用户/token(§2.2 ⑤)。
 		// 返回 masked 占位由调用方标"待补取";此处返错带 token_id 以便后续补取。

@@ -158,9 +158,18 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 		// ④⑤ 用户已 active(res 带 NewapiUserID)——new-api 侧会留下平台不认识的活跃孤儿(失管 + 漏扣)。
 		// 这里立即收口禁用该孤儿(SetUserStatus false),绝不留 active 可调用孤儿;再标失败并释放邮箱(墓碑改写)。
 		if res.NewapiUserID != 0 {
-			if derr := s.upstream.SetUserStatus(ctx, res.NewapiUserID, false); derr != nil {
-				s.log.Error("收口禁用开通失败的孤儿用户失败(需人工核 new-api)", "member_id", memberID, "newapi_user_id", res.NewapiUserID, "err", derr)
-			} else {
+			// GZ-03 返工·治洞1:禁用失败不能记条日志就算——重试 3 次;仍失败交后台 orphan 扫描(ReconcileOrphans)
+			// 幂等再禁用兜底(墓碑行已回写 newapi_user_id,扫描据此反查),消除"禁用又失败仍留活跃孤儿"。
+			disabled := false
+			for attempt := 1; attempt <= 3; attempt++ {
+				if derr := s.upstream.SetUserStatus(ctx, res.NewapiUserID, false); derr == nil {
+					disabled = true
+					break
+				} else if attempt == 3 {
+					s.log.Error("收口禁用孤儿用户重试 3 次仍失败(交后台 orphan 扫描兜底)", "member_id", memberID, "newapi_user_id", res.NewapiUserID, "err", derr)
+				}
+			}
+			if disabled {
 				s.log.Warn("开通部分失败,已收口禁用孤儿用户", "member_id", memberID, "newapi_user_id", res.NewapiUserID)
 			}
 		}

@@ -74,6 +74,7 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 	maxLogID := cur.LastSettledLogID
 	flagCache := map[int64]bool{} // orgID -> billing_enabled
 	memberCache := map[int64]*model.Member{}
+	orphanAlerted := map[int64]bool{} // newapiUserID -> 已告警(GZ-03 返工·治洞3,每个孤儿每轮只告警一次)
 	for page := 1; page <= settlementMaxPages; page++ {
 		entries, total, rerr := s.upstream.ReadConsumptionLogs(ctx, since, untilSub, page, 100)
 		if rerr != nil {
@@ -104,6 +105,18 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 			}
 			if m.ID == 0 {
 				continue // 非平台成员
+			}
+			// GZ-03 返工·治洞3:反查到的是"开通失败收口"的成员(bootstrap_state=failed,墓碑行已回写 user_id)
+			// 却仍在产生消费 = 孤儿消费。不再静默跳过:告警(日志+审计+指标 TODO)使漏扣"可发现",
+			// 并继续走下面正常计费聚合 = 把这部分真实消费扣回组织(money 不漏)。
+			if m.BootstrapState == model.BootstrapFailed && !orphanAlerted[int64(e.UserID)] {
+				orphanAlerted[int64(e.UserID)] = true
+				s.log.Error("孤儿消费告警:开通失败收口的成员仍在产生消费(应已禁用,需核 new-api)",
+					"member_id", m.ID, "org_id", m.OrgID, "newapi_user_id", e.UserID, "model", e.ModelName)
+				s.auditSystem(ctx, m.OrgID, "orphan_consumption", "member", &m.ID, map[string]any{
+					"newapi_user_id": e.UserID, "model": e.ModelName,
+				}, "alert")
+				// TODO(可观测工单): settlement_orphan_consumption 指标 +1。
 			}
 			billing, ok := flagCache[m.OrgID]
 			if !ok {

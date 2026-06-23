@@ -61,20 +61,39 @@ func (s *Store) MarkBootstrapFailed(ctx context.Context, orgID, memberID int64) 
 }
 
 // MarkBootstrapFailedAndRelease 标 bootstrap 失败,并把 login_email 墓碑改写(前缀 failed-{id}-,LEFT 截到列宽 191)
-// 以释放 uk_member_org_email 占用、允许同邮箱重开(GZ-03 缺陷3)。newapiUserID>0(④⑤ 收口了 active 孤儿)
-// 时状态记 disabled(孤儿已在 new-api 禁用);=0(②③ 无孤儿)记 provisioning。墓碑保留原邮箱便于审计。
+// 以释放 uk_member_org_email 占用、允许同邮箱重开(GZ-03 缺陷3)。
+// newapiUserID>0(④⑤ 收口了 active 孤儿)时:**回写 newapi_user_id**(GZ-03 返工·治洞3)——让结算/对账能按
+// user_id 反查认领该孤儿的消费、不再因 NULL 命不中而静默漏扣;status 记 disabled(孤儿已在 new-api 禁用)。
+// 回写不撞 uk_member_newapi_user:该 user_id 唯一,重开走新 memberID→新派生用户名→新 new-api 用户,不复用此 id。
+// newapiUserID=0(②③ 无孤儿)时:不回写,status 维持 provisioning。墓碑保留原邮箱便于审计。
 func (s *Store) MarkBootstrapFailedAndRelease(ctx context.Context, orgID, memberID, newapiUserID int64) error {
-	status := model.MemberStatusProvisioning
 	if newapiUserID > 0 {
-		status = model.MemberStatusDisabled
+		_, err := s.db.ExecContext(ctx,
+			`UPDATE member
+			    SET bootstrap_state = ?, status = ?, newapi_user_id = ?,
+			        login_email = LEFT(CONCAT('failed-', id, '-', login_email), 191)
+			  WHERE id = ? AND org_id = ?`,
+			model.BootstrapFailed, model.MemberStatusDisabled, newapiUserID, memberID, orgID)
+		return err
 	}
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE member
 		    SET bootstrap_state = ?, status = ?,
 		        login_email = LEFT(CONCAT('failed-', id, '-', login_email), 191)
 		  WHERE id = ? AND org_id = ?`,
-		model.BootstrapFailed, status, memberID, orgID)
+		model.BootstrapFailed, model.MemberStatusProvisioning, memberID, orgID)
 	return err
+}
+
+// ListFailedOrphanMembers 列出"开通失败收口、且回写了 newapi_user_id"的成员(GZ-03 返工·治洞1 兜底)。
+// 后台 orphan 扫描据此对仍可能 active 的孤儿幂等再禁用(SetUserStatus false),消除"禁用又失败仍留活跃孤儿"。
+func (s *Store) ListFailedOrphanMembers(ctx context.Context, limit int) ([]*model.Member, error) {
+	rows, err := s.db.QueryContext(ctx,
+		memberSelect+` WHERE bootstrap_state = 'failed' AND newapi_user_id IS NOT NULL AND deleted_at IS NULL LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	return scanMembersRows(rows)
 }
 
 // UpdateMemberKey 轮换后回填新令牌 id / 脱敏 key / 轮换计数(US-07)。

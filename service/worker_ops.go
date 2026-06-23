@@ -97,3 +97,28 @@ func (s *Service) auditSystem(ctx context.Context, orgID int64, action, targetTy
 		s.log.Error("worker 写审计失败", "action", action, "err", err)
 	}
 }
+
+// ReconcileOrphans 后台 orphan 扫描兜底(GZ-03 返工·治洞1):对"开通失败收口、已回写 newapi_user_id"的成员,
+// 幂等再禁用其 new-api 用户——消除"收口时 SetUserStatus 重试仍失败、留下活跃孤儿"。SetUserStatus(false) 幂等,
+// 已禁用的再调无副作用。LIMIT 控批量;返回本次再禁用条数。quota-worker 每 tick 调一次。
+func (s *Service) ReconcileOrphans(ctx context.Context) (int, error) {
+	members, err := s.store.ListFailedOrphanMembers(ctx, 100)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, m := range members {
+		if m.NewapiUserID == 0 {
+			continue
+		}
+		if derr := s.upstream.SetUserStatus(ctx, int(m.NewapiUserID), false); derr != nil {
+			s.log.Error("后台 orphan 扫描:再禁用孤儿用户失败(下轮重试)", "member_id", m.ID, "newapi_user_id", m.NewapiUserID, "err", derr)
+			continue
+		}
+		n++
+	}
+	if n > 0 {
+		s.log.Info("后台 orphan 扫描:幂等再禁用孤儿用户", "count", n)
+	}
+	return n, nil
+}

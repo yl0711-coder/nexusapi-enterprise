@@ -39,7 +39,11 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, err)
 		return
 	}
-	writeOK(w, r, http.StatusOK, toMemberView(m))
+	// 改动⑥-2:/me 透出 mvp_mode,前端据此藏掉本期封锁的菜单/按钮(真正拦截以后端 mvpGate 为准)。
+	writeOK(w, r, http.StatusOK, struct {
+		memberView
+		MvpMode bool `json:"mvp_mode"`
+	}{toMemberView(m), h.mvpMode})
 }
 
 // ---- 组织 ----

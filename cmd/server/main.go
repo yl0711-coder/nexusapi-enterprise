@@ -104,8 +104,15 @@ func run(log *slog.Logger) error {
 		},
 	}, nil)
 
+	// MVP 灰度模式(改动⑥):NEXUS_MVP_MODE=true → 观测模式(结算只落账不扣钱/不停服)+ 路由白名单封锁。
+	mvpMode := os.Getenv("NEXUS_MVP_MODE") == "true"
+	if mvpMode {
+		log.Info("MVP 灰度模式已开启:观测模式(落账不扣钱) + 路由白名单封锁(非白名单写操作 404)")
+	}
+
 	svc := service.New(service.Deps{
 		Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log,
+		ObserveMode: mvpMode,
 	})
 
 	// 运营方引导账号(首启种子,幂等)。
@@ -132,7 +139,7 @@ func run(log *slog.Logger) error {
 		startWorker(&workerWG, func() { worker.NewReconcileWorker(svc, log, rv).Run(workerCtx) })
 	}
 
-	h := handler.New(svc, signer, log, version)
+	h := handler.New(svc, signer, log, version, mvpMode)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           h.Routes(),

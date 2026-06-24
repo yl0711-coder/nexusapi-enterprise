@@ -10,6 +10,72 @@ import (
 	"github.com/nexusapi-platform/enterprise/pkg/session"
 )
 
+// mvpWriteAllow 是 MVP 灰度模式下放行的写操作白名单(method + 路径模式,`*` 匹配一个路径段)。
+// 改动⑥-1:MVP 下只放"看 + 必要 setup(建组织/团队/层级/开通/自助建key/停用/角色/轮换)"的写;
+// 所有钱/控端点(审批/配额策略/批量/调额/grants/充值/退款冲正/计费开关/折扣)不在此列 → 404。
+// GET 只读一律放行(在 mvpGate 里短路),故此处只列非 GET。
+var mvpWriteAllow = []string{
+	"POST /api/v1/auth/login",
+	"POST /api/v1/organizations",
+	"PATCH /api/v1/organizations/*",
+	"POST /api/v1/organizations/*/archive",
+	"POST /api/v1/organizations/*/unarchive",
+	"POST /api/v1/organizations/*/teams",
+	"POST /api/v1/organizations/*/tiers",
+	"PUT /api/v1/tiers/*",
+	"DELETE /api/v1/tiers/*",
+	"POST /api/v1/tiers/*/default",
+	"POST /api/v1/organizations/*/members", // 单个开通(:bulk / :bulk-status 不在白名单 → 挡)
+	"PATCH /api/v1/members/*",
+	"POST /api/v1/members/*/role",
+	"POST /api/v1/members/*/key:rotate",
+	"POST /api/v1/members/*/key:ip-whitelist",
+	"POST /api/v1/members/*/tokens", // 改动③ 员工自助建 key
+	"POST /api/v1/members/*/status", // 停用/恢复
+	"POST /api/v1/notifications/*/read",
+	"POST /api/v1/organizations/*/support-sessions", // 运营方支持(写受 CheckSupportGuard 约束)
+	"POST /api/v1/support-sessions/*/close",
+}
+
+// matchMVPPattern 按"段"匹配:`*` 匹配任意一个路径段(故 members:bulk 不会命中 members)。
+func matchMVPPattern(pattern, method, path string) bool {
+	sp := strings.SplitN(pattern, " ", 2)
+	if len(sp) != 2 || sp[0] != method {
+		return false
+	}
+	pp := strings.Split(strings.Trim(sp[1], "/"), "/")
+	rp := strings.Split(strings.Trim(path, "/"), "/")
+	if len(pp) != len(rp) {
+		return false
+	}
+	for i := range pp {
+		if pp[i] != "*" && pp[i] != rp[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// mvpGate 是 MVP 灰度部署级封锁(改动⑥-1):MVP_MODE 关 → 放行;开 → GET 只读放行,
+// /api/v1/* 的写操作只放行 mvpWriteAllow 白名单,其余一律 404(藏存在性,不暴露端点存在)。
+// 真正的拦截在后端这一层,前端藏菜单只是体验。鉴权在 mux 内 requireAuth,本闸在其外,故未鉴权的写也直接 404。
+func (h *Handler) mvpGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !h.mvpMode || r.Method == http.MethodGet || r.Method == http.MethodHead ||
+			!strings.HasPrefix(r.URL.Path, "/api/v1/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		for _, p := range mvpWriteAllow {
+			if matchMVPPattern(p, r.Method, r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		writeErr(w, r, apperr.NotFound("")) // 非白名单写:404
+	})
+}
+
 // securityHeaders 给所有响应加基础安全头(GZ-05 修复D):防点击劫持(X-Frame-Options)、
 // MIME 嗅探放大 XSS(X-Content-Type-Options)、敏感路径经 Referer 外泄(Referrer-Policy)。
 // 严格 CSP 暂不上:当前页面有大量内联 onclick/script,上 script-src 'self' 会打死页面,

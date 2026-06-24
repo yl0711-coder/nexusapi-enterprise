@@ -1,7 +1,7 @@
 /* NexusAPI 企业管理平台 · 生产前端 SPA(接 /api/v1 真后端)。
    设计沿用原型 app.css;数据全来自真实 API(非 mock)。按 /me 的角色拼装菜单与视图。 */
 "use strict";
-const S = { token: localStorage.getItem("nx_token") || "", me: null, role: "", view: "", org: null, orgId: 0 };
+const S = { token: localStorage.getItem("nx_token") || "", me: null, role: "", view: "", org: null, orgId: 0, mvp: false };
 
 /* ---------- API ---------- */
 async function api(method, path, body) {
@@ -40,6 +40,7 @@ async function boot() {
   S.me = await api("GET", "/me", null);
   document.getElementById("login").classList.add("hide"); // 自动登录路径也要隐藏登录浮层
   S.role = S.me.role; S.orgId = S.me.org_id;
+  S.mvp = !!S.me.mvp_mode; // 改动⑥-2:MVP 灰度,前端藏掉钱/控入口(真正拦截以后端 mvpGate 为准)
   const def = { operator: "orgs", org_admin: "dash", team_leader: "members", member: "myusage" }[S.role];
   S.view = def;
   renderShell(); renderSide(); renderView();
@@ -69,7 +70,9 @@ function renderShell() {
 }
 function renderSide() {
   let h = "";
-  (NAV[S.role] || []).forEach(n => {
+  // 改动⑥-2:MVP 下藏掉钱/控菜单(审批/余额计费/申请增额);其端点已被后端 mvpGate 404。
+  const mvpHide = ["approvals", "billing", "myreq"];
+  (NAV[S.role] || []).filter(n => !(S.mvp && mvpHide.includes(n.v))).forEach(n => {
     if (n.grp) { h += `<div class="grp">${esc(n.grp)}</div>`; return; }
     h += `<div class="nav ${S.view === n.v ? "on" : ""}" id="nav-${n.v}" onclick="go('${n.v}')"><span class="ic">${n.ic}</span>${esc(n.t)}</div>`;
   });

@@ -18,15 +18,16 @@ type Handler struct {
 	signer  *session.Signer
 	log     *slog.Logger
 	version string
+	mvpMode bool // 改动⑥:MVP 灰度封锁(mvpGate 路由白名单 + /me 透出 mvp_mode 给前端藏菜单)
 }
 
 // New 构造 Handler。
-func New(svc *service.Service, signer *session.Signer, log *slog.Logger, version string) *Handler {
+func New(svc *service.Service, signer *session.Signer, log *slog.Logger, version string, mvpMode bool) *Handler {
 	if log == nil {
 		log = slog.Default()
 	}
 	markStarted(time.Now().Unix()) // /metrics uptime 起点
-	return &Handler{svc: svc, signer: signer, log: log, version: version}
+	return &Handler{svc: svc, signer: signer, log: log, version: version, mvpMode: mvpMode}
 }
 
 // Routes 返回挂好中间件的根 http.Handler。
@@ -122,8 +123,9 @@ func (h *Handler) Routes() http.Handler {
 	// /api/v1/* 之外的路径走内嵌静态前端;/ 返回 index.html。
 	mux.Handle("GET /", http.FileServerFS(web.FS))
 
-	// 中间件链:request_id → 安全头 → 访问日志/指标 → recover → mux(GZ-05 修复D:安全头挂最外层)。
-	return withRequestID(securityHeaders(h.accessLog(h.recoverPanic(mux))))
+	// 中间件链:request_id → 安全头 → 访问日志/指标 → recover → MVP 封锁闸 → mux
+	// (GZ-05 安全头挂最外层;改动⑥ mvpGate 紧贴 mux:非白名单写操作 404)。
+	return withRequestID(securityHeaders(h.accessLog(h.recoverPanic(h.mvpGate(mux)))))
 }
 
 func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {

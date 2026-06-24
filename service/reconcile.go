@@ -39,6 +39,10 @@ type DiscountDrift struct {
 // ReconcileDiscounts 扫描所有已配折扣的组织,检测特殊倍率漂移并告警(G)。
 // 返回本轮所有漂移项;无副作用(不改价)。worker 周期调用,运营也可手动触发。
 func (s *Service) ReconcileDiscounts(ctx context.Context) ([]DiscountDrift, error) {
+	// MVP 观测模式(改动⑥-3):折扣本期闲置(不写特殊倍率),折扣对账整段跳过,reconcile worker 只跑 ReconcileBilling。
+	if s.observeMode {
+		return nil, nil
+	}
 	ids, err := s.store.ListDiscountedOrgIDs(ctx)
 	if err != nil {
 		return nil, err

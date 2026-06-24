@@ -29,6 +29,9 @@ type Service struct {
 	// quota-worker 两 goroutine 在 gateByOrgStatus"读状态→决策→下发"上的 TOCTOU。进程内锁,多节点需换分布式锁。
 	quotaLocker lock.KeyedLocker
 
+	// observeMode = MVP 观测模式(改动⑤/⑥):落账不扣钱、不停服。
+	observeMode bool
+
 	// memberRole 是开通成员时给 new-api 用户的角色(普通用户)。
 	memberRole string
 }
@@ -40,6 +43,9 @@ type Deps struct {
 	Keyring  *crypto.Keyring
 	Signer   *session.Signer
 	Logger   *slog.Logger
+	// ObserveMode = MVP 观测模式(改动⑤/⑥):结算照常落账供看板,但跳过扣 company_balance / 硬停 / 守恒断言;
+	// 对账只跑 ReconcileBilling(logs↔ledger),跳过 ReconcileBalanceLedger / ReconcileDiscounts。本期不碰钱。
+	ObserveMode bool
 }
 
 // New 构造 Service。
@@ -55,6 +61,7 @@ func New(d Deps) *Service {
 		signer:      d.Signer,
 		log:         log,
 		quotaLocker: lock.NewInProcessLocker(),
+		observeMode: d.ObserveMode,
 		memberRole:  "", // new-api 普通用户角色,空 = 默认普通用户
 	}
 }

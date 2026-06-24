@@ -170,6 +170,11 @@ func (s *Service) applyMemberOverride(ctx context.Context, m *model.Member) (int
 // 组织 status==stopped 且 hard_stop_enabled → 0;否则原值。每次下发前重读 DB 状态——
 // 这是单写者收敛的唯一依据(任何写者读到的都是同一份最新状态,故不会互相覆盖出错)。
 func (s *Service) gateByOrgStatus(ctx context.Context, orgID, override int64) (int64, error) {
+	// MVP 观测模式(改动⑥-3):不碰钱/不停服,绝不把"应硬停"下发成 0;直接下发算出的额度。
+	// observe 下组织本就不会进 stopped(结算跳过扣钱),此处为显式防御,语义清晰。
+	if s.observeMode {
+		return override, nil
+	}
 	org, err := s.store.GetOrganization(ctx, orgID)
 	if err != nil {
 		return 0, err

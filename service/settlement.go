@@ -363,6 +363,11 @@ func (s *Service) ReconcileBilling(ctx context.Context) error {
 // 这类 ReconcileBilling 发现不了,因为它比的是 logs↔ledger)。只读、不补扣,不一致即告警人工核对。
 // 注:比的是累计值,若灰度前历史数据已有分歧会一并报出(可后续设基线;本期作信息性告警)。
 func (s *Service) ReconcileBalanceLedger(ctx context.Context) error {
+	// MVP 观测模式防御(改动⑥-3,2026-06-24 拍板):observe 下 ledger 照写但 total_consumed 不动(没扣)→
+	// 二者必然背离 → 本对账每轮误报。故 observe 下整段跳过。即便有人为看真账把整个 reconcile worker 跑起来也不误报。
+	if s.observeMode {
+		return nil
+	}
 	ledger, err := s.store.SumLedgerConsumedByOrg(ctx)
 	if err != nil {
 		return err

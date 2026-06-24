@@ -254,6 +254,10 @@ VIEWS.dash = async () => {
   const top = (usage.by_model || []).slice(0, 6);
   const max = Math.max(1, ...top.map(b => b.consumed_quota));
   const bars = top.map(b => `<div class="bar"><span class="nm">${esc(b.key)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / max * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`).join("") || '<div class="empty">近 7 天暂无用量</div>';
+  // 改动④:员工用量排行(后端 by_member 已按消耗降序;label=员工名,空则回落 user_id)。
+  const tm = (usage.by_member || []).slice(0, 8);
+  const maxm = Math.max(1, ...tm.map(b => b.consumed_quota));
+  const mbars = tm.map(b => `<div class="bar"><span class="nm">${esc(b.label || ("用户#" + b.key))}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / maxm * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`).join("") || '<div class="empty">近 7 天暂无用量</div>';
   return head("概览", "公司余额 + 近 7 天用量")
     + `<div class="cards">
       ${kpi("当前余额", money(bal.balance_quota), "累计充值 " + money(bal.total_recharged_quota))}
@@ -261,6 +265,7 @@ VIEWS.dash = async () => {
       ${kpi("近 7 天消耗", money(usage.total_quota), "读 new-api 日志结算")}
       ${kpi("低位阈值", money(bal.low_watermark_quota), "")}
     </div>
+    <div class="panel"><div class="ph">员工用量排行(近 7 天)</div><div class="pb">${mbars}</div></div>
     <div class="panel"><div class="ph">按模型用量(近 7 天)</div><div class="pb">${bars}</div></div>`;
 };
 VIEWS.members = async () => {

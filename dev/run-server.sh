@@ -59,6 +59,8 @@ docker run -d --name nexus-ent-dev --network "$NET" -p 18080:8080 \
   -e LISTEN_ADDR=":8080" \
   -e NEXUS_WORKER_INTERVAL_SEC="${WORKER_INTERVAL:-60}" \
   `# 可选:WORKER_INTERVAL=5 bash dev/run-server.sh 缩短结算/配额周期,方便联调真账验;默认 60` \
+  -e NEXUS_MVP_MODE="${MVP_MODE:-false}" \
+  `# 可选:MVP_MODE=true bash dev/run-server.sh 复现灰度MVP封锁(观测模式+路由白名单);默认 false 全功能` \
   -e NEXUS_DB_DSN="root:devroot@tcp(mysql:3306)/nexus?parseTime=true&loc=UTC&charset=utf8mb4" \
   -e NEXUS_MASTER_KEY="$MASTER_KEY" \
   -e NEXUS_SESSION_KEY="$SESSION_KEY" \

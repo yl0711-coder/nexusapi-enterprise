@@ -15,9 +15,10 @@ const usageMaxPages = 20
 
 // UsageBucket 是一个聚合项(按模型或成员)。
 type UsageBucket struct {
-	Key           string `json:"key"`            // 模型名 / 成员标识
-	ConsumedQuota int64  `json:"consumed_quota"` // 消耗 quota
-	Count         int    `json:"count"`          // 调用次数
+	Key           string `json:"key"`             // 模型名 / 成员标识(byMember 时=new-api user_id)
+	Label         string `json:"label,omitempty"` // 改动④:byMember 的员工显示名(display_name||login_email);空=前端回落显示 Key
+	ConsumedQuota int64  `json:"consumed_quota"`  // 消耗 quota
+	Count         int    `json:"count"`           // 调用次数
 }
 
 // UsageReport 是用量分析(看板,03 §3.1 读 logs 小窗口)。
@@ -151,6 +152,27 @@ func (s *Service) aggregateUsage(ctx context.Context, sinceHours int, orgFilter 
 
 	rep := &UsageReport{SinceHours: sinceHours, TotalQuota: total, ByModel: sortBuckets(byModel)}
 	if userFilter == nil {
+		// 改动④:给员工排行补显示名(user_id → 成员 display_name||login_email);查不到/非平台成员留空,前端回落显示 user_id。
+		// 复用 memberCache(上面 live-logs 段已填部分),ledger-only 的成员在此补查;归账口径与结算一致(GetMemberByNewapiUserID)。
+		for _, b := range byMember {
+			uid := atoi64(b.Key)
+			m := memberCache[uid]
+			if m == nil {
+				if mm, merr := s.store.GetMemberByNewapiUserID(ctx, uid); merr == nil {
+					m = mm
+					memberCache[uid] = mm
+				} else {
+					memberCache[uid] = &model.Member{}
+				}
+			}
+			if m != nil && m.ID != 0 {
+				if m.DisplayName != nil && *m.DisplayName != "" {
+					b.Label = *m.DisplayName
+				} else {
+					b.Label = m.LoginEmail
+				}
+			}
+		}
 		rep.ByMember = sortBuckets(byMember)
 	}
 	return rep, nil

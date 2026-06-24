@@ -152,6 +152,7 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 		Username:    deriveUsername(orgID, memberID),
 		Password:    newapiPw,
 		DisplayName: in.Name,
+		SkipToken:   s.observeMode, // 改动②:MVP 只建用户、令牌由员工自助建(改动③);非 MVP 走全链路(④⑤)
 	})
 	if berr != nil {
 		// GZ-03 修复(收口路线):区分失败步骤。②③ adapter 已禁用用户(无孤儿,res 为空);
@@ -187,16 +188,19 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 		return nil, apperr.Internal("").WithCause(err)
 	}
 	keyMasked := maskKey(res.PlaintextKey)
-	tokenID := int64(res.TokenID)
 	final := &model.Member{
 		ID:                memberID,
 		OrgID:             orgID,
 		NewapiUserID:      int64(res.NewapiUserID),
 		AccessTokenEnc:    []byte(accessTokenEnc),
 		MemberPasswordEnc: []byte(newapiPwEnc),
-		NewapiTokenID:     &tokenID,
-		KeyMasked:         &keyMasked,
-		KeyRotation:       1, // bootstrap 建的是 v1(adapter defaultBootstrapTokenSpec)
+	}
+	// 改动②:有令牌(非 MVP)才回填令牌字段;MVP 只建用户、无令牌(res.TokenID=0),令牌字段留空,待员工自助建(改动③)。
+	if res.TokenID != 0 {
+		tokenID := int64(res.TokenID)
+		final.NewapiTokenID = &tokenID
+		final.KeyMasked = &keyMasked
+		final.KeyRotation = 1 // bootstrap 建的是 v1(adapter defaultBootstrapTokenSpec)
 	}
 	if err := s.store.FinalizeBootstrap(ctx, final); err != nil {
 		return nil, apperr.Internal("").WithCause(err)
@@ -214,7 +218,7 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 	s.ensureTotalDiscountCoversGroup(ctx, orgID, grp)
 	// 令牌设计价分组 = grp(T17-1)+ model_limits = 层级模型集(B2:网关数据面限模型,真拦截)。best-effort。
 	// grp=default 且无模型集时是无意义写,跳过。
-	if grp != "default" || (tier != nil && len(tier.ModelSet) > 0) {
+	if res.TokenID != 0 && (grp != "default" || (tier != nil && len(tier.ModelSet) > 0)) {
 		cred := newapi.MemberCred{NewapiUserID: res.NewapiUserID, AccessToken: res.AccessToken}
 		spec := newapi.TokenSpec{Name: deriveTokenName(memberID, 1), UnlimitedQuota: true, ExpiredTime: -1, Group: grp}
 		if tier != nil {
@@ -408,5 +412,92 @@ func (s *Service) RotateKey(ctx context.Context, c session.Claims, orgID, member
 		return "", "", apperr.Internal("").WithCause(err)
 	}
 	s.audit(ctx, c, orgID, "rotate_key", "member", &memberID, map[string]any{"rotation": nextRotation})
+	return newKey, masked, nil
+}
+
+// MemberUsableGroups 列本企业可用的模型分组(改动③:自助建 key 的分组选择器只列这些,不暴露全系统分组)。
+// 取调用者所属组织的用户分组 → GetOrgUsableGroups。
+func (s *Service) MemberUsableGroups(ctx context.Context, c session.Claims) ([]string, error) {
+	groups, err := s.upstream.GetOrgUsableGroups(ctx, s.orgUserGroup(ctx, c.OrgID))
+	if err != nil {
+		return nil, mapUpstream(err)
+	}
+	return groups, nil
+}
+
+// CreateMemberToken 员工自助建/重建 API key,选一个本企业可用的模型分组(改动③·方案A 单 key)。
+// 方案A:平台只跟踪最近一枚——首次(无令牌)CreateToken;重建(已有令牌)RotateToken 替换上一枚(旧 key 失效)。
+// RBAC:仅本人(MVP)。校验所选分组 ∈ 本企业可用模型分组(隔离边界:不能选别家分组)。返回明文 key(仅回显一次)+ 脱敏。
+func (s *Service) CreateMemberToken(ctx context.Context, c session.Claims, memberID int64, group string) (apiKey, masked string, err error) {
+	if c.MemberID != memberID {
+		return "", "", apperr.Forbidden("仅支持为本人建 key")
+	}
+	if group == "" {
+		return "", "", apperr.InvalidParam("请选择一个模型分组")
+	}
+	ctx, cancel := withTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	m, err := s.store.GetMember(ctx, c.OrgID, memberID)
+	if errors.Is(err, repo.ErrNotFound) {
+		return "", "", apperr.NotFound("成员不存在")
+	}
+	if err != nil {
+		return "", "", apperr.Internal("").WithCause(err)
+	}
+	if m.NewapiUserID == 0 || len(m.AccessTokenEnc) == 0 {
+		return "", "", apperr.New(apperr.CodeInvalidParam, 409, "成员尚未就绪,无法建 key")
+	}
+
+	// 隔离边界:所选分组必须在本企业可用模型分组内(default 天然可用)。
+	if group != "default" {
+		usable, gerr := s.upstream.GetOrgUsableGroups(ctx, s.orgUserGroup(ctx, c.OrgID))
+		if gerr != nil {
+			return "", "", mapUpstream(gerr)
+		}
+		ok := false
+		for _, g := range usable {
+			if g == group {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return "", "", apperr.InvalidParam("该模型分组不在本企业可用范围内")
+		}
+	}
+
+	accessToken, derr := s.keyring.DecryptString(string(m.AccessTokenEnc))
+	if derr != nil {
+		return "", "", apperr.Internal("").WithCause(derr)
+	}
+	cred := newapi.MemberCred{NewapiUserID: int(m.NewapiUserID), AccessToken: accessToken}
+	nextRotation := m.KeyRotation + 1
+	spec := newapi.TokenSpec{Name: deriveTokenName(memberID, nextRotation), UnlimitedQuota: true, ExpiredTime: -1, Group: group}
+
+	var newID int
+	var newKey string
+	if m.NewapiTokenID == nil {
+		tid, berr := s.upstream.CreateToken(ctx, cred, spec) // 首次自助建
+		if berr != nil {
+			return "", "", mapUpstream(berr)
+		}
+		k, berr := s.upstream.RevealTokenKey(ctx, cred, tid)
+		if berr != nil {
+			return "", "", mapUpstream(berr)
+		}
+		newID, newKey = tid, k
+	} else {
+		id, k, berr := s.upstream.RotateToken(ctx, cred, int(*m.NewapiTokenID), spec) // 重建:替换上一枚
+		if berr != nil {
+			return "", "", mapUpstream(berr)
+		}
+		newID, newKey = id, k
+	}
+	masked = maskKey(newKey)
+	if err := s.store.UpdateMemberKey(ctx, c.OrgID, memberID, int64(newID), masked, nextRotation); err != nil {
+		return "", "", apperr.Internal("").WithCause(err)
+	}
+	s.audit(ctx, c, c.OrgID, "create_member_token", "member", &memberID, map[string]any{"group": group, "rotation": nextRotation})
 	return newKey, masked, nil
 }

@@ -82,6 +82,13 @@ func (a *Adapter) BootstrapMember(ctx context.Context, in BootstrapInput) (Boots
 	}
 	res.AccessToken = accessToken
 
+	// 改动②(MVP):只建用户、不建令牌——令牌由员工自助建(改动③)。access_token 已取并随 res 返回,
+	// 供后续自助建 key。此分支不走 ④CreateToken/⑤RevealTokenKey,返回 TokenID=0/PlaintextKey="",调用方据此走"无令牌"分支。
+	if in.SkipToken {
+		a.c.log("INFO", "bootstrap.user_only_skip_token", map[string]any{"org_id": in.OrgID, "member_id": in.MemberID, "user_id": userID})
+		return res, nil
+	}
+
 	cred := MemberCred{NewapiUserID: userID, AccessToken: accessToken}
 	tokenID, err := a.CreateToken(ctx, cred, defaultBootstrapTokenSpec(in.MemberID))
 	if err != nil {

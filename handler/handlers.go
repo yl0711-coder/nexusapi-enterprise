@@ -408,3 +408,37 @@ func (h *Handler) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 	}
 	writeOK(w, r, http.StatusOK, map[string]any{"api_key": apiKey, "key_masked": masked})
 }
+
+// handleCreateMemberToken 员工自助建/重建 API key,选模型分组(改动③)。
+func (h *Handler) handleCreateMemberToken(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	memberID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	var in struct {
+		Group string `json:"group"`
+	}
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	apiKey, masked, err := h.svc.CreateMemberToken(r.Context(), c, memberID, in.Group)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusCreated, map[string]any{"api_key": apiKey, "key_masked": masked})
+}
+
+// handleMemberUsableGroups 列本企业可用模型分组(改动③:自助建 key 的分组选择器)。
+func (h *Handler) handleMemberUsableGroups(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	groups, err := h.svc.MemberUsableGroups(r.Context(), c)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{"groups": groups})
+}

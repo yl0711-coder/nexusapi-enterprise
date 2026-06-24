@@ -76,6 +76,9 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/members/{id}/role", h.requireAuth(h.handleAssignRole))
 	mux.HandleFunc("POST /api/v1/members/{id}/key:rotate", h.requireAuth(h.handleRotateKey))
 	mux.HandleFunc("POST /api/v1/members/{id}/key:ip-whitelist", h.requireAuth(h.handleSetKeyIP))
+	// 改动③:员工自助建 key(选模型分组)+ 列本企业可用模型分组(分组选择器)。MVP 白名单已含。
+	mux.HandleFunc("POST /api/v1/members/{id}/tokens", h.requireAuth(h.handleCreateMemberToken))
+	mux.HandleFunc("GET /api/v1/members/{id}/usable-groups", h.requireAuth(h.handleMemberUsableGroups))
 
 	// 额度执行(里程碑2):调额 / 临时权限 / 停用恢复。
 	mux.HandleFunc("POST /api/v1/members/{id}/quota:adjust", h.requireAuth(h.handleAdjustQuota))

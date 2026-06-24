@@ -34,6 +34,7 @@ type BootstrapInput struct {
 	Password    string // 平台生成并加密留存(重 bootstrap 兜底,见 10 §2.7 / §3.1)
 	DisplayName string
 	Role        string // new-api role,成员一般为普通用户
+	SkipToken   bool   // 改动②(MVP):只建用户、不建令牌(令牌由员工自助建,改动③);仍取 access_token 供自助建 key
 }
 
 // BootstrapResult 是代发 key 全链路成功后的产物。

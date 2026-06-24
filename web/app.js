@@ -484,9 +484,10 @@ VIEWS.mykey = async () => {
   const m = await api("GET", "/members/" + S.me.id, null);
   return head("我的 API Key", "明文 key 只在创建/轮换时显示一次;之后只见脱敏串,可轮换不可读出(红线)")
     + `<div class="panel"><div class="pb">
-      <div class="keybox"><span>${esc(m.key_masked || "(尚未生成)")}</span></div>
-      <div style="margin-top:14px"><button class="btn pri" onclick="rotateKey()">轮换 Key</button></div>
-      <div class="note">轮换后旧 key 立即失效,新明文 key 仅显示一次。</div>
+      <div class="keybox"><span>${esc(m.key_masked || "(尚未生成,点下方新建)")}</span></div>
+      <div style="margin-top:14px"><button class="btn pri" onclick="openNewKey()">新建 / 重建 Key(选模型分组)</button>
+        ${m.key_masked ? '<button class="btn" onclick="rotateKey()">轮换(沿用分组)</button>' : ""}</div>
+      <div class="note">改动③:一把 key 即可调所选模型分组里的所有模型;建新 key 会替换上一枚(旧 key 失效),明文仅显示一次。</div>
       <div class="fld" style="margin-top:16px"><label>IP 白名单(单 IP 或 CIDR,逗号分隔;留空=不限)</label>
         <input id="ipwl" value="${esc(m.key_masked ? "" : "")}" placeholder="203.0.113.5, 10.0.0.0/8"></div>
       <button class="btn" onclick="saveIP()">保存 IP 白名单</button>
@@ -499,6 +500,25 @@ async function saveIP() {
 async function rotateKey() {
   try { const d = await api("POST", "/members/" + S.me.id + "/key:rotate", null);
     modal("新 API Key", `<div class="note">已轮换,旧 key 失效。新明文仅此一次:</div><div class="keybox"><span>${esc(d.api_key)}</span><span class="lk" onclick="navigator.clipboard&&navigator.clipboard.writeText('${esc(d.api_key)}');toast('已复制')">复制</span></div>`, `<button class="btn pri" onclick="closeM();renderView()">完成</button>`);
+  } catch (e) { toast(e.message); }
+}
+// 改动③:员工自助建 key——先拉本企业可用模型分组,选一个生成 key(明文仅一次)。
+async function openNewKey() {
+  let groups = [];
+  try { const d = await api("GET", "/members/" + S.me.id + "/usable-groups", null); groups = d.groups || []; }
+  catch (e) { toast(e.message); return; }
+  const opts = ['<option value="default">default(基础)</option>']
+    .concat(groups.map(g => `<option value="${esc(g)}">${esc(g)}</option>`)).join("");
+  modal("新建 API Key", `<div class="note">从本企业可用的模型分组里选一个;一把 key 即可调该分组里所有模型。建新 key 会替换你上一枚 key(旧 key 失效)。</div>
+    <div class="fld" style="margin-top:12px"><label>模型分组</label><select id="nk_grp">${opts}</select></div>`,
+    `<button class="btn pri" onclick="doCreateKey()">生成 Key</button>`);
+}
+async function doCreateKey() {
+  try {
+    const d = await api("POST", "/members/" + S.me.id + "/tokens", { group: val("nk_grp") });
+    modal("新建成功 · 明文 Key(仅显示一次)", `<div class="note">请立即复制保存,关闭后只能看到脱敏串。</div>
+      <div class="keybox"><span>${esc(d.api_key)}</span><span class="lk" onclick="navigator.clipboard&&navigator.clipboard.writeText('${esc(d.api_key)}');toast('已复制')">复制</span></div>`,
+      `<button class="btn pri" onclick="closeM();renderView()">完成</button>`);
   } catch (e) { toast(e.message); }
 }
 VIEWS.myreq = async () => {

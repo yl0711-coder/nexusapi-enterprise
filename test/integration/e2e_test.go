@@ -94,8 +94,14 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		AdminEmail           string                         `json:"admin_email"`
 		AdminInitialPassword string                         `json:"admin_initial_password"`
 	}
+	// 改动①:建组织前先在 new-api 给该用户分组挂上可用模型分组(否则 CreateOrg 校验返 422)。
+	orgGrp := "grp-" + slug
+	if err := upstream.AddOrgUsableGroup(ctx, orgGrp, "vip"); err != nil {
+		t.Fatalf("预配组织用户分组可用分组失败: %v", err)
+	}
 	st := api.do("POST", "/api/v1/organizations", opTok, map[string]any{
 		"name": "Acme 公司", "slug": slug, "admin_email": "admin@" + slug + ".com",
+		"newapi_user_group": orgGrp,
 	}, &orgResp)
 	if st != http.StatusCreated {
 		t.Fatalf("建组织 HTTP=%d", st)
@@ -208,8 +214,13 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		AdminEmail           string                         `json:"admin_email"`
 		AdminInitialPassword string                         `json:"admin_initial_password"`
 	}
+	orgGrp2 := "grp-" + slug2
+	if err := upstream.AddOrgUsableGroup(ctx, orgGrp2, "vip"); err != nil {
+		t.Fatalf("预配 org2 用户分组可用分组失败: %v", err)
+	}
 	api.do("POST", "/api/v1/organizations", opTok, map[string]any{
 		"name": "Beta 公司", "slug": slug2, "admin_email": "admin@" + slug2 + ".com",
+		"newapi_user_group": orgGrp2,
 	}, &org2)
 	admin2Tok := login(api, org2.AdminEmail, org2.AdminInitialPassword)
 	if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/members", orgID), admin2Tok, nil, nil); st != http.StatusNotFound {
@@ -425,7 +436,7 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 
 	// ===== R2 回归:merge-preserve + 折扣对账(G)+ mode=none 删键 =====
 	ctxBg := context.Background()
-	ug := fmt.Sprintf("org_%d", orgID)
+	ug := orgGrp
 	pricingPath := fmt.Sprintf("/api/v1/organizations/%d/pricing", orgID)
 	// 预置一个外部手工配的无关键 vip/default(模拟人工/其它工具配),平台后续读-改-写绝不能抹掉它。
 	if err := upstream.SetGroupGroupRatio(ctxBg, "vip", "default", 0.66); err != nil {
@@ -931,8 +942,8 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		}
 		// T17-2:可用分组写到 new-api 真读的 key(group_ratio_setting.group_special_usable_group),含 org_x→vip。
 		usable := readNewapiOption(t, newapiURL, adminToken, adminUID, "group_ratio_setting.group_special_usable_group")
-		if !strings.Contains(usable, fmt.Sprintf("org_%d", orgID)) || !strings.Contains(usable, "vip") {
-			t.Errorf("T17-2 可用分组(正确 key)应含 org_%d→vip,实得 %q", orgID, usable)
+		if !strings.Contains(usable, orgGrp) || !strings.Contains(usable, "vip") {
+			t.Errorf("T17-2 可用分组(正确 key)应含 %s→vip,实得 %q", orgGrp, usable)
 		} else {
 			t.Log("回归 T17-2 ok: 业务分组 vip 写进 new-api 真读的可用分组 key")
 		}
@@ -964,8 +975,8 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 			t.Fatalf("T17-3 配 vip 折扣应 200,得 %d", st)
 		}
 		ggr := readNewapiOption(t, newapiURL, adminToken, adminUID, "GroupGroupRatio")
-		if !strings.Contains(ggr, fmt.Sprintf("org_%d", orgID)) || !strings.Contains(ggr, "vip") {
-			t.Errorf("T17-3 GroupGroupRatio 应含 org_%d/vip,实得 %s", orgID, ggr)
+		if !strings.Contains(ggr, orgGrp) || !strings.Contains(ggr, "vip") {
+			t.Errorf("T17-3 GroupGroupRatio 应含 %s/vip,实得 %s", orgGrp, ggr)
 		} else {
 			t.Log("回归 T17-3 ok: 非 default 分组 vip 的 per_group 折扣写入 GroupGroupRatio(命中)")
 		}

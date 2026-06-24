@@ -203,11 +203,11 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 	}
 
 	// 设 new-api 用户分组 = org_{id}(A2:折扣按用户分组归属,GroupGroupRatio 按此查)。best-effort。
-	if err := s.upstream.SetUserGroup(ctx, res.NewapiUserID, orgUserGroup(orgID)); err != nil {
+	if err := s.upstream.SetUserGroup(ctx, res.NewapiUserID, s.orgUserGroup(ctx, orgID)); err != nil {
 		s.log.Warn("设成员 new-api 用户分组失败(可后续补)", "member_id", memberID, "err", err)
 	}
 	// T17-2:把业务令牌分组加进该 org 用户可用分组(§3 硬约束,不补则令牌用业务分组时 403)。best-effort。
-	if err := s.upstream.AddOrgUsableGroup(ctx, orgUserGroup(orgID), grp); err != nil {
+	if err := s.upstream.AddOrgUsableGroup(ctx, s.orgUserGroup(ctx, orgID), grp); err != nil {
 		s.log.Warn("加成员可用分组失败(令牌用业务分组会 403,需补)", "member_id", memberID, "group", grp, "err", err)
 	}
 	// T17-3/Q1:该 org 若已配 total 折扣,新落到的分组自动补折扣(否则新分组回原价、客户被多收)。best-effort。

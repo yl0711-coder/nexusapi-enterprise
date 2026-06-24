@@ -78,7 +78,7 @@ func (s *Service) reconcileOrgDiscount(ctx context.Context, orgID int64) []Disco
 	if len(entries) == 0 {
 		return nil
 	}
-	userGroup := orgUserGroup(orgID)
+	userGroup := s.orgUserGroup(ctx, orgID)
 	var out []DiscountDrift
 	for g, e := range entries {
 		actual, ok, err := s.upstream.GetGroupGroupRatio(ctx, userGroup, g)

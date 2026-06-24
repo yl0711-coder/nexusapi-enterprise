@@ -86,10 +86,11 @@ func (h *Handler) archiveOrg(w http.ResponseWriter, r *http.Request, archived bo
 }
 
 type createOrgReq struct {
-	Name          string `json:"name"`
-	Slug          string `json:"slug"`
-	AdminEmail    string `json:"admin_email"`
-	AdminPassword string `json:"admin_password"`
+	Name            string `json:"name"`
+	Slug            string `json:"slug"`
+	AdminEmail      string `json:"admin_email"`
+	AdminPassword   string `json:"admin_password"`
+	NewapiUserGroup string `json:"newapi_user_group"` // 改动①:运营手填 new-api 用户分组(必填)
 }
 
 func (h *Handler) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
@@ -101,6 +102,7 @@ func (h *Handler) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := h.svc.CreateOrg(r.Context(), c, service.CreateOrgInput{
 		Name: in.Name, Slug: in.Slug, AdminEmail: in.AdminEmail, AdminPassword: in.AdminPassword,
+		NewapiUserGroup: in.NewapiUserGroup,
 	})
 	if err != nil {
 		writeErr(w, r, err)

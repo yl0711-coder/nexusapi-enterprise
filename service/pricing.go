@@ -18,8 +18,15 @@ const (
 	DiscountPerGroup = "per_group" // 按分组:只对指定令牌分组打折
 )
 
-// orgUserGroup 客户专属用户分组名(统一前缀,便于人工辨识"归企业后台管",G.4)。
-func orgUserGroup(orgID int64) string { return fmt.Sprintf("org_%d", orgID) }
+// orgUserGroup 取组织专属 new-api 用户分组名(改动①:读存储字段 organization.newapi_group)。
+// nil/读不到回落派生值 org_%d(迁移 0014 已把存量回填为该派生值,新组织由 CreateOrg 写运营手填值)。
+// 隔离边界真源,折扣等只读不写(repo.UpdateOrgDiscount 已解耦,红线④)。
+func (s *Service) orgUserGroup(ctx context.Context, orgID int64) string {
+	if o, err := s.store.GetOrganization(ctx, orgID); err == nil && o.NewapiUserGroup != nil && *o.NewapiUserGroup != "" {
+		return *o.NewapiUserGroup
+	}
+	return fmt.Sprintf("org_%d", orgID)
+}
 
 // discountEntry 是平台存的折扣镜像(每令牌分组一条):折扣% + 写入时基础倍率快照 + 算出的绝对特殊倍率。
 type discountEntry struct {
@@ -55,7 +62,7 @@ func (s *Service) ConfigureDiscount(ctx context.Context, c session.Claims, orgID
 	} else if err != nil {
 		return nil, apperr.Internal("").WithCause(err)
 	}
-	userGroup := orgUserGroup(orgID)
+	userGroup := s.orgUserGroup(ctx, orgID)
 	groups := in.TokenGroups
 	if len(groups) == 0 {
 		// total(整体折扣)默认覆盖「该 org 在用的全部令牌分组集」(T17-3/Q1),而非写死 default;
@@ -106,8 +113,8 @@ func (s *Service) ConfigureDiscount(ctx context.Context, c session.Claims, orgID
 	}
 
 	entriesJSON, _ := json.Marshal(entries)
-	ug := userGroup
-	if err := s.store.UpdateOrgDiscount(ctx, orgID, in.Mode, &ug, nil, entriesJSON); err != nil {
+	// 改动①解耦:折扣不再写组织用户分组列。
+	if err := s.store.UpdateOrgDiscount(ctx, orgID, in.Mode, nil, entriesJSON); err != nil {
 		return nil, apperr.Internal("").WithCause(err)
 	}
 	s.audit(ctx, c, orgID, "configure_discount", "organization", &orgID, map[string]any{"mode": in.Mode, "pct": in.DiscountPct, "groups": groups})
@@ -153,7 +160,7 @@ func (s *Service) GetPricing(ctx context.Context, c session.Claims, orgID int64)
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)
 	}
-	userGroup := orgUserGroup(orgID)
+	userGroup := s.orgUserGroup(ctx, orgID)
 	v := &PricingView{Mode: d.Mode, UserGroup: userGroup, Entries: map[string]discountEntry{}, Upstream: map[string]float64{}}
 	if len(d.SpecialRatios) > 0 {
 		_ = json.Unmarshal(d.SpecialRatios, &v.Entries)
@@ -228,13 +235,13 @@ func (s *Service) ensureTotalDiscountCoversGroup(ctx context.Context, orgID int6
 	for g, e := range entries {
 		desired[g] = e.Abs
 	}
-	if err := s.upstream.SetOrgGroupRatios(ctx, orgUserGroup(orgID), desired); err != nil {
+	if err := s.upstream.SetOrgGroupRatios(ctx, s.orgUserGroup(ctx, orgID), desired); err != nil {
 		s.log.Warn("自动补 total 折扣下发失败(交对账)", "org_id", orgID, "group", group, "err", err)
 		return
 	}
 	entriesJSON, _ := json.Marshal(entries)
-	ug := orgUserGroup(orgID)
-	if err := s.store.UpdateOrgDiscount(ctx, orgID, DiscountTotal, &ug, nil, entriesJSON); err != nil {
+	// 改动①解耦:折扣不再写组织用户分组列。
+	if err := s.store.UpdateOrgDiscount(ctx, orgID, DiscountTotal, nil, entriesJSON); err != nil {
 		s.log.Warn("自动补 total 折扣持久化失败(交对账)", "org_id", orgID, "group", group, "err", err)
 		return
 	}

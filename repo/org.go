@@ -22,7 +22,7 @@ func (s *Store) CreateOrganization(ctx context.Context, o *model.Organization) (
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO organization (name, slug, status, timezone, newapi_group, default_tier_id, billing_mode)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		o.Name, o.Slug, o.Status, o.Timezone, o.NewapiGroup, o.DefaultTierID, o.BillingMode)
+		o.Name, o.Slug, o.Status, o.Timezone, o.NewapiUserGroup, o.DefaultTierID, o.BillingMode)
 	if err != nil {
 		if isDupKey(err) {
 			return 0, ErrConflict
@@ -98,7 +98,6 @@ func (s *Store) SetOrgArchived(ctx context.Context, orgID int64, archived bool) 
 // OrgDiscount 是组织折扣镜像(09 §1,配置后单向写入 new-api,本表只读回显)。
 type OrgDiscount struct {
 	Mode          string
-	NewapiGroup   *string
 	GroupRatio    *float64
 	SpecialRatios []byte // JSON
 }
@@ -107,9 +106,10 @@ type OrgDiscount struct {
 func (s *Store) GetOrgDiscount(ctx context.Context, orgID int64) (*OrgDiscount, error) {
 	var d OrgDiscount
 	var special sql.NullString
+	// 改动①解耦(红线④):折扣不再读组织用户分组列(newapi_group);用户分组由 orgUserGroup 读字段、折扣不碰。
 	err := s.db.QueryRowContext(ctx,
-		`SELECT discount_mode, newapi_group, group_ratio, special_ratios FROM organization WHERE id = ? AND deleted_at IS NULL`, orgID).
-		Scan(&d.Mode, &d.NewapiGroup, &d.GroupRatio, &special)
+		`SELECT discount_mode, group_ratio, special_ratios FROM organization WHERE id = ? AND deleted_at IS NULL`, orgID).
+		Scan(&d.Mode, &d.GroupRatio, &special)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -123,14 +123,15 @@ func (s *Store) GetOrgDiscount(ctx context.Context, orgID int64) (*OrgDiscount, 
 }
 
 // UpdateOrgDiscount 写组织折扣配置(镜像 new-api,单向)。
-func (s *Store) UpdateOrgDiscount(ctx context.Context, orgID int64, mode string, newapiGroup *string, groupRatio *float64, specialRatios []byte) error {
+// 改动①解耦(红线④):**不再写 newapi_group 列**——配折扣绝不能覆盖组织用户分组(隔离边界)。用户分组只由建组织写。
+func (s *Store) UpdateOrgDiscount(ctx context.Context, orgID int64, mode string, groupRatio *float64, specialRatios []byte) error {
 	var special any
 	if len(specialRatios) > 0 {
 		special = string(specialRatios)
 	}
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE organization SET discount_mode = ?, newapi_group = COALESCE(?, newapi_group), group_ratio = ?, special_ratios = ?
-		 WHERE id = ? AND deleted_at IS NULL`, mode, newapiGroup, groupRatio, special, orgID)
+		`UPDATE organization SET discount_mode = ?, group_ratio = ?, special_ratios = ?
+		 WHERE id = ? AND deleted_at IS NULL`, mode, groupRatio, special, orgID)
 	return err
 }
 
@@ -227,7 +228,7 @@ type rowScanner interface {
 
 func scanOrg(r rowScanner) (*model.Organization, error) {
 	var o model.Organization
-	err := r.Scan(&o.ID, &o.Name, &o.Slug, &o.Status, &o.Timezone, &o.NewapiGroup,
+	err := r.Scan(&o.ID, &o.Name, &o.Slug, &o.Status, &o.Timezone, &o.NewapiUserGroup,
 		&o.DefaultTierID, &o.BillingMode, &o.DefaultTokenGroup, &o.ArchivedAt, &o.CreatedAt, &o.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound

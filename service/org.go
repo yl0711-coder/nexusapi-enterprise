@@ -15,10 +15,11 @@ import (
 
 // CreateOrgInput 建客户组织入参(E01,运营方独有)。连带建该组织第一个管理员账号(10 §1.7)。
 type CreateOrgInput struct {
-	Name          string
-	Slug          string
-	AdminEmail    string
-	AdminPassword string // 留空则平台生成,初始密码在响应里回显一次
+	Name            string
+	Slug            string
+	AdminEmail      string
+	AdminPassword   string // 留空则平台生成,初始密码在响应里回显一次
+	NewapiUserGroup string // 改动①:运营手填的 new-api 用户分组(必填;隔离边界;须已在 new-api 配好可用模型分组)
 }
 
 // CreateOrgResult 建组织产物。AdminInitialPassword 仅本次回显一次(供运营方交付客户管理员)。
@@ -34,19 +35,30 @@ func (s *Service) CreateOrg(ctx context.Context, c session.Claims, in CreateOrgI
 	if err := assertRole(c, session.RoleOperator); err != nil {
 		return nil, err
 	}
-	if in.Name == "" || in.Slug == "" || in.AdminEmail == "" {
-		return nil, apperr.InvalidParam("组织名称 / slug / 管理员邮箱必填")
+	if in.Name == "" || in.Slug == "" || in.AdminEmail == "" || in.NewapiUserGroup == "" {
+		return nil, apperr.InvalidParam("组织名称 / slug / 管理员邮箱 / new-api 用户分组必填")
 	}
 	if err := firstErr(checkName("组织名称", in.Name, maxNameLen),
-		checkSlug(in.Slug), checkEmail("管理员邮箱", in.AdminEmail)); err != nil {
+		checkSlug(in.Slug), checkEmail("管理员邮箱", in.AdminEmail),
+		checkLen("new-api 用户分组", in.NewapiUserGroup, 64)); err != nil {
 		return nil, err
 	}
 	ctx, cancel := withTimeout(ctx, 8*time.Second)
 	defer cancel()
 
-	orgID, err := s.store.CreateOrganization(ctx, &model.Organization{Name: in.Name, Slug: in.Slug})
+	// 改动①:校验运营已在 new-api 把模型分组挂到该用户分组(group_special_usable_group 非空);
+	// 否则建出来的成员令牌调用会被 new-api 分组 403。为空 → 提示先去 new-api 配。
+	usable, gerr := s.upstream.GetOrgUsableGroups(ctx, in.NewapiUserGroup)
+	if gerr != nil {
+		return nil, mapUpstream(gerr)
+	}
+	if len(usable) == 0 {
+		return nil, apperr.InvalidParam("该 new-api 用户分组尚未配可用模型分组(group_special_usable_group),请先在 new-api 配好再建组织")
+	}
+
+	orgID, err := s.store.CreateOrganization(ctx, &model.Organization{Name: in.Name, Slug: in.Slug, NewapiUserGroup: &in.NewapiUserGroup})
 	if errors.Is(err, repo.ErrConflict) {
-		return nil, apperr.Conflict("组织 slug 已存在")
+		return nil, apperr.Conflict("组织 slug 或 new-api 用户分组已被占用(一个用户分组只绑一个组织)")
 	}
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)

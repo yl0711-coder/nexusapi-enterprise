@@ -117,4 +117,6 @@ type NewapiAdapter interface {
 	ListGroupRatios(ctx context.Context) (map[string]float64, error)
 	ListGroupModels(ctx context.Context) (map[string][]string, error)
 	AddOrgUsableGroup(ctx context.Context, userGroup, group string) error
+	// GetOrgUsableGroups 读某 org 用户分组的可用模型分组列表(改动③a;建组织校验①用)。
+	GetOrgUsableGroups(ctx context.Context, userGroup string) ([]string, error)
 }

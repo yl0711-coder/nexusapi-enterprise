@@ -40,7 +40,7 @@ type Organization struct {
 	Slug          string
 	Status        string
 	Timezone      string
-	NewapiGroup   *string
+	NewapiUserGroup *string // 改动①:组织专属 new-api 用户分组(列 newapi_group;隔离边界+唯一;nil 回落 org_%d)
 	DefaultTierID     *int64
 	BillingMode       string
 	DefaultTokenGroup *string    // 组织级默认令牌计价分组(D1 两级;nil=回落 default)

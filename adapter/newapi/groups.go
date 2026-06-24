@@ -48,6 +48,22 @@ func (a *Adapter) ListGroupModels(ctx context.Context) (map[string][]string, err
 // new-api 分层配置走 "配置名.子键"(model/option.go: handleConfigUpdate),读回也以此 key 出现。
 const optGroupSpecialUsable = "group_ratio_setting.group_special_usable_group"
 
+// GetOrgUsableGroups 读某 org 用户分组的"可用模型分组"列表(改动③a;建组织校验①用)。
+// 读 group_special_usable_group(嵌套 map {用户分组:{模型分组:描述}}),取 m[userGroup] 的 key 集。
+// 用户分组不存在/为空 → 返回空切片(配合①建组织校验:为空=运营还没在 new-api 把模型分组挂到该用户分组)。
+func (a *Adapter) GetOrgUsableGroups(ctx context.Context, userGroup string) ([]string, error) {
+	var m map[string]map[string]string
+	if err := a.getOptionJSON(ctx, optGroupSpecialUsable, &m); err != nil {
+		return nil, err
+	}
+	sub := m[userGroup]
+	out := make([]string, 0, len(sub))
+	for g := range sub {
+		out = append(out, g)
+	}
+	return out, nil
+}
+
 // AddOrgUsableGroup 把业务令牌分组加进某 org 用户分组的"可用分组"(§3 硬约束,不补则真调用 403)。
 // 写 new-api 真读的 group_ratio_setting.group_special_usable_group,值为嵌套 map
 // {用户分组: {业务分组: 描述}};单写者锁 + merge-preserve(保留 vip 等其它用户分组条目)+ 去重幂等。

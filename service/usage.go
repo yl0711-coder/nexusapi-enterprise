@@ -66,7 +66,8 @@ func (s *Service) MemberUsage(ctx context.Context, c session.Claims, orgID, memb
 // orgFilter 必给(看板按组织);userFilter!=nil 只算该 new-api user。历史读 ledger(分页安全、不压
 // new-api);只对"结算游标→now"小窗口实时读 logs 补当期(限 2 页,绝不长段全量)。
 func (s *Service) aggregateUsage(ctx context.Context, sinceHours int, orgFilter *int64, userFilter *int64) (*UsageReport, error) {
-	if sinceHours <= 0 || sinceHours > 24*31 {
+	// 改动⑦:看板时间窗放到一季度(92 天),支持「近 90 天」选项;仍是只读聚合,无副作用。
+	if sinceHours <= 0 || sinceHours > 24*92 {
 		sinceHours = 24
 	}
 	until := s.now().Unix()

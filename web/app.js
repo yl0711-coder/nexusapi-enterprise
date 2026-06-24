@@ -1,7 +1,14 @@
 /* NexusAPI 企业管理平台 · 生产前端 SPA(接 /api/v1 真后端)。
    设计沿用原型 app.css;数据全来自真实 API(非 mock)。按 /me 的角色拼装菜单与视图。 */
 "use strict";
-const S = { token: localStorage.getItem("nx_token") || "", me: null, role: "", view: "", org: null, orgId: 0, mvp: false };
+const S = { token: localStorage.getItem("nx_token") || "", me: null, role: "", view: "", org: null, orgId: 0, mvp: false, win: 168 };
+// 改动⑦:看板时间窗(小时)。7/30/90 天选择器用,默认 168=近 7 天。
+function winLabel(h) { return ({ 168: "近 7 天", 720: "近 30 天", 2160: "近 90 天" })[h] || ("近 " + Math.round(h / 24) + " 天"); }
+function winSelect() {
+  return `<select class="fsel" onchange="S.win=+this.value;renderView()">`
+    + [168, 720, 2160].map(h => `<option value="${h}"${S.win === h ? " selected" : ""}>${winLabel(h)}</option>`).join("")
+    + `</select>`;
+}
 
 /* ---------- API ---------- */
 async function api(method, path, body) {
@@ -179,18 +186,18 @@ async function enterOrg(id, name) {
   const main = document.getElementById("main");
   const rows = (mem.list || []).map(m => `<tr><td>${esc(m.display_name || m.login_email)}</td>
     <td>${pill(m.status, m.status === "active" ? "ok" : "mut")}</td><td class="mini">${esc(m.key_masked || "-")}</td></tr>`).join("");
-  main.innerHTML = head(esc(name), "运营方支持视角 · 余额 / 计费灰度 / 成员 / 支持会话")
+  main.innerHTML = head(esc(name), S.mvp ? "运营方支持视角 · 成员 / 组织状态 / 支持会话" : "运营方支持视角 · 余额 / 计费灰度 / 成员 / 支持会话")
     + `<div class="crumb"><span class="lk" onclick="go('orgs')">客户组织</span><span class="sep">/</span><b>${esc(name)}</b></div>
     <div class="cards">
-      ${kpi("当前余额", money(bal.balance_quota), "累计充值 " + money(bal.total_recharged_quota))}
-      ${kpi("累计消耗", money(bal.total_consumed_quota), "")}
+      ${S.mvp ? "" : kpi("当前余额", money(bal.balance_quota), "累计充值 " + money(bal.total_recharged_quota))}
+      ${S.mvp ? "" : kpi("累计消耗", money(bal.total_consumed_quota), "")}
       ${kpi("组织状态", pill(org.status, org.status === "active" ? "ok" : "warn"), "")}
-      ${kpi("计费灰度", (bs.billing_enabled ? "扣费开" : "扣费关") + " · " + (bs.hard_stop_enabled ? "硬停开" : "硬停关"), "默认全关")}
+      ${S.mvp ? "" : kpi("计费灰度", (bs.billing_enabled ? "扣费开" : "扣费关") + " · " + (bs.hard_stop_enabled ? "硬停开" : "硬停关"), "默认全关")}
     </div>
     <div class="toolbar">
-      <button class="btn pri" onclick="openTopup(${id})">充值入账</button>
+      ${S.mvp ? "" : `<button class="btn pri" onclick="openTopup(${id})">充值入账</button>
       <button class="btn" onclick="toggleBilling(${id},${!bs.billing_enabled})">${bs.billing_enabled ? "关闭扣费" : "开启扣费(灰度)"}</button>
-      <button class="btn" onclick="openDiscount(${id})">配置折扣</button>
+      <button class="btn" onclick="openDiscount(${id})">配置折扣</button>`}
       <button class="btn" onclick="openSupport(${id})">支持会话</button>
     </div>
     <div class="panel"><div class="ph">成员</div><div class="pb"><table><tbody>${rows || '<tr><td class="empty">暂无成员</td></tr>'}</tbody></table></div></div>`;
@@ -247,26 +254,29 @@ async function doSupport(id) {
 /* ===================== 组织管理员 / 团队负责人 ===================== */
 VIEWS.dash = async () => {
   const id = S.orgId;
-  const [bal, usage] = await Promise.all([
-    api("GET", "/organizations/" + id + "/balance", null),
-    api("GET", "/organizations/" + id + "/usage?since_hours=168", null),
-  ]);
+  const win = S.win, wl = winLabel(win);
+  // 改动⑦:MVP 看板纯用量化 —— 钱相关(余额/累计消耗/低位阈值)只在非 MVP 拉取与展示。
+  const reqs = [api("GET", "/organizations/" + id + "/usage?since_hours=" + win, null)];
+  if (!S.mvp) reqs.push(api("GET", "/organizations/" + id + "/balance", null));
+  const [usage, bal] = await Promise.all(reqs);
   const top = (usage.by_model || []).slice(0, 6);
   const max = Math.max(1, ...top.map(b => b.consumed_quota));
-  const bars = top.map(b => `<div class="bar"><span class="nm">${esc(b.key)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / max * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`).join("") || '<div class="empty">近 7 天暂无用量</div>';
+  const bars = top.map(b => `<div class="bar"><span class="nm">${esc(b.key)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / max * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`).join("") || `<div class="empty">${wl}暂无用量</div>`;
   // 改动④:员工用量排行(后端 by_member 已按消耗降序;label=员工名,空则回落 user_id)。
   const tm = (usage.by_member || []).slice(0, 8);
   const maxm = Math.max(1, ...tm.map(b => b.consumed_quota));
-  const mbars = tm.map(b => `<div class="bar"><span class="nm">${esc(b.label || ("用户#" + b.key))}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / maxm * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`).join("") || '<div class="empty">近 7 天暂无用量</div>';
-  return head("概览", "公司余额 + 近 7 天用量")
-    + `<div class="cards">
+  const mbars = tm.map(b => `<div class="bar"><span class="nm">${esc(b.label || ("用户#" + b.key))}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / maxm * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`).join("") || `<div class="empty">${wl}暂无用量</div>`;
+  const moneyCards = S.mvp ? "" : `
       ${kpi("当前余额", money(bal.balance_quota), "累计充值 " + money(bal.total_recharged_quota))}
       ${kpi("累计消耗", money(bal.total_consumed_quota), "")}
-      ${kpi("近 7 天消耗", money(usage.total_quota), "读 new-api 日志结算")}
-      ${kpi("低位阈值", money(bal.low_watermark_quota), "")}
+      ${kpi("低位阈值", money(bal.low_watermark_quota), "")}`;
+  return head("概览", S.mvp ? "公司用量总览(只读)" : "公司余额 + 用量")
+    + `<div class="toolbar"><div class="search"></div><span class="mini">时间窗</span>${winSelect()}</div>
+    <div class="cards">
+      ${kpi(wl + "消耗", money(usage.total_quota), "读 new-api 日志结算")}${moneyCards}
     </div>
-    <div class="panel"><div class="ph">员工用量排行(近 7 天)</div><div class="pb">${mbars}</div></div>
-    <div class="panel"><div class="ph">按模型用量(近 7 天)</div><div class="pb">${bars}</div></div>`;
+    <div class="panel"><div class="ph">员工用量排行(${wl})</div><div class="pb">${mbars}</div></div>
+    <div class="panel"><div class="ph">按模型用量(${wl})</div><div class="pb">${bars}</div></div>`;
 };
 VIEWS.members = async () => {
   const id = S.orgId;
@@ -277,11 +287,11 @@ VIEWS.members = async () => {
     <td>${pill(m.status, m.status === "active" ? "ok" : "mut")}</td>
     <td class="mini">${esc(m.key_masked || "-")}</td>
     <td class="right">
-      <span class="btn sm" onclick="openAdjust(${m.id})">调额</span>
+      ${S.mvp ? "" : `<span class="btn sm" onclick="openAdjust(${m.id})">调额</span>`}
       <span class="btn sm" onclick="toggleMember(${m.id},${m.status !== "active"})">${m.status === "active" ? "停用" : "恢复"}</span>
     </td></tr>`).join("");
-  return head(S.role === "team_leader" ? "团队成员" : "成员", "开通成员即代发 API key;调额走临时 grant、到期自动回退")
-    + `<div class="toolbar"><div class="search"></div><button class="btn" onclick="openBulk()">批量导入</button><button class="btn pri" onclick="openAddMember()">+ 开通成员</button></div>
+  return head(S.role === "team_leader" ? "团队成员" : "成员", S.mvp ? "开通成员即代发 API key" : "开通成员即代发 API key;调额走临时 grant、到期自动回退")
+    + `<div class="toolbar"><div class="search"></div>${S.mvp ? "" : `<button class="btn" onclick="openBulk()">批量导入</button>`}<button class="btn pri" onclick="openAddMember()">+ 开通成员</button></div>
     <div class="panel"><table><thead><tr><th>成员</th><th>状态</th><th>Key(脱敏)</th><th></th></tr></thead>
     <tbody>${rows || '<tr><td colspan=4 class="empty">暂无成员</td></tr>'}</tbody></table></div>`;
 };
@@ -471,13 +481,15 @@ async function doReqTopup() { try { await api("POST", "/organizations/" + S.orgI
 
 /* ===================== 成员 ===================== */
 VIEWS.myusage = async () => {
-  const u = await api("GET", "/members/" + S.me.id + "/usage?since_hours=168", null);
+  const win = S.win, wl = winLabel(win);
+  const u = await api("GET", "/members/" + S.me.id + "/usage?since_hours=" + win, null);
   const top = (u.by_model || []).slice(0, 8);
   const max = Math.max(1, ...top.map(b => b.consumed_quota));
-  const bars = top.map(b => `<div class="bar"><span class="nm">${esc(b.key)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / max * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`).join("") || '<div class="empty">近 7 天暂无用量</div>';
-  const calls = top.reduce((a, b) => a + (b.count || 0), 0);
-  return head("我的用量", "近 7 天消耗")
-    + `<div class="cards">${kpi("近 7 天消耗", money(u.total_quota), "读 new-api 结算")}${kpi("涉及模型", String(top.length), "近 7 天")}${kpi("调用次数", String(calls), "近 7 天")}${kpi("当前状态", '<span class="pill ok">正常</span>', "")}</div>
+  const bars = top.map(b => `<div class="bar"><span class="nm">${esc(b.key)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / max * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`).join("") || `<div class="empty">${wl}暂无用量</div>`;
+  // 改动⑦:去掉「调用次数」KPI(单 key 自助态恒=1,无信息量);时间窗 7/30/90 天可选。
+  return head("我的用量", wl + "消耗")
+    + `<div class="toolbar"><div class="search"></div><span class="mini">时间窗</span>${winSelect()}</div>
+    <div class="cards">${kpi(wl + "消耗", money(u.total_quota), "读 new-api 结算")}${kpi("涉及模型", String(top.length), wl)}${kpi("当前状态", '<span class="pill ok">正常</span>', "")}</div>
     <div class="panel"><div class="ph">按模型</div><div class="pb">${bars}</div></div>`;
 };
 VIEWS.mykey = async () => {

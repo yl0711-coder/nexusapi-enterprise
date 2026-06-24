@@ -20,9 +20,14 @@ SESSION_KEY="dev-only-session-signing-key-32bytes!!"
 
 say() { printf '[run-server] %s\n' "$*"; }
 
-# 0) 镜像(没有就构建,容器内编译)。
-if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-  say "构建镜像 $IMAGE(容器内编译)"
+# 0) 镜像:**默认每次重建**(容器内编译),保证联调跑的是当前源码。
+#    踩过的坑(五总监真机逮到):旧逻辑"镜像存在就跳过 build",测新代码会复用旧镜像 → 改动根本没进去
+#    (表现:mvp_mode=null、端点 422/403 而非预期行为)。Docker 层缓存使无源码改动时秒级、有改动时自动重编,
+#    所以默认每次 build 是安全且廉价的。SKIP_BUILD=1 才显式复用旧镜像(确知在干嘛时)。
+if [ "${SKIP_BUILD:-0}" = "1" ] && docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  say "SKIP_BUILD=1:复用现有镜像 $IMAGE(未重建——确认这就是你要测的版本!)"
+else
+  say "构建镜像 $IMAGE(容器内编译,确保跑当前源码;无改动靠层缓存秒级)"
   docker build -t "$IMAGE" --build-arg VERSION=dev . >/dev/null
 fi
 

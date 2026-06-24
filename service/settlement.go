@@ -127,9 +127,11 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 				billing = f.BillingEnabled
 				flagCache[m.OrgID] = billing
 			}
-			if !billing {
+			if !billing && !s.observeMode {
 				continue // 该组织未开计费,读到但不扣
 			}
+			// 改动⑤(MVP 观测,2026-06-24 拍板):observe 下不在此跳过未开计费组织 →
+			// 全组织一律落账供「用量看板」;余额扣减在下面事务里整体跳过(落账不扣钱)。
 			bkt := hourBucket(e.CreatedAt)
 			key := fmt.Sprintf("%d|%d|%s|%d", m.OrgID, e.UserID, e.ModelName, bkt.Unix())
 			a := aggs[key]
@@ -169,16 +171,20 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 				return err
 			}
 		}
-		for orgID, amount := range perOrg {
-			if amount <= 0 {
-				continue
+		// 改动⑤:observe 下整体跳过扣余额(只落账)。postBal 留空 → 提交后守恒断言/状态硬停/扣费审计
+		// 全不触发(那些都靠 postBal 驱动),既不动钱也不触发任何停服/翻转。落账+推水位照常。
+		if !s.observeMode {
+			for orgID, amount := range perOrg {
+				if amount <= 0 {
+					continue
+				}
+				bal, err := s.store.DeductBalanceTx(ctx, tx, orgID, amount)
+				if err != nil {
+					return err // 含 ErrOptimisticLock(FOR UPDATE 下不应发生)/ErrNotFound;整批回滚
+				}
+				postBal[orgID] = bal
+				totalDeducted += amount
 			}
-			bal, err := s.store.DeductBalanceTx(ctx, tx, orgID, amount)
-			if err != nil {
-				return err // 含 ErrOptimisticLock(FOR UPDATE 下不应发生)/ErrNotFound;整批回滚
-			}
-			postBal[orgID] = bal
-			totalDeducted += amount
 		}
 		// 水位推到 untilSub(子窗口已完整读尽);ok=false 即有并发写者改了 version,整批回滚(GZ-01 修复3)。
 		ok, err := s.store.AdvanceCursorTx(ctx, tx, 0, untilSub, maxLogID, cur.Version)
@@ -194,6 +200,18 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 		// 回滚:本轮不推水位、不计扣,下一轮干净重做(无半截 ledger、无双扣)。
 		s.log.Error("结算事务回滚(下轮重做)", "err", txErr, "since", since, "until_sub", untilSub)
 		return 0, txErr
+	}
+
+	// 改动⑤:observe 模式落账完成 → 记一条可见日志(落了账、未扣钱),postBal 为空使下面副作用整体空转。
+	if s.observeMode {
+		var observed int64
+		for _, amount := range perOrg {
+			observed += amount
+		}
+		if len(aggs) > 0 {
+			s.log.Info("结算·观测模式:已落账未扣钱(MVP)", "orgs", len(perOrg), "buckets", len(aggs),
+				"observed_quota", observed, "until_sub", untilSub)
+		}
 	}
 
 	// 3) 提交后副作用(绝不在持事务时调 new-api/HTTP):守恒断言 + 状态/硬停 + 软限额 + 审计。

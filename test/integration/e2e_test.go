@@ -1242,7 +1242,39 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		}
 	}
 
-	t.Log("里程碑 3b e2e 全通过:读logs扣费 + 去重防重复扣 + 守恒 + 硬停(逐组织开关)+ 充值解硬停恢复 + GZ-01 D2路径B + D1原子回滚 + GZ-03 ⑤失败收口/不漏扣/告警")
+	// ===== 改动⑤(MVP 观测落账不扣钱)回归 =====
+	// 同一组织 billing_enabled 仍为 true,但用 ObserveMode=true 的 service 跑结算:
+	// 必须「落账(usage_ledger 增长)但不扣余额(balance/total_consumed 不动)」。这是 MVP 看板的地基:
+	// 上线 observe → 钱一分不动,用量照常可见;将来翻掉 observe 即恢复真扣,结构一步到位。
+	{
+		obsSvc := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log, ObserveMode: true})
+		balBefore := readBal()
+		var consumedBefore, ledgerBefore int64
+		store.DB().QueryRowContext(ctx, "SELECT total_consumed FROM company_balance WHERE org_id=?", orgID).Scan(&consumedBefore)
+		store.DB().QueryRowContext(ctx, "SELECT COALESCE(SUM(consumed_quota),0) FROM usage_ledger WHERE org_id=?", orgID).Scan(&ledgerBefore)
+
+		nowSec := time.Now().Unix()
+		seedConsumptionLog(t, newapiSQLDSN, uid, "gpt-5-mini", 2222222, nowSec-3) // 新日志(更高 id),过滞后窗口后入窗
+		time.Sleep(4 * time.Second)
+		deducted, derr := obsSvc.RunSettlement(ctx)
+		if derr != nil {
+			t.Fatalf("观测模式结算失败: %v", derr)
+		}
+		var consumedAfter, ledgerAfter int64
+		store.DB().QueryRowContext(ctx, "SELECT total_consumed FROM company_balance WHERE org_id=?", orgID).Scan(&consumedAfter)
+		store.DB().QueryRowContext(ctx, "SELECT COALESCE(SUM(consumed_quota),0) FROM usage_ledger WHERE org_id=?", orgID).Scan(&ledgerAfter)
+
+		if deducted != 0 || readBal() != balBefore || consumedAfter != consumedBefore {
+			t.Errorf("🔴 改动⑤:观测模式必须不扣钱 — deducted=%d(应0) 余额 %d→%d total_consumed %d→%d(均应不变)",
+				deducted, balBefore, readBal(), consumedBefore, consumedAfter)
+		} else if ledgerAfter != ledgerBefore+2222222 {
+			t.Errorf("🔴 改动⑤:观测模式必须照常落账 — usage_ledger %d→%d(应 +2222222)", ledgerBefore, ledgerAfter)
+		} else {
+			t.Logf("改动⑤ ok: 观测模式落账不扣钱 — ledger +2222222 而 balance/total_consumed 纹丝不动(deducted=0)")
+		}
+	}
+
+	t.Log("里程碑 3b e2e 全通过:读logs扣费 + 去重防重复扣 + 守恒 + 硬停(逐组织开关)+ 充值解硬停恢复 + GZ-01 D2路径B + D1原子回滚 + GZ-03 ⑤失败收口/不漏扣/告警 + 改动⑤观测落账不扣钱")
 }
 
 // ---- helpers ----

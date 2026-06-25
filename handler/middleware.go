@@ -76,6 +76,21 @@ func (h *Handler) mvpGate(next http.Handler) http.Handler {
 	})
 }
 
+// maxRequestBodyBytes 是单请求体上限(P2 健壮性加固):外部面 + 2G 无 swap 节点,
+// 超大 body 在字段校验前就要读进内存 → 内存压力/被打崩面。1MB 远大于本平台任何合法 JSON
+// (批量导入也就几十 KB),封顶后超限由 decodeJSON 收敛成 400(http.MaxBytesReader 触发解码错)。
+const maxRequestBodyBytes = 1 << 20 // 1 MiB
+
+// maxBodyBytes 给每个请求体套 http.MaxBytesReader 上限,防超大 body 占内存。
+func maxBodyBytes(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // securityHeaders 给所有响应加基础安全头(GZ-05 修复D):防点击劫持(X-Frame-Options)、
 // MIME 嗅探放大 XSS(X-Content-Type-Options)、敏感路径经 Referer 外泄(Referrer-Policy)。
 // 严格 CSP 暂不上:当前页面有大量内联 onclick/script,上 script-src 'self' 会打死页面,

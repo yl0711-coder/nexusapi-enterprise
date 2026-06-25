@@ -88,6 +88,28 @@ func TestMVPGate_BlocksMoneyAndControl(t *testing.T) {
 	// nil 解引用(被 recover 成 500),不影响"是否封锁"的判定;故不在此断言,登录放行由 mvpWriteAllow 显式列出保证。
 }
 
+// TestMaxBodyBytes_OversizedRejected 验证 P2 健壮性加固:超过 1MB 的请求体被 http.MaxBytesReader
+// 在 decode 时收敛成干净 400(结构化 4xx,非 500/非 panic/非 hang),保护 2G 无 swap 节点内存。
+// 打公开且读 body 的登录端点(decodeJSON 在 svc.Login 之前,超限先于业务触发,故 store=nil 也不进业务)。
+func TestMaxBodyBytes_OversizedRejected(t *testing.T) {
+	signer, _ := session.NewSigner([]byte("mvp-gate-test-session-key-32bytes!"), time.Hour)
+	svc := service.New(service.Deps{Signer: signer, ObserveMode: true})
+	ts := httptest.NewServer(New(svc, signer, nil, "mvp-test", true).Routes())
+	defer ts.Close()
+
+	big := `{"email":"` + strings.Repeat("a", maxRequestBodyBytes+1024) + `","password":"x"}`
+	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/auth/login", strings.NewReader(big))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("超大 body 请求不应 hang/断连: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("超大 body(>%dB)应被收敛成 400(非 500/panic),实 %d", maxRequestBodyBytes, resp.StatusCode)
+	}
+}
+
 // TestMVPGate_OffPassesAll 验证 MVP_MODE 关时 mvpGate 不拦任何端点(钱端点无 token → 401,非 404)。
 func TestMVPGate_OffPassesAll(t *testing.T) {
 	signer, _ := session.NewSigner([]byte("mvp-gate-test-session-key-32bytes!"), time.Hour)

@@ -1442,6 +1442,44 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		}
 		t.Logf("必做1 ok: MVP 藏价 — 运营/支持态读 pricing/balance 放行,客户 org_admin 直连读被拒")
 
+		// ===== 收口·藏价补 2 端点回归(复验揪出,同 P0 根因):recharge-requests + pricing/groups =====
+		// 种一个非0基础倍率(幂等,与 setupBillingGroupVip 同值),保证 operator 能看到真倍率、断言可验。
+		newapiAdminReq(t, "PUT", newapiURL, "/api/option/", adminToken, adminUID,
+			map[string]string{"key": "GroupRatio", "value": `{"default":1,"vip":0.5,"enterprise":0.85}`})
+		// ① /recharge-requests:整端点 404(同 ListRecharges 口径)——客户拒、运营放行。
+		if _, _, err := obsSvc2.ListRechargeRequests(ctx, adminClaims, orgID, 20, 0); err == nil {
+			t.Errorf("🔴 收口:MVP 下客户 org_admin 直连读 recharge-requests 必须被拒(泄充值申请),却放行")
+		}
+		if _, _, err := obsSvc2.ListRechargeRequests(ctx, operatorClaims, orgID, 20, 0); err != nil {
+			t.Errorf("🔴 收口:运营方读 recharge-requests 应放行,却被拒: %v", err)
+		}
+		// ② /pricing/groups:不能 404(org_admin 配档必需)——字段级裁剪:客户 ratio 全 0、分组名保留;运营保留真倍率。
+		if adGroups, gerr := obsSvc2.ListBillingGroups(ctx, adminClaims); gerr != nil {
+			t.Errorf("🔴 收口:org_admin 读 pricing/groups 不应报错(配档必需,不能 404): %v", gerr)
+		} else if len(adGroups) == 0 {
+			t.Errorf("🔴 收口:pricing/groups 应有分组(已种 GroupRatio),org_admin 却得空")
+		} else {
+			for _, g := range adGroups {
+				if g.Ratio != 0 {
+					t.Errorf("🔴 收口:MVP 下 org_admin 读 pricing/groups 必须裁掉基础倍率,分组 %s ratio=%v(应0)", g.Group, g.Ratio)
+				}
+			}
+		}
+		if opGroups, gerr := obsSvc2.ListBillingGroups(ctx, operatorClaims); gerr != nil {
+			t.Errorf("🔴 收口:运营方读 pricing/groups 应放行,却报错: %v", gerr)
+		} else {
+			anyNonZero := false
+			for _, g := range opGroups {
+				if g.Ratio != 0 {
+					anyNonZero = true
+				}
+			}
+			if !anyNonZero {
+				t.Errorf("🔴 收口:运营方读 pricing/groups 应保留真基础倍率(非0),却全 0=误伤运营方")
+			}
+		}
+		t.Logf("收口 ok: recharge-requests 客户404/运营200;pricing/groups 客户 ratio 全裁0(分组名保留)/运营保留真倍率")
+
 		// 用刚开的这名全新 MVP 成员(无令牌、状态干净)自助建首把 key,走真实 CreateToken 路径(非复用被前面停用/硬停污染的老成员)。
 		mvpMemberTok, _ := signer.Issue(session.Claims{MemberID: mvpRes.MemberID, OrgID: orgID, Role: session.RoleMember})
 

@@ -230,6 +230,9 @@ func (s *Service) ListRechargeRequests(ctx context.Context, c session.Claims, or
 	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
 		return nil, 0, err
 	}
+	if err := s.mvpHidePrice(c); err != nil { // MVP(观测)藏价:客户直连不可读充值申请;运营方/支持态正常
+		return nil, 0, err
+	}
 	return s.store.ListRechargeRequests(ctx, orgID, limit, offset)
 }
 

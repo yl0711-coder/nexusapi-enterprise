@@ -145,6 +145,14 @@ func (s *Service) ListBillingGroups(ctx context.Context, c session.Claims) ([]Bi
 	for g, r := range ratios {
 		out = append(out, BillingGroup{Group: g, Ratio: r, Models: g2m[g]})
 	}
+	// MVP(观测)藏价·字段级裁剪:本端点喂层级页分组下拉(org_admin 配档必需),不能整体 404。
+	// 只对客户直连剥基础倍率(Ratio→0),保留分组名/模型集;前端 S.mvp 下本就不渲染 ratio,显示无影响;
+	// 运营方/支持态仍拿真倍率。判定复用 mvpPriceHidden(与整端点 404 同一真值来源)。
+	if s.mvpPriceHidden(c) {
+		for i := range out {
+			out[i].Ratio = 0
+		}
+	}
 	return out, nil
 }
 

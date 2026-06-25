@@ -9,12 +9,12 @@ import (
 // tokenBucket 是一个简单的令牌桶限速器(对上游整体限速,绝不全量打 new-api)。
 // 懒补充:按距上次取令牌的时间差补充,避免后台 goroutine。
 type tokenBucket struct {
-	mu       sync.Mutex
-	rate     float64 // 每秒补充令牌数
-	burst    float64 // 桶容量
-	tokens   float64
-	last     time.Time
-	nowFn    func() time.Time // 便于测试注入时钟
+	mu     sync.Mutex
+	rate   float64 // 每秒补充令牌数
+	burst  float64 // 桶容量
+	tokens float64
+	last   time.Time
+	nowFn  func() time.Time // 便于测试注入时钟
 }
 
 func newTokenBucket(qps float64, burst int) *tokenBucket {
@@ -67,9 +67,10 @@ func (tb *tokenBucket) reserve() time.Duration {
 }
 
 // circuitBreaker:连续失败到阈值则打开,冷却后转半开放一个探测请求。
-//   closed   → 正常放行,累计连续失败;达阈值转 open
-//   open     → 拒绝(返 ErrCircuitOpen);冷却到点转 half-open
-//   half-open→ 放行一个探测;成功转 closed,失败回 open
+//
+//	closed   → 正常放行,累计连续失败;达阈值转 open
+//	open     → 拒绝(返 ErrCircuitOpen);冷却到点转 half-open
+//	half-open→ 放行一个探测;成功转 closed,失败回 open
 type cbState int
 
 const (

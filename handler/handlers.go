@@ -234,13 +234,13 @@ func (h *Handler) handleCreateTier(w http.ResponseWriter, r *http.Request) {
 
 // updateTierReq 改层级入参(T10;指针/带 set 标记区分"不改"与"清空")。
 type updateTierReq struct {
-	Name         *string          `json:"name"`
-	ModelSet     *[]string        `json:"model_set"` // 传了(含空数组)=改;不传=保持
+	Name         *string           `json:"name"`
+	ModelSet     *[]string         `json:"model_set"` // 传了(含空数组)=改;不传=保持
 	ModelCap     *map[string]int64 `json:"model_cap"`
-	DailyLimit   *int64           `json:"daily_limit"`
-	WeeklyLimit  *int64           `json:"weekly_limit"`
-	MonthlyLimit *int64           `json:"monthly_limit"`
-	NewapiGroup  *string          `json:"newapi_group"`
+	DailyLimit   *int64            `json:"daily_limit"`
+	WeeklyLimit  *int64            `json:"weekly_limit"`
+	MonthlyLimit *int64            `json:"monthly_limit"`
+	NewapiGroup  *string           `json:"newapi_group"`
 }
 
 // PUT /tiers/{id} — 改层级(组织管理员;org 取自会话)。

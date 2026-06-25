@@ -10,12 +10,12 @@ import (
 // 进程内轻量指标(R2-运维:无 /metrics)。纯标准库原子计数,不引第三方依赖;
 // Prometheus 文本格式暴露。MVP 够用:总量 + 按状态段 + 在途 + 启动时刻。
 var (
-	metricReqTotal   atomic.Int64 // 累计请求数
-	metricReq2xx     atomic.Int64
-	metricReq4xx     atomic.Int64
-	metricReq5xx     atomic.Int64
-	metricInflight   atomic.Int64 // 在途请求
-	metricStartUnix  atomic.Int64 // 进程启动 Unix 秒(首次访问惰性置位由 main 注入更佳,这里惰性兜底)
+	metricReqTotal  atomic.Int64 // 累计请求数
+	metricReq2xx    atomic.Int64
+	metricReq4xx    atomic.Int64
+	metricReq5xx    atomic.Int64
+	metricInflight  atomic.Int64 // 在途请求
+	metricStartUnix atomic.Int64 // 进程启动 Unix 秒(首次访问惰性置位由 main 注入更佳,这里惰性兜底)
 )
 
 // statusRecorder 包装 ResponseWriter 以捕获状态码与响应字节数(访问日志/指标用)。

@@ -237,8 +237,8 @@ func (s *Service) AdjustQuota(ctx context.Context, c session.Claims, orgID, memb
 	}
 	grantID, err := s.store.CreateGrant(ctx, &model.Grant{
 		OrgID: orgID, MemberID: memberID, GrantType: grantType,
-		Payload:  model.GrantPayload{Delta: in.DeltaQuota, Duration: in.Duration},
-		Reason:   reason, Operator: actorOf(c), ExpireAt: expireAt,
+		Payload: model.GrantPayload{Delta: in.DeltaQuota, Duration: in.Duration},
+		Reason:  reason, Operator: actorOf(c), ExpireAt: expireAt,
 	})
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)
@@ -284,8 +284,8 @@ func (s *Service) SetTempPermission(ctx context.Context, c session.Claims, orgID
 	}
 	grantID, err := s.store.CreateGrant(ctx, &model.Grant{
 		OrgID: orgID, MemberID: memberID, GrantType: in.Type,
-		Payload:  model.GrantPayload{Model: in.Model},
-		Reason:   reason, Operator: actorOf(c), ExpireAt: in.ExpireAt,
+		Payload: model.GrantPayload{Model: in.Model},
+		Reason:  reason, Operator: actorOf(c), ExpireAt: in.ExpireAt,
 	})
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)

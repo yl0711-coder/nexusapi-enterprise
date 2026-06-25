@@ -19,6 +19,7 @@ import (
 // 与真实 new-api 完全一致。未设环境变量时自动 skip(无 Docker 也能全绿)。
 //
 // 跑法(见 README):
+//
 //	docker run -d -p 13000:3000 calciumion/new-api:v1.0.0-rc.4   # 首跑 POST /api/setup 建 root
 //	NEWAPI_CONTRACT_BASE_URL=http://localhost:13000 \
 //	NEWAPI_CONTRACT_ADMIN_TOKEN=<root_access_token> \
@@ -67,7 +68,7 @@ func TestContract_AgainstRealRC4(t *testing.T) {
 	in := BootstrapInput{
 		OrgID:       9001,
 		MemberID:    uniq,
-		Username:    fmt.Sprintf("ct_m%06d", uniq), // <=10 字符
+		Username:    fmt.Sprintf("ct_m%06d", uniq),   // <=10 字符
 		Password:    fmt.Sprintf("CtPw%06d!!", uniq), // 12 字符,含字母/数字/特殊
 		DisplayName: "契约测试成员",
 	}

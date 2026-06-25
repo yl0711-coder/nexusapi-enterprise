@@ -90,9 +90,11 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	// 5) 运营方建客户组织(连带建组织管理员)。slug 唯一(带随机后缀防重跑撞)。
 	slug := "acme-" + randSuffix()
 	var orgResp struct {
-		Org                  struct{ ID int64 `json:"id"` } `json:"org"`
-		AdminEmail           string                         `json:"admin_email"`
-		AdminInitialPassword string                         `json:"admin_initial_password"`
+		Org struct {
+			ID int64 `json:"id"`
+		} `json:"org"`
+		AdminEmail           string `json:"admin_email"`
+		AdminInitialPassword string `json:"admin_initial_password"`
 	}
 	// 改动①:建组织前先在 new-api 给该用户分组挂上可用模型分组(否则 CreateOrg 校验返 422)。
 	orgGrp := "grp-" + slug
@@ -116,12 +118,16 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	adminTok := login(api, orgResp.AdminEmail, orgResp.AdminInitialPassword)
 
 	// 7) 管理员建团队 + 层级,设默认层级。
-	var teamResp struct{ ID int64 `json:"id"` }
+	var teamResp struct {
+		ID int64 `json:"id"`
+	}
 	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/teams", orgID), adminTok,
 		map[string]any{"name": "研发一组"}, &teamResp); st != http.StatusCreated {
 		t.Fatalf("建团队 HTTP=%d", st)
 	}
-	var tierResp struct{ ID int64 `json:"id"` }
+	var tierResp struct {
+		ID int64 `json:"id"`
+	}
 	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/tiers", orgID), adminTok,
 		map[string]any{"name": "标准档", "model_set": []string{"gpt-5.4", "claude-sonnet-4-6", "gpt-5-mini"}, "monthly_limit": 25000000, "model_cap": map[string]any{"gpt-5-mini": 1000000}}, &tierResp); st != http.StatusCreated {
 		t.Fatalf("建层级 HTTP=%d", st)
@@ -159,7 +165,9 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 			KeyMasked string `json:"key_masked"`
 			Status    string `json:"status"`
 		} `json:"list"`
-		Pagination struct{ Total int `json:"total"` } `json:"pagination"`
+		Pagination struct {
+			Total int `json:"total"`
+		} `json:"pagination"`
 	}
 	rawList := api.doRaw("GET", fmt.Sprintf("/api/v1/organizations/%d/members?page=1&page_size=20", orgID), adminTok, nil)
 	if strings.Contains(rawList, originalKey) {
@@ -210,9 +218,11 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	// (c) 跨 org:另建一个组织,用其管理员访问本 org 成员列表 → 404(不暴露存在性)。
 	slug2 := "beta-" + randSuffix()
 	var org2 struct {
-		Org                  struct{ ID int64 `json:"id"` } `json:"org"`
-		AdminEmail           string                         `json:"admin_email"`
-		AdminInitialPassword string                         `json:"admin_initial_password"`
+		Org struct {
+			ID int64 `json:"id"`
+		} `json:"org"`
+		AdminEmail           string `json:"admin_email"`
+		AdminInitialPassword string `json:"admin_initial_password"`
 	}
 	orgGrp2 := "grp-" + slug2
 	if err := upstream.AddOrgUsableGroup(ctx, orgGrp2, "vip"); err != nil {
@@ -733,45 +743,84 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	}
 	// 审批阈值 E13:配 + 读。
 	api.do("PUT", fmt.Sprintf("/api/v1/organizations/%d/approval-rules", orgID), adminTok, map[string]any{"auto_max_quota": 60000000}, nil)
-	var rules struct{ AutoMax int64 `json:"auto_max_quota"` }
+	var rules struct {
+		AutoMax int64 `json:"auto_max_quota"`
+	}
 	api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/approval-rules", orgID), adminTok, nil, &rules)
-	if rules.AutoMax != 60000000 { t.Errorf("审批阈值配置回读应=6e7,得 %d", rules.AutoMax) } else { t.Log("E13 审批阈值可配 ok") }
+	if rules.AutoMax != 60000000 {
+		t.Errorf("审批阈值配置回读应=6e7,得 %d", rules.AutoMax)
+	} else {
+		t.Log("E13 审批阈值可配 ok")
+	}
 	// 配额策略 E PUT/GET。
 	api.do("PUT", fmt.Sprintf("/api/v1/organizations/%d/quota-policies", orgID), adminTok, map[string]any{"scope": "member", "scope_id": openResp.MemberID, "period": "daily", "limit_quota": 25000000}, nil)
-	if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/quota-policies", orgID), adminTok, nil, nil); st != http.StatusOK { t.Errorf("配额策略列表应 200,得 %d", st) } else { t.Log("配额策略 PUT/GET ok") }
+	if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/quota-policies", orgID), adminTok, nil, nil); st != http.StatusOK {
+		t.Errorf("配额策略列表应 200,得 %d", st)
+	} else {
+		t.Log("配额策略 PUT/GET ok")
+	}
 	// 角色任命 E17。
-	if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/role", openResp.MemberID), adminTok, map[string]any{"role": "team_leader"}, nil); st != http.StatusOK { t.Errorf("角色任命应 200,得 %d", st) } else { t.Log("E17 角色任命 ok") }
+	if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/role", openResp.MemberID), adminTok, map[string]any{"role": "team_leader"}, nil); st != http.StatusOK {
+		t.Errorf("角色任命应 200,得 %d", st)
+	} else {
+		t.Log("E17 角色任命 ok")
+	}
 	api.do("POST", fmt.Sprintf("/api/v1/members/%d/role", openResp.MemberID), adminTok, map[string]any{"role": "member"}, nil) // 改回
 	// 批量导入 US-02。
-	var bulk struct{ Success int `json:"success"`; Failed int `json:"failed"` }
+	var bulk struct {
+		Success int `json:"success"`
+		Failed  int `json:"failed"`
+	}
 	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/members:bulk", orgID), adminTok, map[string]any{"names": []string{"批量甲", "批量乙", "批量甲"}, "tier_id": tierResp.ID}, &bulk); st != http.StatusOK || bulk.Success != 2 || bulk.Failed != 1 {
 		t.Errorf("批量导入应 成功2失败1(重名跳过): %+v st=%d", bulk, st)
-	} else { t.Log("US-02 批量导入 ok: 成功2 失败1(同批重名跳过)") }
+	} else {
+		t.Log("US-02 批量导入 ok: 成功2 失败1(同批重名跳过)")
+	}
 	// 服务状态(全角色)。
-	if st := api.do("GET", "/api/v1/service-status", memberTok, nil, nil); st != http.StatusOK { t.Errorf("服务状态应 200,得 %d", st) }
+	if st := api.do("GET", "/api/v1/service-status", memberTok, nil, nil); st != http.StatusOK {
+		t.Errorf("服务状态应 200,得 %d", st)
+	}
 	// IP 白名单 E22(成员对自己)。
-	if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/key:ip-whitelist", openResp.MemberID), memberTok, map[string]any{"allow_ips": "203.0.113.0/24"}, nil); st != http.StatusOK { t.Errorf("IP白名单应 200,得 %d", st) } else { t.Log("E22 IP白名单 ok") }
+	if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/key:ip-whitelist", openResp.MemberID), memberTok, map[string]any{"allow_ips": "203.0.113.0/24"}, nil); st != http.StatusOK {
+		t.Errorf("IP白名单应 200,得 %d", st)
+	} else {
+		t.Log("E22 IP白名单 ok")
+	}
 	// 用量导出 CSV(不走信封,200 即可)。
-	if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/usage/export", orgID), adminTok, nil, nil); st != http.StatusOK { t.Errorf("用量导出应 200,得 %d", st) }
+	if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/usage/export", orgID), adminTok, nil, nil); st != http.StatusOK {
+		t.Errorf("用量导出应 200,得 %d", st)
+	}
 	// 周期重置 worker:有 daily 策略 + 首次未重置 → 应重置该成员(返回>=1 或无错)。
-	if rn, rerr := svc.ResetDuePolicies(ctx); rerr != nil { t.Errorf("周期重置失败: %v", rerr) } else { t.Logf("周期重置 ok: 本次重置成员数=%d", rn) }
+	if rn, rerr := svc.ResetDuePolicies(ctx); rerr != nil {
+		t.Errorf("周期重置失败: %v", rerr)
+	} else {
+		t.Logf("周期重置 ok: 本次重置成员数=%d", rn)
+	}
 	// D1 退款冲正(运营方减余额)+ S1 守恒:total_recharged 不被污染。
 	var balBefore2 struct {
-		Balance    int64 `json:"balance_quota"`
-		Recharged  int64 `json:"total_recharged_quota"`
+		Balance   int64 `json:"balance_quota"`
+		Recharged int64 `json:"total_recharged_quota"`
 	}
 	api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/balance", orgID), opTok, nil, &balBefore2)
 	if balBefore2.Balance > 0 {
-		var deb struct{ After int64 `json:"balance_quota_after"` }
+		var deb struct {
+			After int64 `json:"balance_quota_after"`
+		}
 		if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/debits", orgID), opTok, map[string]any{"amount_quota": 1000000, "reason": "退款冲正"}, &deb); st != http.StatusOK || deb.After != balBefore2.Balance-1000000 {
 			t.Errorf("减余额冲正应 -1e6: before=%d after=%d st=%d", balBefore2.Balance, deb.After, st)
-		} else { t.Log("D1 退款冲正 ok: 运营方减余额 + 留痕") }
+		} else {
+			t.Log("D1 退款冲正 ok: 运营方减余额 + 留痕")
+		}
 		// S1:冲正后累计充值不变(退款走 total_refunded,不污染 total_recharged)。
-		var balAfter2 struct{ Recharged int64 `json:"total_recharged_quota"` }
+		var balAfter2 struct {
+			Recharged int64 `json:"total_recharged_quota"`
+		}
 		api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/balance", orgID), opTok, nil, &balAfter2)
 		if balAfter2.Recharged != balBefore2.Recharged {
 			t.Errorf("S1:冲正污染了累计充值 %d→%d", balBefore2.Recharged, balAfter2.Recharged)
-		} else { t.Log("S1 守恒 ok: 冲正不动累计充值(退款独立流水)") }
+		} else {
+			t.Log("S1 守恒 ok: 冲正不动累计充值(退款独立流水)")
+		}
 		// 组织管理员减余额 → 403(动钱红线)。
 		if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/debits", orgID), adminTok, map[string]any{"amount_quota": 1, "reason": "x"}, nil); st != http.StatusForbidden {
 			t.Errorf("组织管理员减余额应 403,得 %d", st)
@@ -985,7 +1034,9 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	// E1 破玻璃本期关。
 	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/support-sessions", orgID), opTok, map[string]any{"scope": "assist", "grant_type": "break_glass", "ttl_seconds": 600}, nil); st != http.StatusForbidden {
 		t.Errorf("破玻璃本期应 403(二期),得 %d", st)
-	} else { t.Log("E1 破玻璃本期关 ok: → 403") }
+	} else {
+		t.Log("E1 破玻璃本期关 ok: → 403")
+	}
 	t.Log("补全功能全通过:组织设置/审批阈值/配额策略/角色任命/批量导入/服务状态/IP白名单/用量导出/周期重置/退款冲正/破玻璃关")
 
 	// ===== 里程碑 3b:读 logs 扣费 + 去重 + 硬停(需 new-api 库连接造日志,本地集成 compose)=====
@@ -1047,7 +1098,7 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		balB2 := readBal()
 		nowSec := time.Now().Unix()
 		seedConsumptionLog(t, newapiSQLDSN, uid, "gpt-5-mini", 1500000, nowSec-3) // 同小时、新日志(更高 id)
-		time.Sleep(4 * time.Second)                                              // 等过滞后窗口,使该日志进入下一次结算窗口
+		time.Sleep(4 * time.Second)                                               // 等过滞后窗口,使该日志进入下一次结算窗口
 		d, derr := svc.RunSettlement(ctx)
 		if derr != nil {
 			t.Fatalf("同小时第二笔结算失败: %v", derr)
@@ -1462,7 +1513,9 @@ func setupRC4(t *testing.T, base string) (string, int) {
 		defer resp.Body.Close()
 		var env struct {
 			Success bool `json:"success"`
-			Data    struct{ ID int `json:"id"` } `json:"data"`
+			Data    struct {
+				ID int `json:"id"`
+			} `json:"data"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&env)
 		return env.Data.ID, env.Success

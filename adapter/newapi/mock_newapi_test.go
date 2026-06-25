@@ -68,7 +68,7 @@ func newFakeNewapi() *fakeNewapi {
 		calls:       map[string]int{},
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/user/", f.handleUser)        // POST create / PUT update / GET search 落到这或下面
+	mux.HandleFunc("/api/user/", f.handleUser)         // POST create / PUT update / GET search 落到这或下面
 	mux.HandleFunc("/api/user/search", f.handleSearch) // GET search
 	mux.HandleFunc("/api/user/login", f.handleLogin)
 	mux.HandleFunc("/api/user/token", f.handleGetToken)

@@ -35,12 +35,12 @@ const (
 
 // Organization 对应 organization 表(09 §1)。本期只用治理相关字段,计费字段后续里程碑接。
 type Organization struct {
-	ID            int64
-	Name          string
-	Slug          string
-	Status        string
-	Timezone      string
-	NewapiUserGroup *string // 改动①:组织专属 new-api 用户分组(列 newapi_group;隔离边界+唯一;nil 回落 org_%d)
+	ID                int64
+	Name              string
+	Slug              string
+	Status            string
+	Timezone          string
+	NewapiUserGroup   *string // 改动①:组织专属 new-api 用户分组(列 newapi_group;隔离边界+唯一;nil 回落 org_%d)
 	DefaultTierID     *int64
 	BillingMode       string
 	DefaultTokenGroup *string    // 组织级默认令牌计价分组(D1 两级;nil=回落 default)
@@ -191,10 +191,10 @@ type RechargeRequest struct {
 
 // approval 状态(09 §14)+ 请求类型。
 const (
-	ApprovalPending     = "pending"      // 待一审(团队负责人)
-	ApprovalL1Approved  = "l1_approved"  // 一审过,待二审(组织管理员)
-	ApprovalApproved    = "approved"     // 终批通过
-	ApprovalRejected    = "rejected"     // 驳回
+	ApprovalPending     = "pending"       // 待一审(团队负责人)
+	ApprovalL1Approved  = "l1_approved"   // 一审过,待二审(组织管理员)
+	ApprovalApproved    = "approved"      // 终批通过
+	ApprovalRejected    = "rejected"      // 驳回
 	ApprovalAutoApprove = "auto_approved" // 自动通过
 	ApprovalCancelled   = "cancelled"
 

@@ -15,6 +15,7 @@ import (
 // 白名单写端点过闸(无 token → requireAuth 401)。不带 Authorization:
 //   - 被封锁端点 → mvpGate 先于 requireAuth 返回 404(若没封锁,无 token 会是 401);
 //   - 白名单端点 → 过闸到 requireAuth → 401(若被错封,会是 404)。
+//
 // 401 vs 404 干净区分"是否被封锁",无需真 token / MySQL / rc.4。
 func TestMVPGate_BlocksMoneyAndControl(t *testing.T) {
 	signer, err := session.NewSigner([]byte("mvp-gate-test-session-key-32bytes!"), time.Hour)

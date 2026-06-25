@@ -44,10 +44,10 @@ type ConfigureDiscountInput struct {
 
 // PricingView 折扣回显。
 type PricingView struct {
-	Mode        string                   `json:"mode"`
-	UserGroup   string                   `json:"user_group"`
-	Entries     map[string]discountEntry `json:"entries"`               // 平台镜像(每令牌分组)
-	Upstream    map[string]float64       `json:"upstream_special_ratio"` // new-api 当前实际特殊倍率(只读回显)
+	Mode      string                   `json:"mode"`
+	UserGroup string                   `json:"user_group"`
+	Entries   map[string]discountEntry `json:"entries"`                // 平台镜像(每令牌分组)
+	Upstream  map[string]float64       `json:"upstream_special_ratio"` // new-api 当前实际特殊倍率(只读回显)
 }
 
 // ConfigureDiscount 配置组织折扣(仅运营方;A1):写 new-api 分组特殊倍率

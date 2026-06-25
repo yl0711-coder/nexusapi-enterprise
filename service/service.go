@@ -19,11 +19,11 @@ type Adapter = newapi.NewapiAdapter
 
 // Service 聚合各资源用例,持有依赖。
 type Service struct {
-	store   *repo.Store
+	store    *repo.Store
 	upstream Adapter
-	keyring *crypto.Keyring
-	signer  *session.Signer
-	log     *slog.Logger
+	keyring  *crypto.Keyring
+	signer   *session.Signer
+	log      *slog.Logger
 
 	// quotaLocker 串行化同一组织的 override 下发(GZ-04 返工·方案①):消除 settlement converge 与
 	// quota-worker 两 goroutine 在 gateByOrgStatus"读状态→决策→下发"上的 TOCTOU。进程内锁,多节点需换分布式锁。

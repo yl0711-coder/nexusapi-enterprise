@@ -17,10 +17,10 @@ import (
 
 // OpenSupportInput 开支持会话入参(运营方,08 §2.2 / §3.2)。
 type OpenSupportInput struct {
-	Scope     string // readonly / assist
-	GrantType string // authorized / break_glass(assist 必填)
+	Scope      string // readonly / assist
+	GrantType  string // authorized / break_glass(assist 必填)
 	TTLSeconds int
-	Reason    string
+	Reason     string
 }
 
 // SupportSessionResult 开会话产物:新会话 token(运营方据此以客户管理员身份在该 org 操作)+ 会话信息。

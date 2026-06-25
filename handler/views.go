@@ -121,14 +121,14 @@ const quotaPerUnit = 500000.0
 func toDisplay(quota int64) float64 { return float64(quota) / quotaPerUnit }
 
 type balanceView struct {
-	OrgID          int64   `json:"org_id"`
-	TotalRecharged int64   `json:"total_recharged_quota"`
-	TotalConsumed  int64   `json:"total_consumed_quota"`
-	TotalRefunded  int64   `json:"total_refunded_quota"`
-	Balance        int64   `json:"balance_quota"`
-	LowWatermark   int64   `json:"low_watermark_quota"`
-	Currency       string  `json:"currency"`        // 对外币种(口径固化在后端,M2)
-	BalanceDisplay float64 `json:"balance_display"` // 按币种换算的金额(quota/QuotaPerUnit)
+	OrgID            int64   `json:"org_id"`
+	TotalRecharged   int64   `json:"total_recharged_quota"`
+	TotalConsumed    int64   `json:"total_consumed_quota"`
+	TotalRefunded    int64   `json:"total_refunded_quota"`
+	Balance          int64   `json:"balance_quota"`
+	LowWatermark     int64   `json:"low_watermark_quota"`
+	Currency         string  `json:"currency"`        // 对外币种(口径固化在后端,M2)
+	BalanceDisplay   float64 `json:"balance_display"` // 按币种换算的金额(quota/QuotaPerUnit)
 	RechargedDisplay float64 `json:"total_recharged_display"`
 	ConsumedDisplay  float64 `json:"total_consumed_display"`
 	RefundedDisplay  float64 `json:"total_refunded_display"`
@@ -145,8 +145,8 @@ func toBalanceView(b *model.Balance) balanceView {
 }
 
 type rechargeView struct {
-	ID          int64  `json:"id"`
-	AmountQuota int64  `json:"amount_quota"`
+	ID           int64  `json:"id"`
+	AmountQuota  int64  `json:"amount_quota"`
 	TransferNo   string `json:"transfer_no"`
 	Operator     string `json:"operator"`
 	OperatorName string `json:"operator_name,omitempty"` // 可读操作者名(T14)
@@ -184,15 +184,15 @@ type approvalView struct {
 	ID            int64  `json:"id"`
 	ApplicantID   int64  `json:"applicant_id"`
 	ApplicantName string `json:"applicant_name,omitempty"`
-	TeamID      *int64 `json:"team_id"`
-	RequestType string `json:"request_type"`
-	Model       string `json:"model,omitempty"`
-	Amount      int64  `json:"amount_quota"`
-	Duration    string `json:"duration"`
-	Reason      string `json:"reason,omitempty"`
-	State       string `json:"state"`
-	IsLevel2    bool   `json:"is_level2"`
-	CreatedAt   string `json:"created_at"`
+	TeamID        *int64 `json:"team_id"`
+	RequestType   string `json:"request_type"`
+	Model         string `json:"model,omitempty"`
+	Amount        int64  `json:"amount_quota"`
+	Duration      string `json:"duration"`
+	Reason        string `json:"reason,omitempty"`
+	State         string `json:"state"`
+	IsLevel2      bool   `json:"is_level2"`
+	CreatedAt     string `json:"created_at"`
 }
 
 func toApprovalView(a *model.Approval) approvalView {

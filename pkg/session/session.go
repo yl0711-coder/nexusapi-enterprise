@@ -50,10 +50,10 @@ func (r Role) Valid() bool {
 
 // Claims 是会话载荷。服务端据此判鉴权;不放任何敏感凭证。
 type Claims struct {
-	MemberID int64  `json:"mid"`
-	OrgID    int64  `json:"oid"`
-	Role     Role   `json:"role"`
-	TeamID   int64  `json:"tid,omitempty"` // 团队负责人/成员的所辖团队;0=无
+	MemberID int64 `json:"mid"`
+	OrgID    int64 `json:"oid"`
+	Role     Role  `json:"role"`
+	TeamID   int64 `json:"tid,omitempty"` // 团队负责人/成员的所辖团队;0=无
 	// SupportSessionID 非 0 表示运营方处于支持态(只读/协助),写端点据此叠加闸(08 §2.2)。
 	SupportSessionID int64 `json:"sid,omitempty"`
 	// SupportScope 支持态能力:readonly(只读,拒所有写)/ assist(协助,可写但动钱/读key红线挡)。

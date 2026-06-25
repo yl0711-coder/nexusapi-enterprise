@@ -21,8 +21,8 @@ type DriftKind string
 
 const (
 	DriftTampered    DriftKind = "tampered"     // 己方特殊倍率被外部改(主站实际 != 平台镜像 Abs)
-	DriftBaseShifted DriftKind = "base_shifted"  // 主站基础倍率变动,折扣率已失真(实际折扣 != 配置折扣)
-	DriftMissing     DriftKind = "missing"       // 平台镜像有折扣但主站特殊倍率已消失
+	DriftBaseShifted DriftKind = "base_shifted" // 主站基础倍率变动,折扣率已失真(实际折扣 != 配置折扣)
+	DriftMissing     DriftKind = "missing"      // 平台镜像有折扣但主站特殊倍率已消失
 )
 
 // DiscountDrift 一条对账发现(只读)。

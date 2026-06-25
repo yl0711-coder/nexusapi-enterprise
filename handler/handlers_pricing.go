@@ -8,9 +8,9 @@ import (
 
 func pricingView(v *service.PricingView) map[string]any {
 	return map[string]any{
-		"mode":                  v.Mode,
-		"user_group":            v.UserGroup,
-		"entries":               v.Entries,   // 平台镜像:每令牌分组 {pct, base, abs}
+		"mode":                   v.Mode,
+		"user_group":             v.UserGroup,
+		"entries":                v.Entries,  // 平台镜像:每令牌分组 {pct, base, abs}
 		"upstream_special_ratio": v.Upstream, // new-api 当前实际特殊倍率(只读回显)
 	}
 }

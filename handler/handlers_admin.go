@@ -16,11 +16,20 @@ type orgSettingsReq struct {
 func (h *Handler) handleUpdateOrg(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())
 	orgID, err := pathInt64(r, "id")
-	if err != nil { writeErr(w, r, err); return }
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
 	var in orgSettingsReq
-	if err := decodeJSON(r, &in); err != nil { writeErr(w, r, err); return }
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, r, err)
+		return
+	}
 	o, err := h.svc.UpdateOrgSettings(r.Context(), c, orgID, in.Name, in.Timezone, in.DefaultTierID)
-	if err != nil { writeErr(w, r, err); return }
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
 	writeOK(w, r, http.StatusOK, toOrgView(o))
 }
 
@@ -37,19 +46,34 @@ func rulesView(r *repo.ApprovalRules) map[string]any {
 func (h *Handler) handleGetApprovalRules(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())
 	orgID, err := pathInt64(r, "id")
-	if err != nil { writeErr(w, r, err); return }
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
 	rr, err := h.svc.GetApprovalRules(r.Context(), c, orgID)
-	if err != nil { writeErr(w, r, err); return }
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
 	writeOK(w, r, http.StatusOK, rulesView(rr))
 }
 func (h *Handler) handleSetApprovalRules(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())
 	orgID, err := pathInt64(r, "id")
-	if err != nil { writeErr(w, r, err); return }
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
 	var in approvalRulesReq
-	if err := decodeJSON(r, &in); err != nil { writeErr(w, r, err); return }
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, r, err)
+		return
+	}
 	rr, err := h.svc.SetApprovalRules(r.Context(), c, orgID, in.AutoMaxQuota, in.L1MaxQuota, in.AutoMaxDays)
-	if err != nil { writeErr(w, r, err); return }
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
 	writeOK(w, r, http.StatusOK, rulesView(rr))
 }
 
@@ -62,11 +86,20 @@ type updateMemberReq struct {
 func (h *Handler) handleUpdateMember(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())
 	mid, err := pathInt64(r, "id")
-	if err != nil { writeErr(w, r, err); return }
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
 	var in updateMemberReq
-	if err := decodeJSON(r, &in); err != nil { writeErr(w, r, err); return }
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, r, err)
+		return
+	}
 	m, err := h.svc.UpdateMember(r.Context(), c, c.OrgID, mid, in.TeamID, in.TierID)
-	if err != nil { writeErr(w, r, err); return }
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
 	writeOK(w, r, http.StatusOK, toMemberView(m))
 }
 
@@ -78,10 +111,19 @@ type roleReq struct {
 func (h *Handler) handleAssignRole(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())
 	mid, err := pathInt64(r, "id")
-	if err != nil { writeErr(w, r, err); return }
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
 	var in roleReq
-	if err := decodeJSON(r, &in); err != nil { writeErr(w, r, err); return }
-	if err := h.svc.AssignRole(r.Context(), c, c.OrgID, mid, in.Role); err != nil { writeErr(w, r, err); return }
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	if err := h.svc.AssignRole(r.Context(), c, c.OrgID, mid, in.Role); err != nil {
+		writeErr(w, r, err)
+		return
+	}
 	writeOK(w, r, http.StatusOK, map[string]any{"member_id": mid, "role": in.Role})
 }
 
@@ -92,13 +134,22 @@ func policyView(p *repo.QuotaPolicy) map[string]any {
 func (h *Handler) handleListPolicies(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())
 	orgID, err := pathInt64(r, "id")
-	if err != nil { writeErr(w, r, err); return }
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
 	ps, err := h.svc.ListQuotaPolicies(r.Context(), c, orgID)
-	if err != nil { writeErr(w, r, err); return }
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
 	out := make([]map[string]any, 0, len(ps))
-	for _, p := range ps { out = append(out, policyView(p)) }
+	for _, p := range ps {
+		out = append(out, policyView(p))
+	}
 	writeOK(w, r, http.StatusOK, out)
 }
+
 type policyReq struct {
 	Scope       string `json:"scope"`
 	ScopeID     int64  `json:"scope_id"`
@@ -106,14 +157,24 @@ type policyReq struct {
 	LimitQuota  int64  `json:"limit_quota"`
 	ResetAnchor string `json:"reset_anchor"`
 }
+
 func (h *Handler) handleSetPolicy(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())
 	orgID, err := pathInt64(r, "id")
-	if err != nil { writeErr(w, r, err); return }
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
 	var in policyReq
-	if err := decodeJSON(r, &in); err != nil { writeErr(w, r, err); return }
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, r, err)
+		return
+	}
 	if err := h.svc.SetQuotaPolicy(r.Context(), c, orgID, &repo.QuotaPolicy{
 		Scope: in.Scope, ScopeID: in.ScopeID, Period: in.Period, LimitQuota: in.LimitQuota, ResetAnchor: in.ResetAnchor,
-	}); err != nil { writeErr(w, r, err); return }
+	}); err != nil {
+		writeErr(w, r, err)
+		return
+	}
 	writeOK(w, r, http.StatusOK, map[string]any{"ok": true})
 }

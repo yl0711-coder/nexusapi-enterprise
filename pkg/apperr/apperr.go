@@ -85,6 +85,7 @@ func ReadonlyBlocked(msg string) *Error {
 func MoneyRedline(msg string) *Error {
 	return New(CodeMoneyRedline, http.StatusForbidden, orDefault(msg, "涉及资金的操作触发红线,已拦截"))
 }
+
 // InvalidParam 业务/语义校验失败(金额非法、超长、超阈值、格式不合规等)。
 // HTTP 422(规格 08 验收标准统一口径;10 §1.2 允许二选一,本项目选 422),
 // 与协议级解析错(400,见 BadRequest)区分。前端仍按信封 code 提示,按 HTTP 类决定重试/跳登录。

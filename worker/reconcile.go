@@ -40,6 +40,7 @@ func (w *ReconcileWorker) Run(ctx context.Context) {
 		case <-t.C:
 			safeTick(w.log, "reconcile", func() {
 				rc, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				defer cancel() // panic 时也释放(safeTick 会 recover),不泄漏到 2min 超时(P1-4)
 				drifts, err := w.svc.ReconcileDiscounts(rc)
 				if err != nil {
 					w.log.Error("折扣对账失败(下轮重试)", "err", err)
@@ -54,7 +55,6 @@ func (w *ReconcileWorker) Run(ctx context.Context) {
 				if lerr := w.svc.ReconcileBalanceLedger(rc); lerr != nil {
 					w.log.Error("余额-台账对账失败(下轮重试)", "err", lerr)
 				}
-				cancel()
 			})
 		}
 	}

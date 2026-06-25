@@ -115,11 +115,18 @@ func (s *Service) UpdateMember(ctx context.Context, c session.Claims, orgID, mem
 	if err := s.store.UpdateMemberTeamTier(ctx, orgID, memberID, teamID, tierID); err != nil {
 		return nil, apperr.Internal("").WithCause(err)
 	}
-	// 改层级 → 重算 override(基线变了)。
+	// 改团队或层级 → 重算 override:团队级显式策略与团队默认档都进基线(resolveBaseQuota),
+	// 故改 team 同样会变基线,不能只在改 tier 时重算(否则 new-api quota 留旧团队基线,直到下次 reset 才自愈)。
+	// nil=未改(UpdateMemberTeamTier 用 COALESCE 不动该列),只在非 nil 时同步内存态 m,保持与 DB 一致。
+	if teamID != nil {
+		m.TeamID = teamID
+	}
 	if tierID != nil {
 		m.TierID = tierID
+	}
+	if teamID != nil || tierID != nil {
 		if _, err := s.applyMemberOverride(ctx, m); err != nil {
-			s.log.Warn("改层级后重算 override 失败", "member_id", memberID, "err", err)
+			s.log.Warn("改团队/层级后重算 override 失败", "member_id", memberID, "err", err)
 		}
 	}
 	s.audit(ctx, c, orgID, "update_member", "member", &memberID, map[string]any{"team_id": teamID, "tier_id": tierID})
@@ -170,6 +177,11 @@ func (s *Service) SetQuotaPolicy(ctx context.Context, c session.Claims, orgID in
 	}
 	if p.Scope != "org" && p.Scope != "team" && p.Scope != "member" {
 		return apperr.InvalidParam("scope 须为 org/team/member")
+	}
+	// team_leader 只能设本团队(team 维度)策略,不得越权设 org/他团队额度策略(P1-2)。
+	// org_admin/operator 不受此限。本端点 MVP 白名单外(灰度不可达),开控制面第一天即生效。
+	if c.Role == session.RoleTeamLeader && (p.Scope != "team" || p.ScopeID != c.TeamID) {
+		return apperr.Forbidden("团队负责人只能设置本团队的额度策略")
 	}
 	if p.Period != "daily" && p.Period != "weekly" && p.Period != "monthly" {
 		return apperr.InvalidParam("period 须为 daily/weekly/monthly")

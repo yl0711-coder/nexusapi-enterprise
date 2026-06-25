@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nexusapi-platform/enterprise/model"
+	"github.com/nexusapi-platform/enterprise/pkg/apperr"
 	"github.com/nexusapi-platform/enterprise/repo"
 )
 
@@ -98,7 +99,7 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 					continue
 				}
 				if merr != nil {
-					return 0, mapUpstream(merr)
+					return 0, apperr.Internal("").WithCause(merr) // DB 错,非上游故障(P1-3:勿误走 mapUpstream)
 				}
 				memberCache[int64(e.UserID)] = mm
 				m = mm
@@ -323,7 +324,7 @@ func (s *Service) ReconcileBilling(ctx context.Context) error {
 					continue
 				}
 				if merr != nil {
-					return mapUpstream(merr)
+					return apperr.Internal("").WithCause(merr) // DB 错,非上游故障(P1-3:勿误走 mapUpstream)
 				}
 				memberCache[int64(e.UserID)] = mm
 				m = mm

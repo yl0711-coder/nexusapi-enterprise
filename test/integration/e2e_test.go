@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -29,6 +30,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/nexusapi-platform/enterprise/adapter/newapi"
 	"github.com/nexusapi-platform/enterprise/handler"
+	"github.com/nexusapi-platform/enterprise/pkg/apperr"
 	"github.com/nexusapi-platform/enterprise/pkg/crypto"
 	"github.com/nexusapi-platform/enterprise/pkg/session"
 	"github.com/nexusapi-platform/enterprise/repo"
@@ -1290,6 +1292,78 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 			t.Errorf("🔴 GZ-03 洞3:孤儿消费应触发 orphan_consumption 告警(审计),未见")
 		} else {
 			t.Logf("GZ-03 洞3 ok: 孤儿消费告警已落审计(orphan_consumption × %d)", alertCnt)
+		}
+	}
+
+	// ===== P1-2 回归(授权面·service 层直断):team_leader 越权设额度策略被拒 =====
+	// 不造复杂数据、不走真 new-api:伪造 team_leader claims 直调 SetQuotaPolicy。
+	// 越权(设 org 级 / 他团队)→ 403;设本团队 → 放行。先 red(未修时越权放行)后 green。
+	{
+		isForbidden := func(err error) bool {
+			var ae *apperr.Error
+			return errors.As(err, &ae) && ae.HTTPStatus == http.StatusForbidden
+		}
+		tlClaims := session.Claims{MemberID: openResp.MemberID, OrgID: orgID, Role: session.RoleTeamLeader, TeamID: teamResp.ID}
+		if err := svc.SetQuotaPolicy(ctx, tlClaims, orgID, &repo.QuotaPolicy{Scope: "org", ScopeID: orgID, Period: "monthly", LimitQuota: 1}); !isForbidden(err) {
+			t.Errorf("🔴 P1-2:team_leader 设 org 级额度策略必须 403(越权),得 %v", err)
+		}
+		if err := svc.SetQuotaPolicy(ctx, tlClaims, orgID, &repo.QuotaPolicy{Scope: "team", ScopeID: teamResp.ID + 999, Period: "monthly", LimitQuota: 1}); !isForbidden(err) {
+			t.Errorf("🔴 P1-2:team_leader 设他团队额度策略必须 403(越权),得 %v", err)
+		}
+		if err := svc.SetQuotaPolicy(ctx, tlClaims, orgID, &repo.QuotaPolicy{Scope: "team", ScopeID: teamResp.ID, Period: "monthly", LimitQuota: 5000000}); err != nil {
+			t.Errorf("🔴 P1-2:team_leader 设本团队额度策略应放行,得 %v", err)
+		} else {
+			t.Logf("P1-2 ok: team_leader 越权设 org/他团队策略被拒(403)、设本团队放行")
+		}
+	}
+
+	// ===== P1-1 回归(涉钱基线·真验 new-api quota):改 team 重算 override =====
+	// 最小两团队分叉:各挂 team 级显式额度策略(25M / 100M;explicitOverride 按 team_id 命中、
+	// 优先于成员 tier,故 team 变更直接改基线)。开一名成员到 A 队,从 A 队 PATCH 到 B 队(只传 teamID)
+	// → new-api 该用户 quota 必须 25M→100M。先 red(未修时改 team 不重算、quota 不变)后 green。
+	// (注:开通成员必落显式 tier,故不能靠"团队默认档"分叉——用 team 级策略才稳。)
+	{
+		mkTeam := func(name string) int64 {
+			var tr struct {
+				ID int64 `json:"id"`
+			}
+			if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/teams", orgID), adminTok,
+				map[string]any{"name": name}, &tr); st != http.StatusCreated {
+				t.Fatalf("P1-1 建团队 %s HTTP=%d", name, st)
+			}
+			return tr.ID
+		}
+		teamA := mkTeam("P1-1队A")
+		teamB := mkTeam("P1-1队B")
+		// 两团队各挂不同 team 级月额度策略(org_admin 身份直调 service)。
+		adminCl := session.Claims{OrgID: orgID, Role: session.RoleOrgAdmin}
+		if err := svc.SetQuotaPolicy(ctx, adminCl, orgID, &repo.QuotaPolicy{Scope: "team", ScopeID: teamA, Period: "monthly", LimitQuota: 25000000}); err != nil {
+			t.Fatalf("P1-1 设 A 队策略失败: %v", err)
+		}
+		if err := svc.SetQuotaPolicy(ctx, adminCl, orgID, &repo.QuotaPolicy{Scope: "team", ScopeID: teamB, Period: "monthly", LimitQuota: 100000000}); err != nil {
+			t.Fatalf("P1-1 设 B 队策略失败: %v", err)
+		}
+
+		var om struct {
+			MemberID     int64 `json:"member_id"`
+			NewapiUserID int64 `json:"newapi_user_id"`
+		}
+		if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/members", orgID), adminTok,
+			map[string]any{"name": "P1-1基线分叉", "team_id": teamA}, &om); st != http.StatusCreated {
+			t.Fatalf("P1-1 开通成员 HTTP=%d", st)
+		}
+		if qA, _ := getNewapiUser(t, newapiURL, adminToken, adminUID, om.NewapiUserID); qA != 25000000 {
+			t.Errorf("P1-1 前置:A 队(策略25M)成员基线应=25000000,得 %d", qA)
+		}
+		// 只改 team → B 队,不传 tier。修复后必须重算下发(team 级策略基线变了)。
+		if st := api.do("PATCH", fmt.Sprintf("/api/v1/members/%d", om.MemberID), adminTok,
+			map[string]any{"team_id": teamB}, nil); st != http.StatusOK {
+			t.Fatalf("P1-1 改团队 HTTP=%d", st)
+		}
+		if qB, _ := getNewapiUser(t, newapiURL, adminToken, adminUID, om.NewapiUserID); qB != 100000000 {
+			t.Errorf("🔴 P1-1:改 team A→B 后 new-api quota 应重算为 B 队策略 100000000,得 %d(改 team 未重算=留旧基线)", qB)
+		} else {
+			t.Logf("P1-1 ok: 改 team A→B,new-api quota 25M→100M(团队基线重算并下发)")
 		}
 	}
 

@@ -15,10 +15,11 @@ const usageMaxPages = 20
 
 // UsageBucket 是一个聚合项(按模型或成员)。
 type UsageBucket struct {
-	Key           string `json:"key"`             // 模型名 / 成员标识(byMember 时=new-api user_id)
-	Label         string `json:"label,omitempty"` // 改动④:byMember 的员工显示名(display_name||login_email);空=前端回落显示 Key
-	ConsumedQuota int64  `json:"consumed_quota"`  // 消耗 quota
-	Count         int    `json:"count"`           // 调用次数
+	Key           string `json:"key"`                 // 模型名 / 成员标识(byMember 时=new-api user_id)
+	Label         string `json:"label,omitempty"`     // 改动④:byMember 的员工显示名(display_name||login_email);空=前端回落显示 Key
+	MemberID      int64  `json:"member_id,omitempty"` // #5:byMember 的平台 member_id,供前端排行下钻调 /members/{id}/usage;非平台成员留空
+	ConsumedQuota int64  `json:"consumed_quota"`      // 消耗 quota
+	Count         int    `json:"count"`               // 调用次数
 }
 
 // UsageReport 是用量分析(看板,03 §3.1 读 logs 小窗口)。
@@ -27,6 +28,40 @@ type UsageReport struct {
 	TotalQuota int64         `json:"total_quota"`
 	ByModel    []UsageBucket `json:"by_model"`
 	ByMember   []UsageBucket `json:"by_member,omitempty"`
+}
+
+// BudgetRef 是「额度参考条」最小只读数据(#4·总监裁定走 B):只两个美元口径数,不带任何价/控字段。
+type BudgetRef struct {
+	ConsumedQuota  int64 `json:"consumed_quota"`  // 已用(usage_ledger 累计 SUM;非冻结的 company_balance.total_consumed)
+	RechargedQuota int64 `json:"recharged_quota"` // 预付总额(company_balance.total_recharged)
+}
+
+// OrgBudgetRef 额度参考条(#4·B 方案):给客户/运营看「已用$ / 预付$」两数,辅助成本感知与垫钱敞口。
+//
+// 藏价红线(总监定):
+//   - 这是藏价的"有意例外":客户看自己美元账单天经地义、不泄倍率,故本端点**不挂 mvpHidePrice**
+//     (GetBalance/pricing/billing-settings 维持对客户 observe 下 404 不变,不开口子)。
+//   - 只返两数,绝不带 ratio/折扣/低位阈值/退款明细/计费开关。
+//   - 已用必须从 usage_ledger 求和(与看板消耗$同源):observe 下 company_balance.total_consumed 冻结,
+//     读它会得 0/旧值;预付读 total_recharged(充值仍更新它,不冻结)。
+//   - org 作用域(assertOrgScope),operator + org_admin。
+func (s *Service) OrgBudgetRef(ctx context.Context, c session.Claims, orgID int64) (*BudgetRef, error) {
+	if err := assertOrgScope(c, orgID); err != nil {
+		return nil, err
+	}
+	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
+		return nil, err
+	}
+	// 已用:usage_ledger 全期累计(since=epoch),与看板消耗$同源;丢弃 by-model/by-user 明细只取 total。
+	_, _, consumed, err := s.store.AggregateUsageLedger(ctx, orgID, time.Unix(0, 0).UTC(), nil)
+	if err != nil {
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	bal, err := s.store.GetOrCreateBalance(ctx, orgID)
+	if err != nil {
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	return &BudgetRef{ConsumedQuota: consumed, RechargedQuota: bal.TotalRecharged}, nil
 }
 
 // OrgUsage 组织用量分析(O/A):读窗口内消费 logs,按模型 + 成员聚合(只算本 org 成员)。
@@ -167,6 +202,7 @@ func (s *Service) aggregateUsage(ctx context.Context, sinceHours int, orgFilter 
 				}
 			}
 			if m != nil && m.ID != 0 {
+				b.MemberID = m.ID // #5:供前端排行下钻(点员工→/members/{id}/usage 拉其 by_model 明细)
 				if m.DisplayName != nil && *m.DisplayName != "" {
 					b.Label = *m.DisplayName
 				} else {

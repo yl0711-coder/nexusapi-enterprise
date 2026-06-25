@@ -1480,6 +1480,22 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		}
 		t.Logf("收口 ok: recharge-requests 客户404/运营200;pricing/groups 客户 ratio 全裁0(分组名保留)/运营保留真倍率")
 
+		// ===== #4 额度参考条藏价不变量(总监指定):客户读 /balance 仍 404、但读 budget-ref 得两数 =====
+		// 红线核验:已用必须从 usage_ledger 求和(observe 下 company_balance.total_consumed 冻结,读它会 0),
+		// 故 ConsumedQuota>0 即证明走的是 ledger 而非冻结字段;预付读 total_recharged。
+		if _, err := obsSvc2.GetBalance(ctx, adminClaims, orgID); err == nil {
+			t.Errorf("🔴 #4:客户 org_admin observe 下读 balance 应仍 404(藏价不变量不破一个口子)")
+		}
+		if ref, err := obsSvc2.OrgBudgetRef(ctx, adminClaims, orgID); err != nil {
+			t.Errorf("🔴 #4:客户 org_admin 读 budget-ref 应放行(藏价有意例外·美元账单不泄倍率),却被拒: %v", err)
+		} else if ref.ConsumedQuota <= 0 {
+			t.Errorf("🔴 #4:budget-ref 已用须从 usage_ledger 求和(observe 下 total_consumed 冻结,必 >0),得 %d", ref.ConsumedQuota)
+		} else if ref.RechargedQuota <= 0 {
+			t.Errorf("🔴 #4:budget-ref 预付须=total_recharged(本组织已充值,>0),得 %d", ref.RechargedQuota)
+		} else {
+			t.Logf("#4 ok: 客户读 balance 仍 404、读 budget-ref 得 已用%d(ledger源·非冻结)/预付%d", ref.ConsumedQuota, ref.RechargedQuota)
+		}
+
 		// 用刚开的这名全新 MVP 成员(无令牌、状态干净)自助建首把 key,走真实 CreateToken 路径(非复用被前面停用/硬停污染的老成员)。
 		mvpMemberTok, _ := signer.Issue(session.Claims{MemberID: mvpRes.MemberID, OrgID: orgID, Role: session.RoleMember})
 

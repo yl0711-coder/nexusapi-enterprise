@@ -159,16 +159,46 @@ function filterRows(inputId, tbodyId) {
     tr.style.display = (!q || tr.getAttribute("data-q").indexOf(q) >= 0) ? "" : "none";
   });
 }
+// filterEls:通用按 data-q 筛选容器直接子元素(#6 排行/搜索看全用,bar 不是 table 行,filterRows 用不上)。
+function filterEls(inputId, containerId) {
+  const q = (document.getElementById(inputId).value || "").trim().toLowerCase();
+  document.querySelectorAll("#" + containerId + " [data-q]").forEach(el => {
+    el.style.display = (!q || el.getAttribute("data-q").indexOf(q) >= 0) ? "" : "none";
+  });
+}
+// openMemberUsage:#5 单员工下钻——拉该员工当前时间窗的按模型明细(后端 /members/{id}/usage 已具备)。
+async function openMemberUsage(mid, name) {
+  try {
+    const u = await api("GET", "/members/" + mid + "/usage?since_hours=" + S.win, null);
+    const rows = (u.by_model || []).map(b => `<tr><td>${esc(b.key)}</td><td class="right">${money(b.consumed_quota)}</td><td class="right mini">${b.count}</td></tr>`).join("") || `<tr><td class="empty" colspan="3">该窗口暂无用量</td></tr>`;
+    modal("员工用量明细 · " + name + "(" + winLabel(S.win) + ")",
+      `<table class="kvtable"><tr><td class="k">模型</td><td class="right k">费用</td><td class="right k">次数</td></tr>${rows}
+       <tr><td class="k">合计</td><td class="right"><b>${money(u.total_quota)}</b></td><td></td></tr></table>`,
+      `<button class="btn pri" onclick="closeM()">关闭</button>`);
+  } catch (e) { toast(e.message); }
+}
+// downloadUsageCsv:#3 导出用量对账 CSV(员工名+美元)。导出端点需 Bearer,故 fetch+blob 下载(<a href> 带不上鉴权头)。
+async function downloadUsageCsv() {
+  try {
+    const r = await fetch("/api/v1/organizations/" + S.orgId + "/usage/export?since_hours=" + S.win, { headers: S.token ? { Authorization: "Bearer " + S.token } : {} });
+    if (!r.ok) { toast("导出失败 " + r.status); return; }
+    const url = URL.createObjectURL(await r.blob());
+    const a = document.createElement("a");
+    a.href = url; a.download = "usage_org" + S.orgId + "_" + winLabel(S.win) + ".csv";
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  } catch (e) { toast(e.message); }
+}
 function openCreateOrg() {
   modal("新建客户组织", `<div class="fld"><label>组织名称</label><input id="co_n" placeholder="Acme 科技"></div>
     <div class="fld"><label>唯一标识 slug</label><input id="co_s" placeholder="acme"></div>
     <div class="fld"><label>管理员邮箱</label><input id="co_e" placeholder="admin@acme.com"></div>
-    <div class="note">将连带创建该组织的管理员账号,初始密码本次回显一次。</div>`,
+    <div class="fld"><label>new-api 用户分组</label><input id="co_g" placeholder="org_acme"></div>
+    <div class="note">new-api 用户分组须先在 new-api 配好(挂模型分组 group_special_usable_group),否则建组织会被拒。一个分组只绑一个组织。管理员初始密码本次回显一次。</div>`,
     `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doCreateOrg()">创建</button>`);
 }
 async function doCreateOrg() {
   try {
-    const d = await api("POST", "/organizations", { name: val("co_n"), slug: val("co_s"), admin_email: val("co_e") });
+    const d = await api("POST", "/organizations", { name: val("co_n"), slug: val("co_s"), admin_email: val("co_e"), newapi_user_group: val("co_g") });
     modal("已创建", `<div class="note">组织已创建。请把管理员初始凭证交付客户(仅显示一次):</div>
       <table class="kvtable"><tr><td class="k">管理员邮箱</td><td>${esc(d.admin_email)}</td></tr>
       <tr><td class="k">初始密码</td><td><b>${esc(d.admin_initial_password)}</b></td></tr></table>`,
@@ -177,10 +207,11 @@ async function doCreateOrg() {
 }
 async function enterOrg(id, name) {
   S.orgId = id; S.org = { id, name };
-  const [org, bal, bs] = await Promise.all([
+  const [org, bal, bs, ref] = await Promise.all([
     api("GET", "/organizations/" + id, null),
     api("GET", "/organizations/" + id + "/balance", null),
     api("GET", "/organizations/" + id + "/billing-settings", null),
+    api("GET", "/organizations/" + id + "/budget-ref", null), // #4:运营方也看 已用$/预付$(垫钱敞口)
   ]);
   const mem = await api("GET", "/organizations/" + id + "/members?page=1&page_size=20", null);
   const main = document.getElementById("main");
@@ -194,6 +225,7 @@ async function enterOrg(id, name) {
       ${kpi("组织状态", pill(org.status, org.status === "active" ? "ok" : "warn"), "")}
       ${S.mvp ? "" : kpi("计费灰度", (bs.billing_enabled ? "扣费开" : "扣费关") + " · " + (bs.hard_stop_enabled ? "硬停开" : "硬停关"), "默认全关")}
     </div>
+    ${S.mvp ? `<div class="panel"><div class="ph">额度参考(仅供参考,本期不停服)</div><div class="pb"><div class="cards">${kpi("累计已用", money(ref.consumed_quota), "读 new-api 日志结算")}${kpi("预付总额", money(ref.recharged_quota), "")}${kpi("剩余(参考)", money((ref.recharged_quota || 0) - (ref.consumed_quota || 0)), "用超不停服,仅提示")}</div></div></div>` : ""}
     <div class="toolbar">
       ${S.mvp ? "" : `<button class="btn pri" onclick="openTopup(${id})">充值入账</button>
       <button class="btn" onclick="toggleBilling(${id},${!bs.billing_enabled})">${bs.billing_enabled ? "关闭扣费" : "开启扣费(灰度)"}</button>
@@ -256,27 +288,41 @@ VIEWS.dash = async () => {
   const id = S.orgId;
   const win = S.win, wl = winLabel(win);
   // 改动⑦:MVP 看板纯用量化 —— 钱相关(余额/累计消耗/低位阈值)只在非 MVP 拉取与展示。
+  // 改动⑦:钱(余额/累计消耗/低位)只非 MVP 展示;MVP 改用 #4 额度参考条(只读,不停服)。
   const reqs = [api("GET", "/organizations/" + id + "/usage?since_hours=" + win, null)];
-  if (!S.mvp) reqs.push(api("GET", "/organizations/" + id + "/balance", null));
-  const [usage, bal] = await Promise.all(reqs);
-  const top = (usage.by_model || []).slice(0, 6);
-  const max = Math.max(1, ...top.map(b => b.consumed_quota));
-  const bars = top.map(b => `<div class="bar"><span class="nm">${esc(b.key)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / max * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`).join("") || `<div class="empty">${wl}暂无用量</div>`;
-  // 改动④:员工用量排行(后端 by_member 已按消耗降序;label=员工名,空则回落 user_id)。
-  const tm = (usage.by_member || []).slice(0, 8);
-  const maxm = Math.max(1, ...tm.map(b => b.consumed_quota));
-  const mbars = tm.map(b => `<div class="bar"><span class="nm">${esc(b.label || ("用户#" + b.key))}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / maxm * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`).join("") || `<div class="empty">${wl}暂无用量</div>`;
+  reqs.push(api("GET", "/organizations/" + id + (S.mvp ? "/budget-ref" : "/balance"), null));
+  const [usage, extra] = await Promise.all(reqs);
+  // #6:模型/员工都全量渲染 + 各自搜索框 + 滚动容器(成员超 8 人也找得到),不再 slice 截断。
+  const mods = usage.by_model || [];
+  const maxv = Math.max(1, ...mods.map(b => b.consumed_quota));
+  const bars = mods.map(b => `<div class="bar" data-q="${esc((b.key || "").toLowerCase())}"><span class="nm">${esc(b.key)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / maxv * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`).join("") || `<div class="empty">${wl}暂无用量</div>`;
+  // 改动④ + #5:员工排行(降序);行可点 → 下钻该员工按模型明细(后端已有 /members/{id}/usage)。
+  const mem = usage.by_member || [];
+  const maxm = Math.max(1, ...mem.map(b => b.consumed_quota));
+  const mbars = mem.map(b => {
+    const nm = b.label || ("用户#" + b.key);
+    const attrs = b.member_id ? `class="bar lk" onclick="openMemberUsage(${b.member_id},'${esc(nm)}')" title="查看该员工按模型明细"` : `class="bar"`;
+    return `<div ${attrs} data-q="${esc(nm.toLowerCase())}"><span class="nm">${esc(nm)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / maxm * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`;
+  }).join("") || `<div class="empty">${wl}暂无用量</div>`;
   const moneyCards = S.mvp ? "" : `
-      ${kpi("当前余额", money(bal.balance_quota), "累计充值 " + money(bal.total_recharged_quota))}
-      ${kpi("累计消耗", money(bal.total_consumed_quota), "")}
-      ${kpi("低位阈值", money(bal.low_watermark_quota), "")}`;
+      ${kpi("当前余额", money(extra.balance_quota), "累计充值 " + money(extra.total_recharged_quota))}
+      ${kpi("累计消耗", money(extra.total_consumed_quota), "")}
+      ${kpi("低位阈值", money(extra.low_watermark_quota), "")}`;
+  // #4 额度参考条(MVP):已用$/预付$/剩余$,仅供参考、本期不停服。
+  const refBar = S.mvp ? `<div class="panel"><div class="ph">额度参考(仅供参考,本期不停服)</div><div class="pb"><div class="cards">
+      ${kpi("累计已用", money(extra.consumed_quota), "读 new-api 日志结算")}
+      ${kpi("预付总额", money(extra.recharged_quota), "")}
+      ${kpi("剩余(参考)", money((extra.recharged_quota || 0) - (extra.consumed_quota || 0)), "用超不停服,仅提示")}
+    </div></div></div>` : "";
+  const srch = (iid, cid, ph) => `<input id="${iid}" placeholder="${ph}" oninput="filterEls('${iid}','${cid}')" style="float:right;width:150px;padding:2px 8px;font-size:12px">`;
   return head("概览", S.mvp ? "公司用量总览(只读)" : "公司余额 + 用量")
-    + `<div class="toolbar"><div class="search"></div><span class="mini">时间窗</span>${winSelect()}</div>
+    + `<div class="toolbar"><div class="search"></div><button class="btn" onclick="downloadUsageCsv()">导出CSV(员工名·美元)</button><span class="mini">时间窗</span>${winSelect()}</div>
     <div class="cards">
       ${kpi(wl + "消耗", money(usage.total_quota), "读 new-api 日志结算")}${moneyCards}
     </div>
-    <div class="panel"><div class="ph">员工用量排行(${wl})</div><div class="pb">${mbars}</div></div>
-    <div class="panel"><div class="ph">按模型用量(${wl})</div><div class="pb">${bars}</div></div>`;
+    ${refBar}
+    <div class="panel"><div class="ph">员工用量排行(${wl})· 点员工看明细${srch("memSearch", "memBars", "搜员工…")}</div><div class="pb" id="memBars" style="max-height:340px;overflow:auto">${mbars}</div></div>
+    <div class="panel"><div class="ph">按模型用量(${wl})${srch("modSearch", "modBars", "搜模型…")}</div><div class="pb" id="modBars" style="max-height:340px;overflow:auto">${bars}</div></div>`;
 };
 VIEWS.members = async () => {
   const id = S.orgId;
@@ -310,8 +356,15 @@ async function doAddMember() {
     const em = val("am_e").trim(); if (em) body.email = em; // T11:自定义登录名,留空后端 fallback
     const t = val("am_t"); if (t) body.tier_id = parseInt(t);
     const d = await api("POST", "/organizations/" + S.orgId + "/members", body);
-    modal("已开通并代发 Key", `<div class="note">明文 API Key 仅此一次显示,请交付成员并妥善保存:</div>
-      <div class="keybox"><span>${esc(d.api_key)}</span><span class="lk" onclick="navigator.clipboard&&navigator.clipboard.writeText('${esc(d.api_key)}');toast('已复制')">复制</span></div>`,
+    const keyRow = d.api_key
+      ? `<tr><td class="k">API Key</td><td><b>${esc(d.api_key)}</b> <span class="lk" onclick="navigator.clipboard&&navigator.clipboard.writeText('${esc(d.api_key)}');toast('已复制')">复制</span></td></tr>`
+      : `<tr><td class="k">API Key</td><td class="mini">本期不代发,员工登录后在「我的 Key」自助创建</td></tr>`;
+    modal("已开通 · 交付登录凭证", `<div class="note">以下凭证仅此一次显示,请交付员工本人,首次登录后请改密:</div>
+      <table class="kvtable">
+        <tr><td class="k">登录邮箱</td><td>${esc(d.login_email)}</td></tr>
+        <tr><td class="k">初始密码</td><td><b>${esc(d.initial_password)}</b></td></tr>
+        ${keyRow}
+      </table>`,
       `<button class="btn pri" onclick="closeM();renderView()">完成</button>`);
   } catch (e) { toast(e.message); }
 }

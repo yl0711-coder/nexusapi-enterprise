@@ -117,6 +117,25 @@ func (h *Handler) handleOrgUsage(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, r, http.StatusOK, usageView(u))
 }
 
+// GET /organizations/{id}/budget-ref — 额度参考条(#4·B:已用$/预付$,藏价有意例外,O/A)。
+func (h *Handler) handleBudgetRef(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	orgID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	ref, err := h.svc.OrgBudgetRef(r.Context(), c, orgID)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{
+		"consumed_quota":  ref.ConsumedQuota,
+		"recharged_quota": ref.RechargedQuota,
+	})
+}
+
 // GET /members/{id}/usage — 成员用量(本人/上级/管理员)。
 func (h *Handler) handleMemberUsage(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())

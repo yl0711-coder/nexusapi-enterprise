@@ -78,13 +78,19 @@ func (h *Handler) handleUsageExport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, err)
 		return
 	}
+	// #3:导出客户财务可直接分摊的口径——员工名 + 美元(不再是 new-api 数字 id + quota 裸数)。
+	// 成员名复用 by_member 已解析的 Label(display_name||login_email);空(非平台成员)回落标注。
 	var b strings.Builder
-	b.WriteString("scope,key,consumed_quota,count\n")
+	b.WriteString("维度,名称,费用(美元),调用次数\n")
 	for _, m := range u.ByModel {
-		b.WriteString(fmt.Sprintf("model,%s,%d,%d\n", csvEsc(m.Key), m.ConsumedQuota, m.Count))
+		b.WriteString(fmt.Sprintf("模型,%s,%s,%d\n", csvEsc(m.Key), usdStr(m.ConsumedQuota), m.Count))
 	}
 	for _, m := range u.ByMember {
-		b.WriteString(fmt.Sprintf("member_newapi_uid,%s,%d,%d\n", csvEsc(m.Key), m.ConsumedQuota, m.Count))
+		name := m.Label
+		if name == "" {
+			name = "未知成员(uid " + m.Key + ")"
+		}
+		b.WriteString(fmt.Sprintf("员工,%s,%s,%d\n", csvEsc(name), usdStr(m.ConsumedQuota), m.Count))
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="usage_org%d.csv"`, orgID))
@@ -97,6 +103,9 @@ func csvEsc(s string) string {
 	}
 	return s
 }
+
+// usdStr 把 quota 换算成美元串(锚定 500000 quota=1 美元,与看板 money() 同口径)。
+func usdStr(quota int64) string { return fmt.Sprintf("%.6f", float64(quota)/500000.0) }
 
 // GET /service-status — 服务状态(全角色)。
 func (h *Handler) handleServiceStatus(w http.ResponseWriter, r *http.Request) {

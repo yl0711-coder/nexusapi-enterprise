@@ -187,7 +187,11 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)
 	}
-	keyMasked := maskKey(res.PlaintextKey)
+	// 改动②:无令牌(MVP/SkipToken,PlaintextKey 为空)时脱敏串也留空,避免回出误导性的"••••"(成员实际没 key)。
+	keyMasked := ""
+	if res.TokenID != 0 {
+		keyMasked = maskKey(res.PlaintextKey)
+	}
 	final := &model.Member{
 		ID:                memberID,
 		OrgID:             orgID,

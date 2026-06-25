@@ -362,31 +362,37 @@ VIEWS.tiers = async () => {
   const d = await api("GET", "/organizations/" + S.orgId + "/tiers", null);
   S.tiersCache = d || []; // 供编辑弹窗回填
   try { S.billingGroups = (await api("GET", "/pricing/groups", null)) || []; } catch (e) { S.billingGroups = []; } // T17-6 计费分组
+  // 改动⑦补丁(灰度前阻断·产品总监逮出):MVP 下层级页藏掉钱字段(月额度/基础倍率/折后价),
+  // 只留层级名 + 模型分组 + 模型集(setup 部分,管理员要靠它把成员映射到模型分组);别藏整菜单否则没法建层级。
   const rows = (d || []).map(t => `<tr><td>${esc(t.name)}${t.is_default ? ' <span class="tag">默认</span>' : ""}</td>
     <td>${t.newapi_group ? esc(t.newapi_group) : '<span class="mini">默认</span>'}</td>
-    <td>${t.monthly_limit_quota != null ? money(t.monthly_limit_quota) + " / 月" : '<span class="mini">不限</span>'}</td>
+    ${S.mvp ? "" : `<td>${t.monthly_limit_quota != null ? money(t.monthly_limit_quota) + " / 月" : '<span class="mini">不限</span>'}</td>`}
     <td>${(t.model_set || []).map(m => `<span class="mcap">${esc(m)}</span>`).join("") || '<span class="mini">继承</span>'}</td>
     <td class="right"><span class="btn sm" onclick="openEditTier(${t.id})">编辑</span> <span class="btn sm danger" onclick="doDeleteTier(${t.id},'${esc(t.name)}')">删除</span></td></tr>`).join("");
-  return head("层级", "可复用档位 = 计费分组 + 模型集 + 月额度 + 单模型日上限")
+  const tierColspan = S.mvp ? 4 : 5;
+  return head("层级", S.mvp ? "可复用档位 = 模型分组 + 模型集(决定成员可用哪些模型)" : "可复用档位 = 计费分组 + 模型集 + 月额度 + 单模型日上限")
     + `<div class="toolbar"><button class="btn pri" onclick="openCreateTier()">+ 新建层级</button></div>
-    <div class="panel"><table><thead><tr><th>层级</th><th>计费分组</th><th>月额度</th><th>模型集</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan=5 class="empty">暂无层级</td></tr>'}</tbody></table></div>`;
+    <div class="panel"><table><thead><tr><th>层级</th><th>${S.mvp ? "模型分组" : "计费分组"}</th>${S.mvp ? "" : "<th>月额度</th>"}<th>模型集</th><th></th></tr></thead><tbody>${rows || `<tr><td colspan=${tierColspan} class="empty">暂无层级</td></tr>`}</tbody></table></div>`;
 };
 // groupSelectHTML 计费分组下拉(T17-6):来源实时拉的 /pricing/groups,选项带基础倍率;空=回落默认。
 function groupSelectHTML(selId, selected) {
-  const opts = ['<option value="">默认(回落组织默认/标准价)</option>'].concat(
-    (S.billingGroups || []).map(g => `<option value="${esc(g.group)}" ${g.group === selected ? "selected" : ""}>${esc(g.group)}(基础倍率 ${g.ratio})</option>`));
-  return `<div class="fld"><label>计费分组(决定可用模型+收费倍率)</label>
+  const opts = [`<option value="">默认(回落组织默认${S.mvp ? "分组" : "/标准价"})</option>`].concat(
+    (S.billingGroups || []).map(g => `<option value="${esc(g.group)}" ${g.group === selected ? "selected" : ""}>${esc(g.group)}${S.mvp ? "" : `(基础倍率 ${g.ratio})`}</option>`));
+  return `<div class="fld"><label>${S.mvp ? "模型分组(决定成员可用哪些模型)" : "计费分组(决定可用模型+收费倍率)"}</label>
     <select id="${selId}" onchange="tierGroupHint('${selId}')">${opts.join("")}</select>
     <div class="mini" id="${selId}_hint" style="margin-top:4px"></div></div>`;
 }
 function tierGroupHint(selId) {
   const g = document.getElementById(selId).value;
   const hint = document.getElementById(selId + "_hint");
-  if (!g) { hint.innerHTML = "回落组织默认令牌分组,模型集需在该分组可用范围内"; return; }
+  if (!g) { hint.innerHTML = "回落组织默认分组,模型集需在该分组可用范围内"; return; }
   const bg = (S.billingGroups || []).find(x => x.group === g);
   if (!bg) { hint.innerHTML = ""; return; }
   const ms = (bg.models || []);
-  hint.innerHTML = `基础倍率 <b>${bg.ratio}</b> · 可用模型(${ms.length}):${ms.slice(0, 12).map(esc).join("、")}${ms.length > 12 ? " …" : ""}<br>模型集须 ⊆ 该可用模型(否则保存被拦);折后价 = 基础倍率 × 客户折扣%`;
+  const modelsTxt = `可用模型(${ms.length}):${ms.slice(0, 12).map(esc).join("、")}${ms.length > 12 ? " …" : ""}`;
+  // MVP:只展示可用模型,藏基础倍率/折后价(钱结构不给客户管理员看)。
+  hint.innerHTML = S.mvp ? `${modelsTxt}<br>模型集须 ⊆ 该可用模型(否则保存被拦)`
+    : `基础倍率 <b>${bg.ratio}</b> · ${modelsTxt}<br>模型集须 ⊆ 该可用模型(否则保存被拦);折后价 = 基础倍率 × 客户折扣%`;
 }
 function openEditTier(tid) {
   const t = (S.tiersCache || []).find(x => x.id === tid); if (!t) return;
@@ -394,9 +400,9 @@ function openEditTier(tid) {
   const mq = t.monthly_limit_quota != null ? (t.monthly_limit_quota / 500000) : "";
   modal("编辑层级", `<div class="fld"><label>层级名称</label><input id="te_n" value="${esc(t.name)}"></div>
     ${groupSelectHTML("te_g", t.newapi_group || "")}
-    <div class="fld"><label>月额度(美元,成员当期上限基线)</label><input id="te_q" type="number" value="${mq}"></div>
+    ${S.mvp ? "" : `<div class="fld"><label>月额度(美元,成员当期上限基线)</label><input id="te_q" type="number" value="${mq}"></div>`}
     <div class="fld"><label>模型集(逗号分隔,留空=继承)</label><input id="te_m" value="${esc(ms)}"></div>
-    <div class="note">改后引用该层级的成员当期上限按新档重算下发;改计费分组=改计价档(动钱相邻)。</div>`,
+    <div class="note">${S.mvp ? "改后该层级成员的可用模型集随之更新。" : "改后引用该层级的成员当期上限按新档重算下发;改计费分组=改计价档(动钱相邻)。"}</div>`,
     `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doEditTier(${tid})">保存</button>`);
   tierGroupHint("te_g");
 }
@@ -416,9 +422,9 @@ async function doDeleteTier(tid, name) {
 function openCreateTier() {
   modal("新建层级", `<div class="fld"><label>层级名称</label><input id="ti_n" placeholder="标准档"></div>
     ${groupSelectHTML("ti_g", "")}
-    <div class="fld"><label>月额度(美元,成员当期上限基线)</label><input id="ti_q" type="number" placeholder="50"></div>
+    ${S.mvp ? "" : `<div class="fld"><label>月额度(美元,成员当期上限基线)</label><input id="ti_q" type="number" placeholder="50"></div>`}
     <div class="fld"><label>模型集(逗号分隔,留空=继承)</label><input id="ti_m" placeholder="gpt-4o,claude-sonnet-4-5-20250929"></div>
-    <div class="note">计费分组决定可用模型+倍率;模型集须在该分组可用范围内(否则保存被拦)。</div>`,
+    <div class="note">${S.mvp ? "模型分组决定成员可用哪些模型;模型集须在该分组可用范围内(否则保存被拦)。" : "计费分组决定可用模型+倍率;模型集须在该分组可用范围内(否则保存被拦)。"}</div>`,
     `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doCreateTier()">创建</button>`);
   tierGroupHint("ti_g");
 }

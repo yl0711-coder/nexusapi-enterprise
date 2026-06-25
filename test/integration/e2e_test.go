@@ -1274,7 +1274,55 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		}
 	}
 
-	t.Log("里程碑 3b e2e 全通过:读logs扣费 + 去重防重复扣 + 守恒 + 硬停(逐组织开关)+ 充值解硬停恢复 + GZ-01 D2路径B + D1原子回滚 + GZ-03 ⑤失败收口/不漏扣/告警 + 改动⑤观测落账不扣钱")
+	// ===== 改动②③ MVP 开通/自助建 key 回归(总监复验"有条件 GO"补强:3 条) =====
+	{
+		// ② MVP 开通只建用户不建令牌:用 ObserveMode=true 的 service 开通 → 有 new-api 用户、无令牌/无明文 key。
+		obsSvc2 := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log, ObserveMode: true})
+		var adminMID int64
+		if err := store.DB().QueryRowContext(ctx, "SELECT id FROM member WHERE org_id=? AND role='org_admin' LIMIT 1", orgID).Scan(&adminMID); err != nil {
+			t.Fatalf("取组织管理员 member_id 失败: %v", err)
+		}
+		adminClaims := session.Claims{MemberID: adminMID, OrgID: orgID, Role: session.RoleOrgAdmin}
+		mvpRes, err := obsSvc2.OpenMember(ctx, adminClaims, orgID, service.OpenMemberInput{Name: "观测开通无key"})
+		if err != nil {
+			t.Fatalf("② MVP 开通失败: %v", err)
+		}
+		if mvpRes.NewapiUserID == 0 || mvpRes.APIKey != "" || mvpRes.KeyMasked != "" {
+			t.Errorf("🔴 ② MVP 开通应只建用户不建令牌:user_id=%d(应非0) api_key=%q key_masked=%q(应均空)", mvpRes.NewapiUserID, mvpRes.APIKey, mvpRes.KeyMasked)
+		} else {
+			t.Logf("② ok: MVP(观测)开通只建 new-api 用户 #%d、不建令牌(无明文 key)", mvpRes.NewapiUserID)
+		}
+
+		// 用刚开的这名全新 MVP 成员(无令牌、状态干净)自助建首把 key,走真实 CreateToken 路径(非复用被前面停用/硬停污染的老成员)。
+		mvpMemberTok, _ := signer.Issue(session.Claims{MemberID: mvpRes.MemberID, OrgID: orgID, Role: session.RoleMember})
+
+		// ③-a 员工自助建首把 key(本人 + 本企业可用分组 vip)→ 201 + 真 key。
+		var ck struct {
+			APIKey    string `json:"api_key"`
+			KeyMasked string `json:"key_masked"`
+		}
+		if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/tokens", mvpRes.MemberID), mvpMemberTok, map[string]any{"group": "vip"}, &ck); st != http.StatusCreated || ck.APIKey == "" {
+			t.Errorf("🔴 ③ 本人自助建首把 key(vip)应 201+出 key,得 st=%d key=%q", st, ck.APIKey)
+		} else {
+			t.Logf("③ ok: MVP 成员自助建首把 key(分组 vip)成功,出明文 key %s...(CreateToken 路径)", ck.APIKey[:min(8, len(ck.APIKey))])
+		}
+
+		// ③-b 越权:替别人建 key → 403(仅本人)。
+		if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/tokens", mvpRes.MemberID+99999), mvpMemberTok, map[string]any{"group": "vip"}, nil); st != http.StatusForbidden {
+			t.Errorf("🔴 ③ 替别人建 key 应 403,得 %d", st)
+		} else {
+			t.Log("③ ok: 替别人建 key → 403(仅本人)")
+		}
+
+		// ③-c 越界:选非本企业可用的分组 → 422(隔离边界)。
+		if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/tokens", mvpRes.MemberID), mvpMemberTok, map[string]any{"group": "ghost-grp-xyz"}, nil); st != http.StatusUnprocessableEntity {
+			t.Errorf("🔴 ③ 选非本企业分组应 422,得 %d", st)
+		} else {
+			t.Log("③ ok: 选非本企业可用分组 → 422(隔离边界)")
+		}
+	}
+
+	t.Log("里程碑 3b e2e 全通过:读logs扣费 + 去重防重复扣 + 守恒 + 硬停(逐组织开关)+ 充值解硬停恢复 + GZ-01 D2路径B + D1原子回滚 + GZ-03 ⑤失败收口/不漏扣/告警 + 改动⑤观测落账不扣钱 + 改动②③开通无token/自助建key/越权隔离")
 }
 
 // ---- helpers ----

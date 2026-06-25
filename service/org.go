@@ -40,7 +40,7 @@ func (s *Service) CreateOrg(ctx context.Context, c session.Claims, in CreateOrgI
 	}
 	if err := firstErr(checkName("组织名称", in.Name, maxNameLen),
 		checkSlug(in.Slug), checkEmail("管理员邮箱", in.AdminEmail),
-		checkLen("new-api 用户分组", in.NewapiUserGroup, 64)); err != nil {
+		checkName("new-api 用户分组", in.NewapiUserGroup, 64)); err != nil { // 总监复验:统一到 checkName(长度+危险字符黑名单),与 org/tier/member 一致
 		return nil, err
 	}
 	ctx, cancel := withTimeout(ctx, 8*time.Second)

@@ -156,6 +156,9 @@ func (s *Service) GetPricing(ctx context.Context, c session.Claims, orgID int64)
 	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
 		return nil, err
 	}
+	if err := s.mvpHidePrice(c); err != nil { // MVP(观测)藏价:客户直连不可读倍率/折扣;运营方/支持态正常
+		return nil, err
+	}
 	d, err := s.store.GetOrgDiscount(ctx, orgID)
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)

@@ -38,6 +38,16 @@ func assertOrgScope(c session.Claims, targetOrgID int64) error {
 	return nil
 }
 
+// mvpHidePrice:MVP(观测)下,客户角色不得读带价/带钱端点(余额/计费设置/折扣倍率/入账记录)。
+// 前端已藏 UI,这里堵客户持自己门户登录直连 API 拿价(放行前必做1·财务P0,"藏价"产品意图)。
+// 放行:运营方(Role==operator)与运营方支持态(SupportSessionID!=0,token 角色虽是 org_admin 但确为运营方)——看价正常。
+func (s *Service) mvpHidePrice(c session.Claims) error {
+	if s.observeMode && c.Role != session.RoleOperator && c.SupportSessionID == 0 {
+		return apperr.NotFound("资源不存在")
+	}
+	return nil
+}
+
 // assertTeamScope 校验团队负责人只能作用于本团队成员(同 org 内越团队 → 403)。
 // org_admin / operator 不受团队边界约束;成员只能作用于本人(由调用方另判)。
 func assertTeamScope(c session.Claims, targetTeamID *int64) error {

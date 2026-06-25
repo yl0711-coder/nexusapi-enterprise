@@ -16,6 +16,9 @@ import (
 //   - account_ttl         → 标 expired,disable new-api 用户、member→expired(US-04a)
 //   - model_add           → 标 expired(令牌当前不限模型,无 enforcement 可收;仅记录)
 func (s *Service) ReverseExpiredGrants(ctx context.Context, limit int) (int, error) {
+	if s.observeMode {
+		return 0, nil // MVP(观测)下 quota-worker 不碰 new-api 写(与 reconcile/settlement 同口径,放行前必做2)
+	}
 	if limit <= 0 {
 		limit = 100
 	}

@@ -115,6 +115,9 @@ func (s *Service) GetBalance(ctx context.Context, c session.Claims, orgID int64)
 	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
 		return nil, err
 	}
+	if err := s.mvpHidePrice(c); err != nil { // MVP(观测)藏价:客户直连不可读余额;运营方/支持态正常
+		return nil, err
+	}
 	b, err := s.store.GetOrCreateBalance(ctx, orgID)
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)
@@ -128,6 +131,9 @@ func (s *Service) ListRecharges(ctx context.Context, c session.Claims, orgID int
 		return nil, 0, err
 	}
 	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
+		return nil, 0, err
+	}
+	if err := s.mvpHidePrice(c); err != nil { // MVP(观测)藏价:客户直连不可读入账记录;运营方/支持态正常
 		return nil, 0, err
 	}
 	recs, total, err := s.store.ListRecharges(ctx, orgID, limit, offset)
@@ -274,6 +280,9 @@ func (s *Service) GetBillingSettings(ctx context.Context, c session.Claims, orgI
 		return nil, err
 	}
 	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
+		return nil, err
+	}
+	if err := s.mvpHidePrice(c); err != nil { // MVP(观测)藏价:客户直连不可读计费开关/阈值;运营方/支持态正常
 		return nil, err
 	}
 	f, err := s.store.GetOrgBillingFlags(ctx, orgID)

@@ -1293,6 +1293,30 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 			t.Logf("② ok: MVP(观测)开通只建 new-api 用户 #%d、不建令牌(无明文 key)", mvpRes.NewapiUserID)
 		}
 
+		// ===== 必做1(放行前·财务P0)回归:MVP(观测)藏价 =====
+		// 同一组织、同一带价读端点(GetPricing/GetBalance),三种身份差分:
+		//   - 客户 org_admin(SupportSessionID=0)→ 必须被拒(不得直连门户登录拿倍率/折扣/余额)
+		//   - 运营方(operator)与运营方支持态(SupportSessionID!=0)→ 必须放行(看价正常)
+		// 运营/支持读同一 org 成功、而客户读同一 org 失败 ⇒ 差异只能来自藏价闸,隔离住根因。
+		operatorClaims := session.Claims{Role: session.RoleOperator}
+		supportClaims := session.Claims{MemberID: adminMID, OrgID: orgID, Role: session.RoleOrgAdmin, SupportSessionID: 1}
+		if _, err := obsSvc2.GetPricing(ctx, operatorClaims, orgID); err != nil {
+			t.Errorf("🔴 必做1:运营方读 pricing 应放行,却被拒: %v", err)
+		}
+		if _, err := obsSvc2.GetPricing(ctx, supportClaims, orgID); err != nil {
+			t.Errorf("🔴 必做1:运营方支持态读 pricing 应放行,却被拒: %v", err)
+		}
+		if _, err := obsSvc2.GetPricing(ctx, adminClaims, orgID); err == nil {
+			t.Errorf("🔴 必做1:MVP 下客户 org_admin 直连读 pricing 必须被拒(泄倍率/折扣),却放行")
+		}
+		if _, err := obsSvc2.GetBalance(ctx, adminClaims, orgID); err == nil {
+			t.Errorf("🔴 必做1:MVP 下客户 org_admin 直连读 balance 必须被拒(泄余额),却放行")
+		}
+		if _, err := obsSvc2.GetBalance(ctx, operatorClaims, orgID); err != nil {
+			t.Errorf("🔴 必做1:运营方读 balance 应放行,却被拒: %v", err)
+		}
+		t.Logf("必做1 ok: MVP 藏价 — 运营/支持态读 pricing/balance 放行,客户 org_admin 直连读被拒")
+
 		// 用刚开的这名全新 MVP 成员(无令牌、状态干净)自助建首把 key,走真实 CreateToken 路径(非复用被前面停用/硬停污染的老成员)。
 		mvpMemberTok, _ := signer.Issue(session.Claims{MemberID: mvpRes.MemberID, OrgID: orgID, Role: session.RoleMember})
 

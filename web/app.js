@@ -33,7 +33,7 @@ async function doLogin() {
   const err = document.getElementById("lg_err"); err.textContent = "";
   document.getElementById("lg_btn").textContent = "登录中…";
   try {
-    const d = await api("POST", "/auth/login", { email, password: pw, otp: document.getElementById("lg_otp").value });
+    const d = await api("POST", "/auth/login", { email, password: pw });
     S.token = d.token; localStorage.setItem("nx_token", S.token);
     document.getElementById("login").classList.add("hide");
     await boot();

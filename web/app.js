@@ -336,7 +336,7 @@ VIEWS.members = async () => {
       ${S.mvp ? "" : `<span class="btn sm" onclick="openAdjust(${m.id})">调额</span>`}
       <span class="btn sm" onclick="toggleMember(${m.id},${m.status !== "active"})">${m.status === "active" ? "停用" : "恢复"}</span>
     </td></tr>`).join("");
-  return head(S.role === "team_leader" ? "团队成员" : "成员", S.mvp ? "开通成员即代发 API key" : "开通成员即代发 API key;调额走临时 grant、到期自动回退")
+  return head(S.role === "team_leader" ? "团队成员" : "成员", S.mvp ? "开通成员建账号+交付登录凭证(Key 由员工自助创建)" : "开通成员即代发 API key;调额走临时 grant、到期自动回退")
     + `<div class="toolbar"><div class="search"></div>${S.mvp ? "" : `<button class="btn" onclick="openBulk()">批量导入</button>`}<button class="btn pri" onclick="openAddMember()">+ 开通成员</button></div>
     <div class="panel"><table><thead><tr><th>成员</th><th>状态</th><th>Key(脱敏)</th><th></th></tr></thead>
     <tbody>${rows || '<tr><td colspan=4 class="empty">暂无成员</td></tr>'}</tbody></table></div>`;
@@ -347,7 +347,7 @@ async function openAddMember() {
   modal("开通成员", `<div class="fld"><label>姓名</label><input id="am_n" placeholder="钱晨"></div>
     <div class="fld"><label>登录名(真实邮箱/用户名,可选)</label><input id="am_e" placeholder="留空则自动生成"></div>
     <div class="fld"><label>层级</label><select id="am_t">${opts || '<option value="">(先建层级)</option>'}</select></div>
-    <div class="note">登录名留空将自动生成。系统将建 new-api 用户、代发 API key、下发层级初始额度。明文 key 仅创建后回显一次。</div>`,
+    <div class="note">登录名留空将自动生成。${S.mvp ? "系统将建 new-api 用户并下发层级初始额度,本期不代发 Key(员工登录后在「我的 Key」自助创建);登录邮箱与初始密码开通后回显一次。" : "系统将建 new-api 用户、代发 API key、下发层级初始额度。明文 key 仅创建后回显一次。"}</div>`,
     `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doAddMember()">开通成员</button>`);
 }
 async function doAddMember() {

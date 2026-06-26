@@ -98,6 +98,11 @@ func (h *Handler) handleUsageExport(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(b.String()))
 }
 func csvEsc(s string) string {
+	// CSV 公式注入防护(P2):成员名/模型名可被恶意构造成 = + - @ tab CR 开头,Excel/Sheets 打开会当公式执行。
+	// 外发客户财务表,前缀单引号中和(Excel 视为文本)。多字节中文名首字节 >127,不会误触。
+	if s != "" && strings.IndexByte("=+-@\t\r", s[0]) >= 0 {
+		s = "'" + s
+	}
 	if strings.ContainsAny(s, ",\"\n") {
 		return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 	}

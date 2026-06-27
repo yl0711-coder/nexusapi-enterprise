@@ -333,6 +333,13 @@ VIEWS.dash = async () => {
     const attrs = b.member_id ? `class="bar lk" onclick="openMemberUsage(${b.member_id},'${esc(nm)}')" title="查看该员工按模型明细"` : `class="bar"`;
     return `<div ${attrs} data-q="${esc(nm.toLowerCase())}"><span class="nm">${esc(nm)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / maxm * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`;
   }).join("") || `<div class="empty">${wl}暂无用量</div>`;
+  // F3:按团队用量排行(含"未分组"桶);行可点 → 下钻该团队成员/模型明细。
+  const tms = usage.by_team || [];
+  const maxt = Math.max(1, ...tms.map(b => b.consumed_quota));
+  const tbars = tms.map(b => {
+    const nm = b.label || ("团队#" + b.key);
+    return `<div class="bar lk" onclick="openTeamUsage(${b.key},'${esc(nm)}')" title="查看该团队成员/模型明细" data-q="${esc(nm.toLowerCase())}"><span class="nm">${esc(nm)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / maxt * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`;
+  }).join("") || `<div class="empty">${wl}暂无用量(或未建团队)</div>`;
   const moneyCards = S.mvp ? "" : `
       ${kpi("当前余额", money(extra.balance_quota), "累计充值 " + money(extra.total_recharged_quota))}
       ${kpi("累计消耗", money(extra.total_consumed_quota), "")}
@@ -350,31 +357,54 @@ VIEWS.dash = async () => {
       ${kpi(wl + "消耗", money(usage.total_quota), "读 new-api 日志结算")}${moneyCards}
     </div>
     ${refBar}
+    <div class="panel"><div class="ph">按团队用量(${wl})· 点团队下钻 <span class="mini" style="font-weight:400">团队用量按成员当前归属聚合${srch("teamSearch", "teamBars", "搜团队…")}</span></div><div class="pb" id="teamBars" style="max-height:300px;overflow:auto">${tbars}</div></div>
     <div class="panel"><div class="ph">员工用量排行(${wl})· 点员工看明细${srch("memSearch", "memBars", "搜员工…")}</div><div class="pb" id="memBars" style="max-height:340px;overflow:auto">${mbars}</div></div>
     <div class="panel"><div class="ph">按模型用量(${wl})${srch("modSearch", "modBars", "搜模型…")}</div><div class="pb" id="modBars" style="max-height:340px;overflow:auto">${bars}</div></div>`;
 };
 VIEWS.members = async () => {
   const id = S.orgId;
-  const d = await api("GET", "/organizations/" + id + "/members?page=1&page_size=50", null);
+  const [d, teams] = await Promise.all([
+    api("GET", "/organizations/" + id + "/members?page=1&page_size=50", null),
+    api("GET", "/organizations/" + id + "/teams", null).catch(() => []),
+  ]);
+  S.teamsCache = teams || []; // 供调团队弹窗
+  const tmap = {}; (teams || []).forEach(t => tmap[t.id] = t.name);
   // 管理类账号(运营方/组织管理员)不进"成员"列表(M7);只列 API 使用成员。
   const rows = (d.list || []).filter(m => m.role !== "org_admin" && m.role !== "operator").map(m => `<tr>
     <td>${esc(m.display_name || m.login_email)}<div class="mini">${esc(m.login_email)}</div></td>
+    <td>${m.team_id ? esc(tmap[m.team_id] || ("团队#" + m.team_id)) : '<span class="mini">未分组</span>'}</td>
     <td>${pill(m.status, m.status === "active" ? "ok" : "mut")}</td>
     <td class="mini">${esc(m.key_masked || "-")}</td>
     <td class="right">
+      <span class="btn sm" onclick="openChangeTeam(${m.id},${m.team_id || 0})">调团队</span>
       ${S.mvp ? "" : `<span class="btn sm" onclick="openAdjust(${m.id})">调额</span>`}
       <span class="btn sm" onclick="toggleMember(${m.id},${m.status !== "active"})">${m.status === "active" ? "停用" : "恢复"}</span>
     </td></tr>`).join("");
   return head(S.role === "team_leader" ? "团队成员" : "成员", S.mvp ? "开通成员建账号+交付登录凭证(Key 由员工自助创建)" : "开通成员即代发 API key;调额走临时 grant、到期自动回退")
     + `<div class="toolbar"><div class="search"></div>${S.mvp ? "" : `<button class="btn" onclick="openBulk()">批量导入</button>`}<button class="btn pri" onclick="openAddMember()">+ 开通成员</button></div>
-    <div class="panel"><table><thead><tr><th>成员</th><th>状态</th><th>Key(脱敏)</th><th></th></tr></thead>
-    <tbody>${rows || '<tr><td colspan=4 class="empty">暂无成员</td></tr>'}</tbody></table></div>`;
+    <div class="panel"><table><thead><tr><th>成员</th><th>团队</th><th>状态</th><th>Key(脱敏)</th><th></th></tr></thead>
+    <tbody>${rows || '<tr><td colspan=5 class="empty">暂无成员</td></tr>'}</tbody></table></div>`;
 };
+function openChangeTeam(mid, curTid) {
+  const topts = (S.teamsCache || []).filter(t => t.status !== "archived").map(t => `<option value="${t.id}" ${t.id === curTid ? "selected" : ""}>${esc(t.name)}</option>`).join("");
+  if (!topts) { toast("请先在「团队」页建团队"); return; }
+  modal("调整团队", `<div class="fld"><label>团队</label><select id="ct_team">${topts}</select></div>
+    <div class="note">改团队后该成员用量在团队看板按新团队归属(口径:按成员当前归属聚合)。</div>`,
+    `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doChangeTeam(${mid})">保存</button>`);
+}
+async function doChangeTeam(mid) {
+  try { await api("PATCH", "/members/" + mid, { team_id: parseInt(val("ct_team")) }); closeM(); toast("已调整团队"); renderView(); }
+  catch (e) { toast(e.message); }
+}
 async function openAddMember() {
-  let tiers = []; try { tiers = (await api("GET", "/organizations/" + S.orgId + "/tiers", null)) || []; } catch (e) {}
+  let tiers = [], teams = [];
+  try { tiers = (await api("GET", "/organizations/" + S.orgId + "/tiers", null)) || []; } catch (e) {}
+  try { teams = (await api("GET", "/organizations/" + S.orgId + "/teams", null)) || []; } catch (e) {}
   const opts = tiers.map(t => `<option value="${t.id}">${esc(t.name)}${t.is_default ? "(默认)" : ""}</option>`).join("");
+  const topts = (teams || []).filter(t => t.status !== "archived").map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join("");
   modal("开通成员", `<div class="fld"><label>姓名</label><input id="am_n" placeholder="钱晨"></div>
     <div class="fld"><label>登录名(真实邮箱/用户名,可选)</label><input id="am_e" placeholder="留空则自动生成"></div>
+    <div class="fld"><label>团队(可选)</label><select id="am_team"><option value="">未分组</option>${topts}</select></div>
     <div class="fld"><label>层级</label><select id="am_t">${opts || '<option value="">(先建层级)</option>'}</select></div>
     <div class="note">登录名留空将自动生成。${S.mvp ? "系统将建 new-api 用户并下发层级初始额度,本期不代发 Key(员工登录后在「我的 Key」自助创建);登录邮箱与初始密码开通后回显一次。" : "系统将建 new-api 用户、代发 API key、下发层级初始额度。明文 key 仅创建后回显一次。"}</div>`,
     `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doAddMember()">开通成员</button>`);
@@ -384,6 +414,7 @@ async function doAddMember() {
     const body = { name: val("am_n") };
     const em = val("am_e").trim(); if (em) body.email = em; // T11:自定义登录名,留空后端 fallback
     const t = val("am_t"); if (t) body.tier_id = parseInt(t);
+    const tm = val("am_team"); if (tm) body.team_id = parseInt(tm); // F2-1:开通时选团队(留空=未分组)
     const d = await api("POST", "/organizations/" + S.orgId + "/members", body);
     const keyRow = d.api_key
       ? `<tr><td class="k">API Key</td><td><b>${esc(d.api_key)}</b> <span class="lk" onclick="navigator.clipboard&&navigator.clipboard.writeText('${esc(d.api_key)}');toast('已复制')">复制</span></td></tr>`
@@ -433,13 +464,41 @@ async function toggleMember(mid, enable) {
 }
 VIEWS.teams = async () => {
   const d = await api("GET", "/organizations/" + S.orgId + "/teams", null);
-  const rows = (d || []).map(t => `<tr><td>${esc(t.name)}</td><td>${pill(t.status, "mut")}</td></tr>`).join("");
-  return head("团队", "组织管理员维护团队")
-    + (S.role === "org_admin" ? `<div class="toolbar"><button class="btn pri" onclick="openCreateTeam()">+ 新建团队</button></div>` : "")
-    + `<div class="panel"><table><tbody>${rows || '<tr><td class="empty">暂无团队</td></tr>'}</tbody></table></div>`;
+  const showArch = !!S.teamShowArchived;
+  const list = (d || []).filter(t => showArch || t.status !== "archived");
+  const isA = S.role === "org_admin";
+  const rows = list.map(t => {
+    const arch = t.status === "archived";
+    const acts = isA ? `<td class="right">
+      <span class="btn sm" onclick="openTeamUsage(${t.id},'${esc(t.name)}')">用量</span>
+      <span class="btn sm" onclick="openRenameTeam(${t.id},'${esc(t.name)}')">改名</span>
+      ${arch ? `<span class="btn sm" onclick="doUnarchiveTeam(${t.id})">恢复</span>` : `<span class="btn sm danger" onclick="doArchiveTeam(${t.id},'${esc(t.name)}')">归档</span>`}
+    </td>` : "<td></td>";
+    return `<tr><td>${esc(t.name)}${arch ? ' <span class="tag">已归档</span>' : ""}</td><td>${t.member_count} 人</td>${acts}</tr>`;
+  }).join("");
+  return head("团队", "团队是管理 / 用量维度,本期不涉及额度 · 员工归团队后可分团队看用量")
+    + (isA ? `<div class="toolbar"><button class="btn pri" onclick="openCreateTeam()">+ 新建团队</button>
+       <label class="mini" style="margin-left:12px;cursor:pointer"><input type="checkbox" ${showArch ? "checked" : ""} onclick="S.teamShowArchived=this.checked;renderView()"> 显示已归档</label></div>` : "")
+    + `<div class="panel"><table><thead><tr><th>团队</th><th>成员数</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan=3 class="empty">暂无团队</td></tr>'}</tbody></table></div>`;
 };
 function openCreateTeam() { modal("新建团队", `<div class="fld"><label>团队名称</label><input id="tm_n" placeholder="研发一组"></div>`, `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doCreateTeam()">创建</button>`); }
 async function doCreateTeam() { try { await api("POST", "/organizations/" + S.orgId + "/teams", { name: val("tm_n") }); closeM(); toast("已创建"); renderView(); } catch (e) { toast(e.message); } }
+function openRenameTeam(tid, name) { modal("团队改名", `<div class="fld"><label>团队名称</label><input id="tm_rn" value="${esc(name)}"></div>`, `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doRenameTeam(${tid})">保存</button>`); }
+async function doRenameTeam(tid) { try { await api("PATCH", "/organizations/" + S.orgId + "/teams/" + tid, { name: val("tm_rn") }); closeM(); toast("已改名"); renderView(); } catch (e) { toast(e.message); } }
+async function doArchiveTeam(tid, name) { if (!confirm("归档团队「" + name + "」?(团队下若有在用成员需先转出/停用)")) return; try { await api("POST", "/organizations/" + S.orgId + "/teams/" + tid + "/archive", null); toast("已归档"); renderView(); } catch (e) { toast(e.message); } }
+async function doUnarchiveTeam(tid) { try { await api("POST", "/organizations/" + S.orgId + "/teams/" + tid + "/unarchive", null); toast("已恢复"); renderView(); } catch (e) { toast(e.message); } }
+async function openTeamUsage(tid, name) {
+  try {
+    const u = await api("GET", "/organizations/" + S.orgId + "/teams/" + tid + "/usage?since_hours=" + S.win, null);
+    const mrows = (u.by_member || []).map(b => `<tr><td>${esc(b.label || ("用户#" + b.key))}</td><td class="right">${money(b.consumed_quota)}</td></tr>`).join("") || '<tr><td class="empty" colspan=2>该窗口暂无用量</td></tr>';
+    const modrows = (u.by_model || []).map(b => `<tr><td>${esc(b.key)}</td><td class="right">${money(b.consumed_quota)}</td></tr>`).join("") || '<tr><td class="empty" colspan=2>该窗口暂无用量</td></tr>';
+    modal("团队用量 · " + name + "(" + winLabel(S.win) + ")",
+      `<div class="note">合计 ${money(u.total_quota)} · 团队用量按成员当前归属聚合</div>
+       <table class="kvtable"><tr><td class="k">成员</td><td class="right k">费用</td></tr>${mrows}</table>
+       <table class="kvtable" style="margin-top:10px"><tr><td class="k">模型</td><td class="right k">费用</td></tr>${modrows}</table>`,
+      `<button class="btn pri" onclick="closeM()">关闭</button>`);
+  } catch (e) { toast(e.message); }
+}
 VIEWS.tiers = async () => {
   const d = await api("GET", "/organizations/" + S.orgId + "/tiers", null);
   S.tiersCache = d || []; // 供编辑弹窗回填

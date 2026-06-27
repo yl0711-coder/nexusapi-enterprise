@@ -22,6 +22,9 @@ var mvpWriteAllow = []string{
 	"POST /api/v1/organizations/*/archive",
 	"POST /api/v1/organizations/*/unarchive",
 	"POST /api/v1/organizations/*/teams",
+	"PATCH /api/v1/organizations/*/teams/*",          // F1 团队改名(按段匹配,不误命中 /teams)
+	"POST /api/v1/organizations/*/teams/*/archive",   // F1 团队归档
+	"POST /api/v1/organizations/*/teams/*/unarchive", // F1 撤归档
 	"POST /api/v1/organizations/*/tiers",
 	"PUT /api/v1/tiers/*",
 	"DELETE /api/v1/tiers/*",

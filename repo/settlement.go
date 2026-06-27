@@ -170,6 +170,40 @@ func (s *Store) AggregateUsageLedger(ctx context.Context, orgID int64, since tim
 	return byModel, byUser, total, rows.Err()
 }
 
+// AggregateUsageLedgerByTeam 团队下钻聚合(口径A:JOIN member.team_id 现算,不在 ledger 固化 team 列)。
+// teamID==0 → 未分组(member.team_id IS NULL)。返回该团队当前成员的 byModel/byUser/total。只读 join,不碰落账写链路。
+func (s *Store) AggregateUsageLedgerByTeam(ctx context.Context, orgID int64, since time.Time, teamID int64) (byModel map[string]int64, byUser map[int64]int64, total int64, err error) {
+	byModel = map[string]int64{}
+	byUser = map[int64]int64{}
+	args := []any{orgID, since}
+	teamCond := "m.team_id = ?"
+	if teamID == 0 {
+		teamCond = "m.team_id IS NULL"
+	} else {
+		args = append(args, teamID)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT ul.model_name, ul.newapi_user_id, SUM(ul.consumed_quota)
+		 FROM usage_ledger ul JOIN member m ON m.newapi_user_id = ul.newapi_user_id AND m.org_id = ul.org_id
+		 WHERE ul.org_id = ? AND ul.time_bucket >= ? AND `+teamCond+`
+		 GROUP BY ul.model_name, ul.newapi_user_id`, args...)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var model string
+		var uid, q int64
+		if err := rows.Scan(&model, &uid, &q); err != nil {
+			return nil, nil, 0, err
+		}
+		byModel[model] += q
+		byUser[uid] += q
+		total += q
+	}
+	return byModel, byUser, total, rows.Err()
+}
+
 // SumMemberModelToday 累计某成员某模型在 since 之后的已结算消耗(单模型软限额 E4 用)。
 func (s *Store) SumMemberModelToday(ctx context.Context, orgID, newapiUserID int64, model string, since time.Time) (int64, error) {
 	var q sql.NullInt64

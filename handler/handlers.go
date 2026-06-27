@@ -161,16 +161,122 @@ func (h *Handler) handleListTeams(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, err)
 		return
 	}
-	teams, err := h.svc.ListTeams(r.Context(), c, orgID)
+	teams, err := h.svc.ListTeamsWithCounts(r.Context(), c, orgID)
 	if err != nil {
 		writeErr(w, r, err)
 		return
 	}
-	views := make([]teamView, 0, len(teams))
+	views := make([]teamCountView, 0, len(teams))
 	for _, t := range teams {
-		views = append(views, toTeamView(t))
+		views = append(views, teamCountView{teamView: toTeamView(t.Team), MemberCount: t.MemberCount})
 	}
 	writeOK(w, r, http.StatusOK, views)
+}
+
+// GET /organizations/{id}/teams/{tid} — 团队详情(含成员数,F1/F4)。
+func (h *Handler) handleGetTeam(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	orgID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	tid, err := pathInt64(r, "tid")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	t, err := h.svc.GetTeamDetail(r.Context(), c, orgID, tid)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, teamCountView{teamView: toTeamView(t.Team), MemberCount: t.MemberCount})
+}
+
+type updateTeamReq struct {
+	Name string `json:"name"`
+}
+
+// PATCH /organizations/{id}/teams/{tid} — 改团队名(F1·AC-F1-1)。
+func (h *Handler) handleUpdateTeam(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	orgID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	tid, err := pathInt64(r, "tid")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	var in updateTeamReq
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	t, err := h.svc.UpdateTeam(r.Context(), c, orgID, tid, in.Name)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, toTeamView(t))
+}
+
+// POST /organizations/{id}/teams/{tid}/archive — 归档团队(F1·AC-F1-2/3)。
+func (h *Handler) handleArchiveTeam(w http.ResponseWriter, r *http.Request) {
+	h.teamStatusOp(w, r, true)
+}
+
+// POST /organizations/{id}/teams/{tid}/unarchive — 撤销归档(F1·AC-F1-2)。
+func (h *Handler) handleUnarchiveTeam(w http.ResponseWriter, r *http.Request) {
+	h.teamStatusOp(w, r, false)
+}
+
+func (h *Handler) teamStatusOp(w http.ResponseWriter, r *http.Request, archive bool) {
+	c, _ := claimsFrom(r.Context())
+	orgID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	tid, err := pathInt64(r, "tid")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	if archive {
+		err = h.svc.ArchiveTeam(r.Context(), c, orgID, tid)
+	} else {
+		err = h.svc.UnarchiveTeam(r.Context(), c, orgID, tid)
+	}
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{"ok": true})
+}
+
+// GET /organizations/{id}/teams/{tid}/usage — 团队下钻用量(F3·AC-F3-2)。
+func (h *Handler) handleTeamUsage(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	orgID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	tid, err := pathInt64(r, "tid")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	u, err := h.svc.TeamUsage(r.Context(), c, orgID, tid, sinceHours(r))
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, usageView(u))
 }
 
 type createTeamReq struct {

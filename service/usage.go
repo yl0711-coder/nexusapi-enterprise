@@ -28,6 +28,7 @@ type UsageReport struct {
 	TotalQuota int64         `json:"total_quota"`
 	ByModel    []UsageBucket `json:"by_model"`
 	ByMember   []UsageBucket `json:"by_member,omitempty"`
+	ByTeam     []UsageBucket `json:"by_team,omitempty"` // F3:按团队(key=team_id,"0"=未分组);仅整组织看板(无 user/team 过滤时)填
 }
 
 // BudgetRef 是「额度参考条」最小只读数据(#4·总监裁定走 B):只两个美元口径数,不带任何价/控字段。
@@ -72,7 +73,25 @@ func (s *Service) OrgUsage(ctx context.Context, c session.Claims, orgID int64, s
 	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
 		return nil, err
 	}
-	return s.aggregateUsage(ctx, sinceHours, &orgID, nil)
+	return s.aggregateUsage(ctx, sinceHours, &orgID, nil, nil)
+}
+
+// TeamUsage 团队下钻用量(F3·org_admin/operator):某团队当前成员的 by_member + by_model + 总量(口径A)。
+// teamID==0 → 未分组桶。仅本 org 任意 tid(assertOrgScope + assertRole);本期无 team_leader 作用域。
+func (s *Service) TeamUsage(ctx context.Context, c session.Claims, orgID, teamID int64, sinceHours int) (*UsageReport, error) {
+	if err := assertOrgScope(c, orgID); err != nil {
+		return nil, err
+	}
+	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
+		return nil, err
+	}
+	if teamID != 0 { // 指定团队须存在于本 org(未分组 0 不校验);跨 org → 404
+		if _, err := s.store.GetTeam(ctx, orgID, teamID); err != nil {
+			return nil, apperr.NotFound("团队不存在")
+		}
+	}
+	tf := teamID
+	return s.aggregateUsage(ctx, sinceHours, &orgID, nil, &tf)
 }
 
 // MemberUsage 成员用量(本人 / 上级 / 管理员)。
@@ -94,13 +113,14 @@ func (s *Service) MemberUsage(ctx context.Context, c session.Claims, orgID, memb
 		}
 	}
 	uid := m.NewapiUserID
-	return s.aggregateUsage(ctx, sinceHours, &orgID, &uid)
+	return s.aggregateUsage(ctx, sinceHours, &orgID, &uid, nil)
 }
 
 // aggregateUsage 用量聚合(B4:已结算 usage_ledger 为主 + 当期未结小窗口 logs 为辅)。
 // orgFilter 必给(看板按组织);userFilter!=nil 只算该 new-api user。历史读 ledger(分页安全、不压
 // new-api);只对"结算游标→now"小窗口实时读 logs 补当期(限 2 页,绝不长段全量)。
-func (s *Service) aggregateUsage(ctx context.Context, sinceHours int, orgFilter *int64, userFilter *int64) (*UsageReport, error) {
+// teamFilter:nil=不按团队过滤;*==0=未分组(team_id NULL);*>0=指定团队(口径A:成员当前 team_id)。
+func (s *Service) aggregateUsage(ctx context.Context, sinceHours int, orgFilter *int64, userFilter *int64, teamFilter *int64) (*UsageReport, error) {
 	// 改动⑦:看板时间窗放到一季度(92 天),支持「近 90 天」选项;仍是只读聚合,无副作用。
 	if sinceHours <= 0 || sinceHours > 24*92 {
 		sinceHours = 24
@@ -129,9 +149,16 @@ func (s *Service) aggregateUsage(ctx context.Context, sinceHours int, orgFilter 
 		bmem.Count++
 	}
 
-	// 1) 已结算 ledger 为主。
+	// 1) 已结算 ledger 为主。team 过滤走 JOIN member 变体(口径A);否则常规(可带 userFilter)。
 	if orgFilter != nil {
-		lm, lu, _, err := s.store.AggregateUsageLedger(ctx, *orgFilter, time.Unix(since, 0).UTC(), userFilter)
+		var lm map[string]int64
+		var lu map[int64]int64
+		var err error
+		if teamFilter != nil {
+			lm, lu, _, err = s.store.AggregateUsageLedgerByTeam(ctx, *orgFilter, time.Unix(since, 0).UTC(), *teamFilter)
+		} else {
+			lm, lu, _, err = s.store.AggregateUsageLedger(ctx, *orgFilter, time.Unix(since, 0).UTC(), userFilter)
+		}
 		if err != nil {
 			return nil, apperr.Internal("").WithCause(err)
 		}
@@ -178,6 +205,15 @@ func (s *Service) aggregateUsage(ctx context.Context, sinceHours int, orgFilter 
 				if m.ID == 0 || m.OrgID != *orgFilter {
 					continue
 				}
+				if teamFilter != nil { // team 下钻:只算当前归属该团队(0=未分组)的成员
+					tk := int64(0)
+					if m.TeamID != nil {
+						tk = *m.TeamID
+					}
+					if tk != *teamFilter {
+						continue
+					}
+				}
 			}
 			add(e.ModelName, int64(e.UserID), e.Quota)
 		}
@@ -190,6 +226,8 @@ func (s *Service) aggregateUsage(ctx context.Context, sinceHours int, orgFilter 
 	if userFilter == nil {
 		// 改动④:给员工排行补显示名(user_id → 成员 display_name||login_email);查不到/非平台成员留空,前端回落显示 user_id。
 		// 复用 memberCache(上面 live-logs 段已填部分),ledger-only 的成员在此补查;归账口径与结算一致(GetMemberByNewapiUserID)。
+		// F3:同一循环顺带按团队累加(口径A,白嫖现成 member 反查的 TeamID),未分组归 key=0。仅整组织看板(无 team 过滤)建 by_team。
+		byTeam := map[int64]int64{}
 		for _, b := range byMember {
 			uid := atoi64(b.Key)
 			m := memberCache[uid]
@@ -201,6 +239,7 @@ func (s *Service) aggregateUsage(ctx context.Context, sinceHours int, orgFilter 
 					memberCache[uid] = &model.Member{}
 				}
 			}
+			teamKey := int64(0) // 0=未分组(含查不到/非平台成员),保证 Σby_team == Σby_member(AC-F3-5)
 			if m != nil && m.ID != 0 {
 				b.MemberID = m.ID // #5:供前端排行下钻(点员工→/members/{id}/usage 拉其 by_model 明细)
 				if m.DisplayName != nil && *m.DisplayName != "" {
@@ -208,11 +247,42 @@ func (s *Service) aggregateUsage(ctx context.Context, sinceHours int, orgFilter 
 				} else {
 					b.Label = m.LoginEmail
 				}
+				if m.TeamID != nil {
+					teamKey = *m.TeamID
+				}
 			}
+			byTeam[teamKey] += b.ConsumedQuota
 		}
 		rep.ByMember = sortBuckets(byMember)
+		if teamFilter == nil && orgFilter != nil { // 仅整组织看板填 by_team(团队下钻自身不再分团队)
+			rep.ByTeam = s.labelTeams(ctx, *orgFilter, byTeam)
+		}
 	}
 	return rep, nil
+}
+
+// labelTeams 把 byTeam(team_id→quota)转成带团队名的桶;key=0→"未分组";查 ListTeams 一次解析名(归档/删名缺失回落"团队#id")。
+func (s *Service) labelTeams(ctx context.Context, orgID int64, byTeam map[int64]int64) []UsageBucket {
+	names := map[int64]string{}
+	if teams, err := s.store.ListTeams(ctx, orgID); err == nil {
+		for _, t := range teams {
+			names[t.ID] = t.Name
+		}
+	}
+	out := make([]UsageBucket, 0, len(byTeam))
+	for tid, q := range byTeam {
+		label := "未分组"
+		if tid != 0 {
+			if n, ok := names[tid]; ok {
+				label = n
+			} else {
+				label = "团队#" + itoa(tid)
+			}
+		}
+		out = append(out, UsageBucket{Key: itoa(tid), Label: label, ConsumedQuota: q})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ConsumedQuota > out[j].ConsumedQuota })
+	return out
 }
 
 func sortBuckets(m map[string]*UsageBucket) []UsageBucket {

@@ -1527,6 +1527,137 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 
 	t.Log("里程碑 3b e2e 全通过:读logs扣费 + 去重防重复扣 + 守恒 + 硬停(逐组织开关)+ 充值解硬停恢复 + GZ-01 D2路径B + D1原子回滚 + GZ-03 ⑤失败收口/不漏扣/告警 + 改动⑤观测落账不扣钱 + 改动②③开通无token/自助建key/越权隔离")
 
+	// ===== 团队管理与团队用量可视化(F1-F4)验收 =====
+	{
+		var tAdminMID int64
+		if err := store.DB().QueryRowContext(ctx, "SELECT id FROM member WHERE org_id=? AND role='org_admin' LIMIT 1", orgID).Scan(&tAdminMID); err != nil {
+			t.Fatalf("团队:取管理员 member_id 失败: %v", err)
+		}
+		tAdmin := session.Claims{MemberID: tAdminMID, OrgID: orgID, Role: session.RoleOrgAdmin}
+		tObs := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log, ObserveMode: true})
+
+		// 建两团队
+		mkTeam := func(name string) int64 {
+			var tr struct {
+				ID int64 `json:"id"`
+			}
+			if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/teams", orgID), adminTok, map[string]any{"name": name}, &tr); st != http.StatusCreated {
+				t.Fatalf("团队:建 %s HTTP=%d", name, st)
+			}
+			return tr.ID
+		}
+		teamA := mkTeam("研发组-A")
+		teamB := mkTeam("测试组-B")
+
+		// F1-1 改名 200;member → 403;跨 org/不存在 → 404
+		if st := api.do("PATCH", fmt.Sprintf("/api/v1/organizations/%d/teams/%d", orgID, teamA), adminTok, map[string]any{"name": "研发组-A1"}, nil); st != http.StatusOK {
+			t.Errorf("🔴 F1-1 改名应 200,得 %d", st)
+		}
+		if st := api.do("PATCH", fmt.Sprintf("/api/v1/organizations/%d/teams/%d", orgID, teamA), memberTok, map[string]any{"name": "x"}, nil); st != http.StatusForbidden {
+			t.Errorf("🔴 §七 member 改团队名必须 403,得 %d", st)
+		}
+		if st := api.do("PATCH", fmt.Sprintf("/api/v1/organizations/%d/teams/%d", orgID, int64(99999999)), adminTok, map[string]any{"name": "x"}, nil); st != http.StatusNotFound {
+			t.Errorf("🔴 AC-F1-5 不存在/跨 org 团队改名必须 404,得 %d", st)
+		}
+
+		if newapiSQLDSN != "" {
+			// 两团队各开一名成员,各造消费,结算落账
+			mA, err := tObs.OpenMember(ctx, tAdmin, orgID, service.OpenMemberInput{Name: "A队员", TeamID: &teamA})
+			if err != nil {
+				t.Fatalf("团队:开 A 队员失败: %v", err)
+			}
+			mB, err := tObs.OpenMember(ctx, tAdmin, orgID, service.OpenMemberInput{Name: "B队员", TeamID: &teamB})
+			if err != nil {
+				t.Fatalf("团队:开 B 队员失败: %v", err)
+			}
+			const qA, qB = int64(3000000), int64(7000000)
+			nowSec := time.Now().Unix()
+			seedConsumptionLog(t, newapiSQLDSN, mA.NewapiUserID, "gpt-5-mini", qA, nowSec-3)
+			seedConsumptionLog(t, newapiSQLDSN, mB.NewapiUserID, "gpt-5.4", qB, nowSec-3)
+			time.Sleep(4 * time.Second)
+			if _, err := tObs.RunSettlement(ctx); err != nil {
+				t.Fatalf("团队:结算失败: %v", err)
+			}
+
+			type bkt struct {
+				Key           string `json:"key"`
+				Label         string `json:"label"`
+				ConsumedQuota int64  `json:"consumed_quota"`
+			}
+			type uresp struct {
+				TotalQuota int64 `json:"total_quota"`
+				ByTeam     []bkt `json:"by_team"`
+				ByMember   []bkt `json:"by_member"`
+			}
+			sumByKey := func(bs []bkt, key string) int64 {
+				for _, b := range bs {
+					if b.Key == key {
+						return b.ConsumedQuota
+					}
+				}
+				return 0
+			}
+			itoaT := func(n int64) string { return strconv.FormatInt(n, 10) }
+			// AC-F3-1/5:by_team 含两团队桶 + 各=该团队成员之和;Σby_team == 公司总额
+			var ou uresp
+			if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/usage?since_hours=168", orgID), adminTok, nil, &ou); st != http.StatusOK {
+				t.Fatalf("团队:GET usage HTTP=%d", st)
+			}
+			if got := sumByKey(ou.ByTeam, itoaT(teamA)); got != qA {
+				t.Errorf("🔴 AC-F3-1 by_team[A] 应=%d(A 队员之和),得 %d", qA, got)
+			}
+			if got := sumByKey(ou.ByTeam, itoaT(teamB)); got != qB {
+				t.Errorf("🔴 AC-F3-1 by_team[B] 应=%d,得 %d", qB, got)
+			}
+			var teamSum int64
+			for _, b := range ou.ByTeam {
+				teamSum += b.ConsumedQuota
+			}
+			if teamSum != ou.TotalQuota {
+				t.Errorf("🔴 AC-F3-5 Σby_team(%d) 应==公司总额(%d)", teamSum, ou.TotalQuota)
+			}
+			// AC-F3-2:团队下钻 by_member + 总量
+			var tu uresp
+			if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/teams/%d/usage?since_hours=168", orgID, teamA), adminTok, nil, &tu); st != http.StatusOK {
+				t.Fatalf("团队:GET team usage HTTP=%d", st)
+			}
+			if tu.TotalQuota != qA || len(tu.ByMember) != 1 {
+				t.Errorf("🔴 AC-F3-2 团队A下钻 total 应=%d、by_member 1 人,得 total=%d members=%d", qA, tu.TotalQuota, len(tu.ByMember))
+			}
+			// AC-F3-2 隔离:member 下钻 → 403
+			if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/teams/%d/usage", orgID, teamA), memberTok, nil, nil); st != http.StatusForbidden {
+				t.Errorf("🔴 §七 member 看团队用量必须 403,得 %d", st)
+			}
+
+			// AC-F1-3:A 队有 active 成员 → 归档被拒
+			if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/teams/%d/archive", orgID, teamA), adminTok, nil, nil); st == http.StatusOK {
+				t.Errorf("🔴 AC-F1-3 团队有在用成员时归档必须被拒,却 200")
+			}
+			// AC-F2-2/3:把 A 队员调到 B 队 → A 空、B 含两人;用量按新团队归属(口径A 现算,无需再结算)
+			if st := api.do("PATCH", fmt.Sprintf("/api/v1/members/%d", mA.MemberID), adminTok, map[string]any{"team_id": teamB}, nil); st != http.StatusOK {
+				t.Fatalf("团队:调团队 HTTP=%d", st)
+			}
+			var ou2 uresp
+			api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/usage?since_hours=168", orgID), adminTok, nil, &ou2)
+			if got := sumByKey(ou2.ByTeam, itoaT(teamA)); got != 0 {
+				t.Errorf("🔴 AC-F2-3 调走后 by_team[A] 应=0,得 %d", got)
+			}
+			if got := sumByKey(ou2.ByTeam, itoaT(teamB)); got != qA+qB {
+				t.Errorf("🔴 AC-F2-3 调入后 by_team[B] 应=%d(A+B),得 %d", qA+qB, got)
+			}
+			// AC-F1-2:A 队现已空 → 归档 200 + 撤归档 200
+			if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/teams/%d/archive", orgID, teamA), adminTok, nil, nil); st != http.StatusOK {
+				t.Errorf("🔴 AC-F1-2 空团队归档应 200,得 %d", st)
+			}
+			if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/teams/%d/unarchive", orgID, teamA), adminTok, nil, nil); st != http.StatusOK {
+				t.Errorf("🔴 AC-F1-2 撤归档应 200,得 %d", st)
+			}
+			t.Logf("团队 F1-F4 ok: by_team 聚合=成员之和(Σ=公司总额)+ 下钻 + 调团队重归属 + 归档前置/归档/撤档 + 隔离 403/404")
+		} else {
+			t.Logf("团队:无 NEXUS_IT_NEWAPI_SQL_DSN,跳过用量聚合段,仅验 CRUD/隔离")
+		}
+	}
+
 	// ===== 个人设置·自助改密回归(堵"运营方永久知道初始密码";置于末尾,改 operator 密码不影响前序)=====
 	{
 		newPw := "NewOpsPass456"

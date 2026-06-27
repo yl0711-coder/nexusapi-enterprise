@@ -43,6 +43,12 @@ func toTeamView(t *model.Team) teamView {
 	return teamView{ID: t.ID, OrgID: t.OrgID, Name: t.Name, DefaultTierID: t.DefaultTierID, Status: t.Status}
 }
 
+// teamCountView 团队 + active 成员数(F4 列表/详情;映射在 handler 里填,views 不引 service)。
+type teamCountView struct {
+	teamView
+	MemberCount int `json:"member_count"`
+}
+
 type tierView struct {
 	ID           int64            `json:"id"`
 	OrgID        int64            `json:"org_id"`

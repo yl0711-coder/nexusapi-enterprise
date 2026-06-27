@@ -54,6 +54,54 @@ func (s *Store) ListTeams(ctx context.Context, orgID int64) ([]*model.Team, erro
 	return out, rows.Err()
 }
 
+// UpdateTeamName 改团队名(同 org 重名 → ErrConflict)。
+func (s *Store) UpdateTeamName(ctx context.Context, orgID, teamID int64, name string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE team SET name = ? WHERE id = ? AND org_id = ? AND deleted_at IS NULL`, name, teamID, orgID)
+	if err != nil && isDupKey(err) {
+		return ErrConflict
+	}
+	return err
+}
+
+// UpdateTeamStatus 改团队状态(归档/恢复:status=archived/active,软隐藏不物理删,不碰 deleted_at)。
+func (s *Store) UpdateTeamStatus(ctx context.Context, orgID, teamID int64, status string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE team SET status = ? WHERE id = ? AND org_id = ? AND deleted_at IS NULL`, status, teamID, orgID)
+	return err
+}
+
+// CountActiveMembersInTeam 数某团队 active 成员(归档前置校验 AC-F1-3)。
+func (s *Store) CountActiveMembersInTeam(ctx context.Context, orgID, teamID int64) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM member WHERE org_id = ? AND team_id = ? AND status = ?`,
+		orgID, teamID, model.MemberStatusActive).Scan(&n)
+	return n, err
+}
+
+// CountActiveMembersByTeam 批量数每团队 active 成员数(F4,GROUP BY 一次查,禁 N+1)。返回 team_id→数。
+func (s *Store) CountActiveMembersByTeam(ctx context.Context, orgID int64) (map[int64]int, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT team_id, COUNT(*) FROM member
+		 WHERE org_id = ? AND team_id IS NOT NULL AND status = ? GROUP BY team_id`,
+		orgID, model.MemberStatusActive)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]int{}
+	for rows.Next() {
+		var tid int64
+		var n int
+		if err := rows.Scan(&tid, &n); err != nil {
+			return nil, err
+		}
+		out[tid] = n
+	}
+	return out, rows.Err()
+}
+
 func scanTeam(r rowScanner) (*model.Team, error) {
 	var t model.Team
 	err := r.Scan(&t.ID, &t.OrgID, &t.Name, &t.LeaderMemberID, &t.DefaultTierID, &t.Status, &t.CreatedAt, &t.UpdatedAt)

@@ -59,6 +59,11 @@ func (h *Handler) Routes() http.Handler {
 	// 团队。
 	mux.HandleFunc("GET /api/v1/organizations/{id}/teams", h.requireAuth(h.handleListTeams))
 	mux.HandleFunc("POST /api/v1/organizations/{id}/teams", h.requireAuth(h.handleCreateTeam))
+	mux.HandleFunc("GET /api/v1/organizations/{id}/teams/{tid}", h.requireAuth(h.handleGetTeam))                  // F1 详情
+	mux.HandleFunc("PATCH /api/v1/organizations/{id}/teams/{tid}", h.requireAuth(h.handleUpdateTeam))             // F1 改名
+	mux.HandleFunc("POST /api/v1/organizations/{id}/teams/{tid}/archive", h.requireAuth(h.handleArchiveTeam))     // F1 归档
+	mux.HandleFunc("POST /api/v1/organizations/{id}/teams/{tid}/unarchive", h.requireAuth(h.handleUnarchiveTeam)) // F1 撤归档
+	mux.HandleFunc("GET /api/v1/organizations/{id}/teams/{tid}/usage", h.requireAuth(h.handleTeamUsage))          // F3 团队下钻用量
 
 	// 层级。
 	mux.HandleFunc("GET /api/v1/organizations/{id}/tiers", h.requireAuth(h.handleListTiers))

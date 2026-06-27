@@ -35,6 +35,10 @@ services:
       GLOBAL_API_RATE_LIMIT_DURATION: "60"
       GLOBAL_WEB_RATE_LIMIT: "100000"
       GLOBAL_WEB_RATE_LIMIT_DURATION: "60"
+      # CriticalRateLimit 独立于 GLOBAL(默认仅 20 次/20 分钟,管登录/注册等);e2e 每次开通成员都登录一次,
+      # 累计会触发 429。测试环境抬高(NUM+DURATION 都要给)。
+      CRITICAL_RATE_LIMIT: "100000"
+      CRITICAL_RATE_LIMIT_DURATION: "60"
     tmpfs:
       - /data
     expose:

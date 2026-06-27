@@ -96,6 +96,7 @@ func usageView(u *service.UsageReport) map[string]any {
 		"total_quota": u.TotalQuota,
 		"by_model":    u.ByModel,
 		"by_member":   u.ByMember,
+		"by_team":     u.ByTeam, // F3:按团队(整组织看板填;团队下钻/成员视图为空)
 	}
 }
 

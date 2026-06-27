@@ -73,6 +73,7 @@ func TestMVPGate_BlocksMoneyAndControl(t *testing.T) {
 		{"POST", "/api/v1/members/1/status"},
 		{"POST", "/api/v1/members/1/tokens"}, // 改动③ 自助建 key
 		{"POST", "/api/v1/members/1/key:rotate"},
+		{"POST", "/api/v1/me/password"}, // 个人设置·自助改密(MVP 放行)
 	}
 	for _, a := range allowed {
 		if st := do(a[0], a[1]); st == http.StatusNotFound {

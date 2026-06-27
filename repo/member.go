@@ -120,6 +120,13 @@ func (s *Store) UpdateMemberStatus(ctx context.Context, orgID, memberID int64, s
 	return err
 }
 
+// UpdateMemberPassword 改成员平台登录密码哈希(个人设置·自助改密)。
+func (s *Store) UpdateMemberPassword(ctx context.Context, orgID, memberID int64, passwordHash string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE member SET platform_password_hash = ? WHERE id = ? AND org_id = ?`, passwordHash, memberID, orgID)
+	return err
+}
+
 // UpdateMemberTeamTier 改成员团队/层级(nil=不改,PATCH /members/:id)。
 func (s *Store) UpdateMemberTeamTier(ctx context.Context, orgID, memberID int64, teamID, tierID *int64) error {
 	_, err := s.db.ExecContext(ctx,

@@ -32,6 +32,26 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type changePasswordReq struct {
+	OldPassword string `json:"old_password"`
+	NewPassword string `json:"new_password"`
+}
+
+// POST /me/password — 个人设置·自助改平台登录密码(全角色)。
+func (h *Handler) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	var in changePasswordReq
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	if err := h.svc.ChangePassword(r.Context(), c, in.OldPassword, in.NewPassword); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{"ok": true})
+}
+
 func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())
 	m, err := h.svc.Me(r.Context(), c)

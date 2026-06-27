@@ -1526,6 +1526,27 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	}
 
 	t.Log("里程碑 3b e2e 全通过:读logs扣费 + 去重防重复扣 + 守恒 + 硬停(逐组织开关)+ 充值解硬停恢复 + GZ-01 D2路径B + D1原子回滚 + GZ-03 ⑤失败收口/不漏扣/告警 + 改动⑤观测落账不扣钱 + 改动②③开通无token/自助建key/越权隔离")
+
+	// ===== 个人设置·自助改密回归(堵"运营方永久知道初始密码";置于末尾,改 operator 密码不影响前序)=====
+	{
+		newPw := "NewOpsPass456"
+		if st := api.do("POST", "/api/v1/me/password", opTok, map[string]any{"old_password": opPassword, "new_password": newPw}, nil); st != http.StatusOK {
+			t.Fatalf("改密应 200,得 %d", st)
+		}
+		if st := api.do("POST", "/api/v1/auth/login", "", map[string]any{"email": opEmail, "password": opPassword}, nil); st != http.StatusUnauthorized {
+			t.Errorf("🔴 改密后旧密码登录应 401,得 %d", st)
+		}
+		if st := api.do("POST", "/api/v1/auth/login", "", map[string]any{"email": opEmail, "password": newPw}, nil); st != http.StatusOK {
+			t.Errorf("🔴 改密后新密码登录应 200,得 %d", st)
+		}
+		if st := api.do("POST", "/api/v1/me/password", opTok, map[string]any{"old_password": "wrongold", "new_password": "Another12345"}, nil); st == http.StatusOK {
+			t.Errorf("🔴 旧密码错误时改密必须被拒,却 200")
+		}
+		if st := api.do("POST", "/api/v1/me/password", opTok, map[string]any{"old_password": newPw, "new_password": "short"}, nil); st == http.StatusOK {
+			t.Errorf("🔴 新密码过短(<8)必须被拒,却 200")
+		}
+		t.Logf("改密回归 ok: 旧密码改成功 + 旧登录401 + 新登录200 + 错旧密码拒 + 短新密码拒")
+	}
 }
 
 // ---- helpers ----

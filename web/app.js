@@ -69,6 +69,7 @@ function renderShell() {
       <span class="demolbl">${esc(roleCN(S.role))}</span>
       <div class="spacer"></div>
       <div class="me"><span class="av">${esc(av)}</span><span>${esc(S.me.display_name || S.me.login_email)}</span>
+        <span class="lk" onclick="go('settings')" style="margin-left:10px">设置</span>
         <span class="lk" onclick="logout()" style="margin-left:10px">退出</span></div>
     </div>
     <div class="side" id="side"></div>
@@ -128,6 +129,34 @@ const VIEWS_AFTER = {};
 
 /* ===================== 运营方 ===================== */
 const VIEWS = {};
+
+/* ---- 个人设置(全角色:账号信息 + 改密) ---- */
+VIEWS.settings = async () => {
+  const m = S.me;
+  return head("个人设置", "账号信息与登录密码")
+    + `<div class="panel"><div class="ph">账号信息</div><div class="pb"><table class="kvtable">
+        <tr><td class="k">显示名</td><td>${esc(m.display_name || "-")}</td></tr>
+        <tr><td class="k">登录邮箱</td><td>${esc(m.login_email)}</td></tr>
+        <tr><td class="k">角色</td><td>${esc(roleCN(m.role))}</td></tr></table></div></div>
+    <div class="panel"><div class="ph">修改密码</div><div class="pb">
+        <div class="fld" style="max-width:360px"><label>当前密码</label><input id="cp_old" type="password" placeholder="当前密码"></div>
+        <div class="fld" style="max-width:360px"><label>新密码</label><input id="cp_new" type="password" placeholder="8–64 位"></div>
+        <div class="fld" style="max-width:360px"><label>确认新密码</label><input id="cp_new2" type="password" placeholder="再输一次"></div>
+        <button class="btn pri" onclick="doChangePassword()">保存新密码</button>
+      </div></div>`;
+};
+async function doChangePassword() {
+  const oldp = val("cp_old"), np = val("cp_new"), np2 = val("cp_new2");
+  if (!oldp || !np) { toast("请填写当前密码与新密码"); return; }
+  if (np !== np2) { toast("两次新密码不一致"); return; }
+  if (np.length < 8 || np.length > 64) { toast("新密码须 8–64 位"); return; }
+  try {
+    await api("POST", "/me/password", { old_password: oldp, new_password: np });
+    toast("密码已修改,请牢记新密码");
+    ["cp_old", "cp_new", "cp_new2"].forEach(id => { const e = document.getElementById(id); if (e) e.value = ""; });
+  } catch (e) { toast(e.message); }
+}
+
 VIEWS.orgs = async () => {
   const inclArch = !!S.orgShowArchived; // T12:是否显示已归档
   const d = await api("GET", "/organizations?page=1&page_size=50" + (inclArch ? "&include_archived=true" : ""), null);

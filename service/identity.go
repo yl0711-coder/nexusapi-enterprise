@@ -70,6 +70,36 @@ func (s *Service) Me(ctx context.Context, c session.Claims) (*model.Member, erro
 	return m, nil
 }
 
+// ChangePassword 个人设置·自助改平台登录密码:校验旧密码 → 校验新密码 → bcrypt 重哈希 → 落库。
+// 对所有平台账号通用(运营方/组织管理员/团队负责人/成员改各自的);堵"运营方永久知道客户初始密码"的口子。
+func (s *Service) ChangePassword(ctx context.Context, c session.Claims, oldPassword, newPassword string) error {
+	m, err := s.store.GetMember(ctx, c.OrgID, c.MemberID)
+	if errors.Is(err, repo.ErrNotFound) {
+		return apperr.Unauthenticated("会话对应的账号不存在")
+	}
+	if err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	if m.PlatformPasswordHash == nil || !checkPassword(*m.PlatformPasswordHash, oldPassword) {
+		return apperr.InvalidParam("当前密码不正确")
+	}
+	if n := len(newPassword); n < 8 || n > 64 {
+		return apperr.InvalidParam("新密码长度须为 8–64 位")
+	}
+	if newPassword == oldPassword {
+		return apperr.InvalidParam("新密码不能与当前密码相同")
+	}
+	hash, err := hashPassword(newPassword)
+	if err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	if err := s.store.UpdateMemberPassword(ctx, c.OrgID, c.MemberID, hash); err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	s.audit(ctx, c, c.OrgID, "change_password", "member", &c.MemberID, nil)
+	return nil
+}
+
 // SeedOperator 在平台首次启动时确保存在一个运营方账号(引导账号)。
 // 幂等:若该邮箱已存在则不改动。运营方账号挂在专属的运营方组织下,
 // 是平台账号(无 new-api 代发 key,newapi_user_id 留空)。

@@ -1480,6 +1480,31 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		}
 		t.Logf("收口 ok: recharge-requests 客户404/运营200;pricing/groups 客户 ratio 全裁0(分组名保留)/运营保留真倍率")
 
+		// P1:层级月额度(控制字段)藏价裁剪——客户 org_admin observe 下读 /tiers 见 monthly=nil;运营方见真值。
+		if adTiers, terr := obsSvc2.ListTiers(ctx, adminClaims, orgID); terr != nil {
+			t.Errorf("🔴 tier藏价:org_admin 读 tiers 不应报错: %v", terr)
+		} else {
+			for _, t2 := range adTiers {
+				if t2.MonthlyLimit != nil {
+					t.Errorf("🔴 tier藏价:MVP 下客户读层级 monthly_limit 必须裁成 nil,层级 %s 仍=%d", t2.Name, *t2.MonthlyLimit)
+				}
+			}
+		}
+		if opTiers, terr := obsSvc2.ListTiers(ctx, operatorClaims, orgID); terr != nil {
+			t.Errorf("🔴 tier藏价:运营方读 tiers 不应报错: %v", terr)
+		} else {
+			anyMonthly := false
+			for _, t2 := range opTiers {
+				if t2.MonthlyLimit != nil {
+					anyMonthly = true
+				}
+			}
+			if !anyMonthly {
+				t.Errorf("🔴 tier藏价:运营方读层级应保留真月额度(非裁剪),却全 nil=误伤运营方")
+			}
+			t.Logf("tier藏价 ok: 客户读层级 monthly_limit 裁 nil(模型集/分组保留)/运营保留真值")
+		}
+
 		// ===== #4 额度参考条藏价不变量(总监指定):客户读 /balance 仍 404、但读 budget-ref 得两数 =====
 		// 红线核验:已用必须从 usage_ledger 求和(observe 下 company_balance.total_consumed 冻结,读它会 0),
 		// 故 ConsumedQuota>0 即证明走的是 ledger 而非冻结字段;预付读 total_recharged。

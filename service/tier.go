@@ -55,7 +55,26 @@ func (s *Service) CreateTier(ctx context.Context, c session.Claims, orgID int64,
 		return nil, apperr.Internal("").WithCause(err)
 	}
 	s.audit(ctx, c, orgID, "create_tier", "tier", &id, map[string]any{"name": in.Name})
-	return s.store.GetTier(ctx, orgID, id)
+	t, err := s.store.GetTier(ctx, orgID, id)
+	if err != nil {
+		return nil, err
+	}
+	s.redactTierMoney(c, t)
+	return t, nil
+}
+
+// redactTierMoney:MVP(观测)藏价·字段级裁剪——客户角色(非运营方/非支持态)看不到层级月额度
+// (monthly_limit=配额上限,控制字段,改动⑦ 要求 MVP 藏;同藏价根因:前端藏 UI、后端直连仍泄)。
+// 模型集/分组保留(org_admin 配档需要);运营方/支持态保留真值。复用 mvpPriceHidden 单一真值来源。
+func (s *Service) redactTierMoney(c session.Claims, tiers ...*model.Tier) {
+	if !s.mvpPriceHidden(c) {
+		return
+	}
+	for _, t := range tiers {
+		if t != nil {
+			t.MonthlyLimit = nil
+		}
+	}
 }
 
 // UpdateTierInput 改层级入参(T10;nil 字段=不改)。
@@ -139,7 +158,12 @@ func (s *Service) UpdateTier(ctx context.Context, c session.Claims, orgID, tierI
 		}
 	}
 	s.audit(ctx, c, orgID, "update_tier", "tier", &tierID, map[string]any{"name": t.Name})
-	return s.store.GetTier(ctx, orgID, tierID)
+	out, err := s.store.GetTier(ctx, orgID, tierID)
+	if err != nil {
+		return nil, err
+	}
+	s.redactTierMoney(c, out)
+	return out, nil
 }
 
 // validateTierGroup 配置期校验计费分组(T17-5/D4):分组须存在 + 模型集 ⊆ 该分组可用模型。
@@ -227,7 +251,12 @@ func (s *Service) ListTiers(ctx context.Context, c session.Claims, orgID int64) 
 	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
 		return nil, err
 	}
-	return s.store.ListTiers(ctx, orgID)
+	tiers, err := s.store.ListTiers(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	s.redactTierMoney(c, tiers...) // MVP 藏价:客户直连不见月额度(控制字段);运营方/支持态保留
+	return tiers, nil
 }
 
 // SetDefaultTier 设组织默认层级(E16 / US-10:组织管理员,默认层级全组织唯一)。

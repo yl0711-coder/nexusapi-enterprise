@@ -52,6 +52,26 @@ func (h *Handler) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, r, http.StatusOK, map[string]any{"ok": true})
 }
 
+type updateMeReq struct {
+	DisplayName string `json:"display_name"`
+}
+
+// PATCH /me — 个人设置·改显示名(全角色,只改本人)。
+func (h *Handler) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	var in updateMeReq
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	m, err := h.svc.UpdateMyDisplayName(r.Context(), c, in.DisplayName)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, toMemberView(m))
+}
+
 func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())
 	m, err := h.svc.Me(r.Context(), c)

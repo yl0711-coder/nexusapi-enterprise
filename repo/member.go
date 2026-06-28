@@ -127,6 +127,13 @@ func (s *Store) UpdateMemberPassword(ctx context.Context, orgID, memberID int64,
 	return err
 }
 
+// UpdateMemberDisplayName 改成员显示名(个人设置·自助改名)。
+func (s *Store) UpdateMemberDisplayName(ctx context.Context, orgID, memberID int64, name string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE member SET display_name = ? WHERE id = ? AND org_id = ?`, name, memberID, orgID)
+	return err
+}
+
 // UpdateMemberTeamTier 改成员团队/层级(nil=不改,PATCH /members/:id)。
 func (s *Store) UpdateMemberTeamTier(ctx context.Context, orgID, memberID int64, teamID, tierID *int64) error {
 	_, err := s.db.ExecContext(ctx,

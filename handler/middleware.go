@@ -17,6 +17,7 @@ import (
 var mvpWriteAllow = []string{
 	"POST /api/v1/auth/login",
 	"POST /api/v1/me/password", // 个人设置·自助改密(自助账号操作,非钱非控,MVP 放行)
+	"PATCH /api/v1/me",         // 个人设置·改显示名(只改本人)
 	"POST /api/v1/organizations",
 	"PATCH /api/v1/organizations/*",
 	"POST /api/v1/organizations/*/archive",

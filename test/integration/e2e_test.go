@@ -1702,6 +1702,21 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 			t.Errorf("🔴 新密码过短(<8)必须被拒,却 200")
 		}
 		t.Logf("改密回归 ok: 旧密码改成功 + 旧登录401 + 新登录200 + 错旧密码拒 + 短新密码拒")
+
+		// 个人设置·改显示名(PATCH /me)安全:改本人成功 + 恶意名 422(checkName 防存储型XSS);
+		// "只改本人"为结构保证——端点无 id 参数,只用 claims.MemberID(故无越权改别人的路径)。
+		var meView struct {
+			DisplayName *string `json:"display_name"`
+		}
+		if st := api.do("PATCH", "/api/v1/me", opTok, map[string]any{"display_name": "运营管理员"}, &meView); st != http.StatusOK {
+			t.Errorf("🔴 改显示名应 200,得 %d", st)
+		} else if meView.DisplayName == nil || *meView.DisplayName != "运营管理员" {
+			t.Errorf("🔴 改显示名后应返回新名,得 %v", meView.DisplayName)
+		}
+		if st := api.do("PATCH", "/api/v1/me", opTok, map[string]any{"display_name": "<script>alert(1)</script>"}, nil); st == http.StatusOK {
+			t.Errorf("🔴 显示名含危险字符必须被 checkName 拒(非200),却 200")
+		}
+		t.Logf("改显示名 ok: 改本人成功+回显新名 + 恶意名被拒(只改本人=端点无id参数)")
 	}
 }
 

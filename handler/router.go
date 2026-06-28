@@ -43,6 +43,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/login", h.handleLogin)
 	mux.HandleFunc("GET /api/v1/me", h.requireAuth(h.handleMe))
 	mux.HandleFunc("POST /api/v1/me/password", h.requireAuth(h.handleChangePassword)) // 个人设置·自助改密
+	mux.HandleFunc("PATCH /api/v1/me", h.requireAuth(h.handleUpdateMe))               // 个人设置·改显示名
 
 	// 组织(运营方)。
 	mux.HandleFunc("GET /api/v1/organizations", h.requireAuth(h.handleListOrgs))

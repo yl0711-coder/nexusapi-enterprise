@@ -100,6 +100,19 @@ func (s *Service) ChangePassword(ctx context.Context, c session.Claims, oldPassw
 	return nil
 }
 
+// UpdateMyDisplayName 个人设置·自助改显示名:**只改本人**(用 claims.MemberID,绝不信 body 传的 id,防越权改别人)。
+// display_name 渲染到员工排行/顶栏,必须过 checkName(长度 + HTML/JS 危险字符黑名单)防存储型 XSS。
+func (s *Service) UpdateMyDisplayName(ctx context.Context, c session.Claims, name string) (*model.Member, error) {
+	if err := checkName("显示名", name, maxNameLen); err != nil {
+		return nil, err
+	}
+	if err := s.store.UpdateMemberDisplayName(ctx, c.OrgID, c.MemberID, name); err != nil {
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	s.audit(ctx, c, c.OrgID, "update_display_name", "member", &c.MemberID, nil)
+	return s.Me(ctx, c)
+}
+
 // SeedOperator 在平台首次启动时确保存在一个运营方账号(引导账号)。
 // 幂等:若该邮箱已存在则不改动。运营方账号挂在专属的运营方组织下,
 // 是平台账号(无 new-api 代发 key,newapi_user_id 留空)。

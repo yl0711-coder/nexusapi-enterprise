@@ -74,6 +74,7 @@ func TestMVPGate_BlocksMoneyAndControl(t *testing.T) {
 		{"POST", "/api/v1/members/1/tokens"}, // 改动③ 自助建 key
 		{"POST", "/api/v1/members/1/key:rotate"},
 		{"POST", "/api/v1/me/password"},                       // 个人设置·自助改密(MVP 放行)
+		{"PATCH", "/api/v1/me"},                               // 个人设置·改显示名(MVP 放行)
 		{"PATCH", "/api/v1/organizations/1/teams/2"},          // F1 团队改名
 		{"POST", "/api/v1/organizations/1/teams/2/archive"},   // F1 团队归档
 		{"POST", "/api/v1/organizations/1/teams/2/unarchive"}, // F1 撤归档

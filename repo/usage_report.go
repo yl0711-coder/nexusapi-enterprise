@@ -2,6 +2,7 @@ package repo
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -58,6 +59,66 @@ func (s *Store) AggregateUsageByTime(ctx context.Context, orgID int64, since tim
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// DetailRow 是一条逐条用量明细(usage_detail 一行,对应一条 new-api 消费日志)。
+type DetailRow struct {
+	OrgID            int64
+	MemberID         int64
+	NewapiUserID     int64
+	KeyID            int64
+	TeamID           *int64
+	ModelName        string
+	NewapiLogID      int64
+	PromptTokens     int64
+	CompletionTokens int64
+	ConsumedQuota    int64
+	LogTS            time.Time
+}
+
+// InsertUsageDetailTx 批量落逐条明细(INSERT IGNORE 幂等:同 newapi_log_id 只落一次)。
+// 在调用方事务上执行(与 usage_ledger 落账、推水位同一事务原子提交)。分批避免单语句参数过多。
+func (s *Store) InsertUsageDetailTx(ctx context.Context, x dbtx, rows []DetailRow) error {
+	const cols = 11
+	const batch = 500
+	for start := 0; start < len(rows); start += batch {
+		end := start + batch
+		if end > len(rows) {
+			end = len(rows)
+		}
+		chunk := rows[start:end]
+		var sb strings.Builder
+		sb.WriteString("INSERT IGNORE INTO usage_detail (org_id, member_id, newapi_user_id, key_id, team_id, model_name, newapi_log_id, prompt_tokens, completion_tokens, consumed_quota, log_ts) VALUES ")
+		args := make([]any, 0, len(chunk)*cols)
+		for i, r := range chunk {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			args = append(args, r.OrgID, r.MemberID, r.NewapiUserID, r.KeyID, r.TeamID, r.ModelName, r.NewapiLogID, r.PromptTokens, r.CompletionTokens, r.ConsumedQuota, r.LogTS)
+		}
+		if _, err := x.ExecContext(ctx, sb.String(), args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PurgeUsageDetailBefore 删除 log_ts < cutoff 的明细(90 天保留清理)。分批删,避免长事务/大锁。返回删除行数。
+func (s *Store) PurgeUsageDetailBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	var total int64
+	for {
+		res, err := s.db.ExecContext(ctx, `DELETE FROM usage_detail WHERE log_ts < ? LIMIT 5000`, cutoff)
+		if err != nil {
+			return total, err
+		}
+		n, _ := res.RowsAffected()
+		total += n
+		if n < 5000 {
+			break
+		}
+	}
+	return total, nil
 }
 
 // AggregateUsageLedgerByKey 按平台稳定 key_id 聚合组织消耗(v2 报表 key 维度)。userFilter!=nil 只算该 user。

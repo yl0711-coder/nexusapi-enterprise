@@ -74,6 +74,7 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 	// 1) 完整读 [since, untilSub] 并按桶聚合(只收 billing_enabled 组织的成员)。
 	//    log-id 级去重:只处理 id > 水位的日志,每条只扣一次;边界同 ts 重读靠此跳过。
 	aggs := map[string]*bucketAgg{}
+	var details []repo.DetailRow // v2 M2-2:逐条明细(下钻读本库),与 ledger 同事务落,observe 下也写
 	maxLogID := cur.LastSettledLogID
 	flagCache := map[int64]bool{} // orgID -> billing_enabled
 	memberCache := map[int64]*model.Member{}
@@ -163,6 +164,13 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 			if e.CreatedAt > a.maxTS {
 				a.maxTS = e.CreatedAt
 			}
+			// v2 M2-2:同步收一条逐条明细(幂等键=newapi_log_id);带 token 指标供报表请求数/token 数。
+			details = append(details, repo.DetailRow{
+				OrgID: m.OrgID, MemberID: m.ID, NewapiUserID: int64(e.UserID), KeyID: keyID, TeamID: m.TeamID,
+				ModelName: e.ModelName, NewapiLogID: e.ID,
+				PromptTokens: e.PromptTokens, CompletionTokens: e.CompletionTokens, ConsumedQuota: e.Quota,
+				LogTS: time.Unix(e.CreatedAt, 0).UTC(),
+			})
 		}
 		if page*100 >= total {
 			break
@@ -190,6 +198,10 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 			}); err != nil {
 				return err
 			}
+		}
+		// v2 M2-2:逐条明细与 ledger 落账同事务原子写(INSERT IGNORE 幂等);observe 下也写(报表数据,不涉钱)。
+		if err := s.store.InsertUsageDetailTx(ctx, tx, details); err != nil {
+			return err
 		}
 		// 改动⑤:observe 下整体跳过扣余额(只落账)。postBal 留空 → 提交后守恒断言/状态硬停/扣费审计
 		// 全不触发(那些都靠 postBal 驱动),既不动钱也不触发任何停服/翻转。落账+推水位照常。
@@ -431,6 +443,22 @@ func (s *Service) ReconcileBalanceLedger(ctx context.Context) error {
 		s.auditSystem(ctx, orgID, "balance_ledger_mismatch", "balance", &orgID, map[string]any{
 			"total_consumed": tc, "ledger_sum": lg, "diff": tc - lg,
 		}, "mismatch")
+	}
+	return nil
+}
+
+// usageDetailRetentionDays 逐条明细保留天数(13 §4.4:下钻明细落库保 90 天)。
+const usageDetailRetentionDays = 90
+
+// PurgeOldUsageDetail 清理超过保留期(90 天)的逐条明细;reconcile worker 周期调用。只删本库,不碰 new-api。
+func (s *Service) PurgeOldUsageDetail(ctx context.Context) error {
+	cutoff := s.now().Add(-time.Duration(usageDetailRetentionDays) * 24 * time.Hour)
+	n, err := s.store.PurgeUsageDetailBefore(ctx, cutoff)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		s.log.Info("用量明细保留清理", "purged", n, "cutoff", cutoff.Format(time.RFC3339))
 	}
 	return nil
 }

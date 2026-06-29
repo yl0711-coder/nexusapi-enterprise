@@ -1,7 +1,7 @@
 /* NexusAPI 企业管理平台 · 生产前端 SPA(接 /api/v1 真后端)。
    设计沿用原型 app.css;数据全来自真实 API(非 mock)。按 /me 的角色拼装菜单与视图。 */
 "use strict";
-const S = { token: localStorage.getItem("nx_token") || "", me: null, role: "", view: "", org: null, orgId: 0, mvp: false, win: 168 };
+const S = { token: localStorage.getItem("nx_token") || "", me: null, role: "", view: "", org: null, orgId: 0, mvp: false, win: 168, gran: "day" };
 // 品牌/支持集中常量(运营定稿前用占位;company/doc 含"待定"时前端优雅降级不露占位)。改这一处全局生效。
 const BRAND = { product: "企业管理台", company: "(公司名待定)", support: "support@example.com", doc: "(文档地址待定)" };
 const brandCompany = () => BRAND.company.includes("待定") ? "" : BRAND.company;
@@ -12,6 +12,44 @@ function winSelect() {
   return `<select class="fsel" onchange="S.win=+this.value;renderView()">`
     + [168, 720, 2160].map(h => `<option value="${h}"${S.win === h ? " selected" : ""}>${winLabel(h)}</option>`).join("")
     + `</select>`;
+}
+// M2:用量趋势粒度(天/周/月,UTC+8 自然边界,后端 /usage/timeseries 同口径)。
+function granLabel(g) { return ({ day: "按天", week: "按周", month: "按月" })[g] || g; }
+function granSelect() {
+  return `<select class="fsel" onchange="S.gran=this.value;renderView()">`
+    + ["day", "week", "month"].map(g => `<option value="${g}"${S.gran === g ? " selected" : ""}>${granLabel(g)}</option>`).join("")
+    + `</select>`;
+}
+// lineChart 手绘内联 SVG 折线图(不引图表库,沿用原生 JS 风格)。series=[{period,consumed_quota}]。
+// 金额按 money() 同口径(500000=$1);hover 圆点 <title> 显示「日期: 金额」。单点居中,空数据降级提示。
+function lineChart(series) {
+  series = series || [];
+  if (series.length === 0) return `<div class="empty">该时段暂无趋势数据</div>`;
+  const W = 760, H = 200, padL = 6, padR = 6, padT = 16, padB = 22;
+  const innerW = W - padL - padR, innerH = H - padT - padB, n = series.length;
+  const maxv = Math.max(1, ...series.map(p => p.consumed_quota || 0));
+  const x = i => padL + (n === 1 ? innerW / 2 : innerW * i / (n - 1));
+  const y = v => padT + innerH - ((v || 0) / maxv) * innerH;
+  const base = padT + innerH;
+  const pts = series.map((p, i) => `${x(i).toFixed(1)},${y(p.consumed_quota).toFixed(1)}`).join(" ");
+  const area = `${x(0).toFixed(1)},${base} ${pts} ${x(n - 1).toFixed(1)},${base}`;
+  const dots = series.map((p, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(p.consumed_quota).toFixed(1)}" r="3" fill="#4f7cff"><title>${esc(p.period)}: ${money(p.consumed_quota)}</title></circle>`).join("");
+  const step = Math.max(1, Math.ceil(n / 6));
+  const idxs = [];
+  for (let i = 0; i < n; i += step) idxs.push(i);
+  if (idxs[idxs.length - 1] !== n - 1) idxs.push(n - 1); // 末期标签必显示
+  const xl = idxs.map(i => {
+    const xi = x(i); // 贴边标签换锚点防裁切(最左 start/最右 end/中间 middle)
+    const anc = xi < W * 0.12 ? "start" : xi > W * 0.88 ? "end" : "middle";
+    return `<text x="${xi.toFixed(1)}" y="${H - 6}" font-size="10" fill="#999" text-anchor="${anc}">${esc(series[i].period)}</text>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:200px;display:block">`
+    + `<line x1="${padL}" y1="${base}" x2="${W - padR}" y2="${base}" stroke="#eee"/>`
+    + `<polygon points="${area}" fill="rgba(79,124,255,0.08)"/>`
+    + `<polyline points="${pts}" fill="none" stroke="#4f7cff" stroke-width="2"/>`
+    + dots
+    + `<text x="${padL}" y="${padT - 4}" font-size="10" fill="#999">峰值 ${money(maxv)}</text>`
+    + xl + `</svg>`;
 }
 
 /* ---------- API ---------- */
@@ -349,7 +387,10 @@ VIEWS.dash = async () => {
   // 改动⑦:钱(余额/累计消耗/低位)只非 MVP 展示;MVP 改用 #4 额度参考条(只读,不停服)。
   const reqs = [api("GET", "/organizations/" + id + "/usage?since_hours=" + win, null)];
   reqs.push(api("GET", "/organizations/" + id + (S.mvp ? "/budget-ref" : "/balance"), null));
-  const [usage, extra] = await Promise.all(reqs);
+  // M2:用量趋势(折线图);失败不拖垮看板,降级空序列。
+  reqs.push(api("GET", "/organizations/" + id + "/usage/timeseries?since_hours=" + win + "&granularity=" + S.gran, null).catch(() => ({ series: [] })));
+  const [usage, extra, ts] = await Promise.all(reqs);
+  const series = (ts && ts.series) || [];
   // #6:模型/员工都全量渲染 + 各自搜索框 + 滚动容器(成员超 8 人也找得到),不再 slice 截断。
   const mods = usage.by_model || [];
   const maxv = Math.max(1, ...mods.map(b => b.consumed_quota));
@@ -399,6 +440,7 @@ VIEWS.dash = async () => {
     </div>
     ${refBar}
     ${onboard}
+    <div class="panel"><div class="ph">用量趋势(${wl})<span class="mini" style="font-weight:400;float:right">粒度 ${granSelect()}</span></div><div class="pb">${lineChart(series)}</div></div>
     <div class="panel"><div class="ph">按团队用量(${wl})· 点团队下钻 <span class="mini" style="font-weight:400">团队用量按成员当前归属聚合${srch("teamSearch", "teamBars", "搜团队…")}</span></div><div class="pb" id="teamBars" style="max-height:300px;overflow:auto">${tbars}</div></div>
     <div class="panel"><div class="ph">员工用量排行(${wl})· 点员工看明细${srch("memSearch", "memBars", "搜员工…")}</div><div class="pb" id="memBars" style="max-height:340px;overflow:auto">${mbars}</div></div>
     <div class="panel"><div class="ph">按模型用量(${wl})${srch("modSearch", "modBars", "搜模型…")}</div><div class="pb" id="modBars" style="max-height:340px;overflow:auto">${bars}</div></div>`;
@@ -671,7 +713,11 @@ async function doReqTopup() { try { await api("POST", "/organizations/" + S.orgI
 /* ===================== 成员 ===================== */
 VIEWS.myusage = async () => {
   const win = S.win, wl = winLabel(win);
-  const u = await api("GET", "/members/" + S.me.id + "/usage?since_hours=" + win, null);
+  const [u, ts] = await Promise.all([
+    api("GET", "/members/" + S.me.id + "/usage?since_hours=" + win, null),
+    api("GET", "/members/" + S.me.id + "/usage/timeseries?since_hours=" + win + "&granularity=" + S.gran, null).catch(() => ({ series: [] })),
+  ]);
+  const series = (ts && ts.series) || [];
   const top = (u.by_model || []).slice(0, 8);
   const max = Math.max(1, ...top.map(b => b.consumed_quota));
   const bars = top.map(b => `<div class="bar"><span class="nm">${esc(b.key)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / max * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`).join("") || `<div class="empty">${wl}暂无用量</div>`;
@@ -679,6 +725,7 @@ VIEWS.myusage = async () => {
   return head("我的用量", wl + "消耗")
     + `<div class="toolbar"><div class="search"></div><span class="mini">时间窗</span>${winSelect()}</div>
     <div class="cards">${kpi(wl + "消耗", money(u.total_quota), "按实际调用量统计")}${kpi("涉及模型", String(top.length), wl)}${kpi("当前状态", '<span class="pill ok">正常</span>', "")}</div>
+    <div class="panel"><div class="ph">用量趋势(${wl})<span class="mini" style="font-weight:400;float:right">粒度 ${granSelect()}</span></div><div class="pb">${lineChart(series)}</div></div>
     <div class="panel"><div class="ph">按模型</div><div class="pb">${bars}</div></div>`;
 };
 VIEWS.mykey = async () => {

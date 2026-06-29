@@ -20,6 +20,14 @@ function granSelect() {
     + ["day", "week", "month"].map(g => `<option value="${g}"${S.gran === g ? " selected" : ""}>${granLabel(g)}</option>`).join("")
     + `</select>`;
 }
+// M2-2 下钻明细:时间短格式 + 逐条调用表(读 usage_detail 的 records)。
+function fmtTs(s) { try { return new Date(s).toLocaleString(undefined, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }); } catch (e) { return esc(s); } }
+function detailTable(records) {
+  records = records || [];
+  if (records.length === 0) return `<div class="empty">该时段暂无逐条记录</div>`;
+  const rows = records.map(r => `<tr><td class="mini">${fmtTs(r.log_ts)}</td><td>${esc(r.model_name)}</td><td class="right mini">${r.prompt_tokens}/${r.completion_tokens}</td><td class="right">${money(r.consumed_quota)}</td></tr>`).join("");
+  return `<table class="kvtable"><tr><td class="k">时间</td><td class="k">模型</td><td class="right k">tokens(入/出)</td><td class="right k">费用</td></tr>${rows}</table>`;
+}
 // lineChart 手绘内联 SVG 折线图(不引图表库,沿用原生 JS 风格)。series=[{period,consumed_quota}]。
 // 金额按 money() 同口径(500000=$1);hover 圆点 <title> 显示「日期: 金额」。单点居中,空数据降级提示。
 function lineChart(series) {
@@ -265,11 +273,16 @@ function filterEls(inputId, containerId) {
 // openMemberUsage:#5 单员工下钻——拉该员工当前时间窗的按模型明细(后端 /members/{id}/usage 已具备)。
 async function openMemberUsage(mid, name) {
   try {
-    const u = await api("GET", "/members/" + mid + "/usage?since_hours=" + S.win, null);
+    const [u, d] = await Promise.all([
+      api("GET", "/members/" + mid + "/usage?since_hours=" + S.win, null),
+      api("GET", "/members/" + mid + "/usage/detail?since_hours=" + S.win + "&page_size=50", null).catch(() => ({ records: [], total: 0 })),
+    ]);
     const rows = (u.by_model || []).map(b => `<tr><td>${esc(b.key)}</td><td class="right">${money(b.consumed_quota)}</td><td class="right mini">${b.count}</td></tr>`).join("") || `<tr><td class="empty" colspan="3">该窗口暂无用量</td></tr>`;
+    const dRecords = (d && d.records) || [], dTotal = (d && d.total) || 0;
     modal("员工用量明细 · " + name + "(" + winLabel(S.win) + ")",
       `<table class="kvtable"><tr><td class="k">模型</td><td class="right k">费用</td><td class="right k">次数</td></tr>${rows}
-       <tr><td class="k">合计</td><td class="right"><b>${money(u.total_quota)}</b></td><td></td></tr></table>`,
+       <tr><td class="k">合计</td><td class="right"><b>${money(u.total_quota)}</b></td><td></td></tr></table>
+       <div class="ph" style="margin-top:14px">最近调用(共 ${dTotal} 条,显示最近 ${dRecords.length})</div>${detailTable(dRecords)}`,
       `<button class="btn pri" onclick="closeM()">关闭</button>`);
   } catch (e) { toast(e.message); }
 }
@@ -713,11 +726,13 @@ async function doReqTopup() { try { await api("POST", "/organizations/" + S.orgI
 /* ===================== 成员 ===================== */
 VIEWS.myusage = async () => {
   const win = S.win, wl = winLabel(win);
-  const [u, ts] = await Promise.all([
+  const [u, ts, d] = await Promise.all([
     api("GET", "/members/" + S.me.id + "/usage?since_hours=" + win, null),
     api("GET", "/members/" + S.me.id + "/usage/timeseries?since_hours=" + win + "&granularity=" + S.gran, null).catch(() => ({ series: [] })),
+    api("GET", "/members/" + S.me.id + "/usage/detail?since_hours=" + win + "&page_size=50", null).catch(() => ({ records: [], total: 0 })),
   ]);
   const series = (ts && ts.series) || [];
+  const dRecords = (d && d.records) || [], dTotal = (d && d.total) || 0;
   const top = (u.by_model || []).slice(0, 8);
   const max = Math.max(1, ...top.map(b => b.consumed_quota));
   const bars = top.map(b => `<div class="bar"><span class="nm">${esc(b.key)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / max * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`).join("") || `<div class="empty">${wl}暂无用量</div>`;
@@ -726,7 +741,8 @@ VIEWS.myusage = async () => {
     + `<div class="toolbar"><div class="search"></div><span class="mini">时间窗</span>${winSelect()}</div>
     <div class="cards">${kpi(wl + "消耗", money(u.total_quota), "按实际调用量统计")}${kpi("涉及模型", String(top.length), wl)}${kpi("当前状态", '<span class="pill ok">正常</span>', "")}</div>
     <div class="panel"><div class="ph">用量趋势(${wl})<span class="mini" style="font-weight:400;float:right">粒度 ${granSelect()}</span></div><div class="pb">${lineChart(series)}</div></div>
-    <div class="panel"><div class="ph">按模型</div><div class="pb">${bars}</div></div>`;
+    <div class="panel"><div class="ph">按模型</div><div class="pb">${bars}</div></div>
+    <div class="panel"><div class="ph">最近调用(共 ${dTotal} 条,显示最近 ${dRecords.length})</div><div class="pb" style="max-height:360px;overflow:auto">${detailTable(dRecords)}</div></div>`;
 };
 VIEWS.mykey = async () => {
   const m = await api("GET", "/members/" + S.me.id, null);

@@ -121,9 +121,11 @@ func (h *Handler) Routes() http.Handler {
 	// 用量看板(里程碑5)。
 	mux.HandleFunc("GET /api/v1/organizations/{id}/usage", h.requireAuth(h.handleOrgUsage))
 	mux.HandleFunc("GET /api/v1/organizations/{id}/usage/timeseries", h.requireAuth(h.handleOrgUsageTimeSeries)) // M2 折线图(day/week/month)
+	mux.HandleFunc("GET /api/v1/organizations/{id}/usage/detail", h.requireAuth(h.handleOrgUsageDetail))         // M2 下钻逐条明细
 	mux.HandleFunc("GET /api/v1/organizations/{id}/budget-ref", h.requireAuth(h.handleBudgetRef))                // #4 额度参考条(已用$/预付$)
 	mux.HandleFunc("GET /api/v1/members/{id}/usage", h.requireAuth(h.handleMemberUsage))
 	mux.HandleFunc("GET /api/v1/members/{id}/usage/timeseries", h.requireAuth(h.handleMemberUsageTimeSeries)) // M2 成员折线图
+	mux.HandleFunc("GET /api/v1/members/{id}/usage/detail", h.requireAuth(h.handleMemberUsageDetail))         // M2 成员下钻逐条明细
 	mux.HandleFunc("GET /api/v1/organizations/{id}/usage/export", h.requireAuth(h.handleUsageExport))
 	mux.HandleFunc("GET /api/v1/service-status", h.requireAuth(h.handleServiceStatus))
 

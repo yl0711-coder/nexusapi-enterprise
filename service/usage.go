@@ -8,6 +8,7 @@ import (
 	"github.com/nexusapi-platform/enterprise/model"
 	"github.com/nexusapi-platform/enterprise/pkg/apperr"
 	"github.com/nexusapi-platform/enterprise/pkg/session"
+	"github.com/nexusapi-platform/enterprise/repo"
 )
 
 // usageMaxPages 单次用量查询最多读多少页 logs(小窗口,绝不全表)。
@@ -162,6 +163,99 @@ func (s *Service) MemberUsageTimeSeries(ctx context.Context, c session.Claims, o
 	}
 	uid := m.NewapiUserID
 	return s.usageTimeSeries(ctx, orgID, sinceHours, granularity, &uid)
+}
+
+// UsageDetailRecord 下钻明细一条(JSON;读 usage_detail,不查 new-api)。
+type UsageDetailRecord struct {
+	LogTS            string `json:"log_ts"` // RFC3339(该次调用发生时刻)
+	ModelName        string `json:"model_name"`
+	KeyID            int64  `json:"key_id"`
+	MemberID         int64  `json:"member_id,omitempty"`
+	PromptTokens     int64  `json:"prompt_tokens"`
+	CompletionTokens int64  `json:"completion_tokens"`
+	ConsumedQuota    int64  `json:"consumed_quota"`
+}
+
+// UsageDetailPage 下钻明细分页结果。
+type UsageDetailPage struct {
+	Records  []UsageDetailRecord `json:"records"`
+	Total    int64               `json:"total"`
+	Page     int                 `json:"page"`
+	PageSize int                 `json:"page_size"`
+}
+
+const usageDetailMaxPageSize = 200
+
+func clampDetailPage(page, pageSize int) (int, int) {
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	if pageSize > usageDetailMaxPageSize {
+		pageSize = usageDetailMaxPageSize
+	}
+	return page, pageSize
+}
+
+func (s *Service) detailSince(sinceHours int) time.Time {
+	if sinceHours <= 0 || sinceHours > 24*92 {
+		sinceHours = 24
+	}
+	return time.Unix(s.now().Unix()-int64(sinceHours)*3600, 0).UTC()
+}
+
+// OrgUsageDetail 组织下钻明细(O/A;可选 member/key/model 过滤;读本库逐条调用)。
+func (s *Service) OrgUsageDetail(ctx context.Context, c session.Claims, orgID int64, sinceHours int, memberFilter, keyFilter *int64, model string, page, pageSize int) (*UsageDetailPage, error) {
+	if err := assertOrgScope(c, orgID); err != nil {
+		return nil, err
+	}
+	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
+		return nil, err
+	}
+	return s.usageDetail(ctx, repo.DetailFilter{OrgID: orgID, MemberID: memberFilter, KeyID: keyFilter, Model: model, Since: s.detailSince(sinceHours)}, page, pageSize)
+}
+
+// MemberUsageDetail 成员下钻明细(本人/上级/管理员;锁定该 member)。
+func (s *Service) MemberUsageDetail(ctx context.Context, c session.Claims, orgID, memberID int64, sinceHours, page, pageSize int) (*UsageDetailPage, error) {
+	if err := assertOrgScope(c, orgID); err != nil {
+		return nil, err
+	}
+	m, err := s.store.GetMember(ctx, orgID, memberID)
+	if err != nil {
+		return nil, apperr.NotFound("成员不存在")
+	}
+	if err := assertSelf(c, memberID); err != nil {
+		return nil, err
+	}
+	if c.Role == session.RoleTeamLeader {
+		if err := assertTeamScope(c, m.TeamID); err != nil {
+			return nil, err
+		}
+	}
+	mf := memberID
+	return s.usageDetail(ctx, repo.DetailFilter{OrgID: orgID, MemberID: &mf, Since: s.detailSince(sinceHours)}, page, pageSize)
+}
+
+func (s *Service) usageDetail(ctx context.Context, f repo.DetailFilter, page, pageSize int) (*UsageDetailPage, error) {
+	page, pageSize = clampDetailPage(page, pageSize)
+	total, err := s.store.CountUsageDetail(ctx, f)
+	if err != nil {
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	recs, err := s.store.ListUsageDetail(ctx, f, pageSize, (page-1)*pageSize)
+	if err != nil {
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	out := make([]UsageDetailRecord, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, UsageDetailRecord{
+			LogTS: r.LogTS.UTC().Format(time.RFC3339), ModelName: r.ModelName, KeyID: r.KeyID, MemberID: r.MemberID,
+			PromptTokens: r.PromptTokens, CompletionTokens: r.CompletionTokens, ConsumedQuota: r.ConsumedQuota,
+		})
+	}
+	return &UsageDetailPage{Records: out, Total: total, Page: page, PageSize: pageSize}, nil
 }
 
 // usageTimeSeries 时间序列内部聚合(身份过滤已由调用方做);只读 usage_ledger,无 live-logs(看板趋势用已结算数据即可)。

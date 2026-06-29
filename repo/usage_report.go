@@ -104,6 +104,75 @@ func (s *Store) InsertUsageDetailTx(ctx context.Context, x dbtx, rows []DetailRo
 	return nil
 }
 
+// DetailRecord 是读出的一条明细(下钻列表用)。
+type DetailRecord struct {
+	LogTS            time.Time
+	ModelName        string
+	KeyID            int64
+	MemberID         int64
+	NewapiUserID     int64
+	PromptTokens     int64
+	CompletionTokens int64
+	ConsumedQuota    int64
+}
+
+// DetailFilter 下钻明细过滤(org 必给;member/key/model 可选;Since 时间下界)。
+type DetailFilter struct {
+	OrgID    int64
+	MemberID *int64 // 平台 member_id
+	KeyID    *int64
+	Model    string
+	Since    time.Time
+}
+
+func detailWhere(f DetailFilter) (string, []any) {
+	cond := "org_id = ? AND log_ts >= ?"
+	args := []any{f.OrgID, f.Since}
+	if f.MemberID != nil {
+		cond += " AND member_id = ?"
+		args = append(args, *f.MemberID)
+	}
+	if f.KeyID != nil {
+		cond += " AND key_id = ?"
+		args = append(args, *f.KeyID)
+	}
+	if f.Model != "" {
+		cond += " AND model_name = ?"
+		args = append(args, f.Model)
+	}
+	return cond, args
+}
+
+// ListUsageDetail 按过滤分页列逐条明细(log_ts 倒序,最近在前)。只读本库,不查 new-api。
+func (s *Store) ListUsageDetail(ctx context.Context, f DetailFilter, limit, offset int) ([]DetailRecord, error) {
+	cond, args := detailWhere(f)
+	args = append(args, limit, offset)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT log_ts, model_name, key_id, member_id, newapi_user_id, prompt_tokens, completion_tokens, consumed_quota
+		   FROM usage_detail WHERE `+cond+` ORDER BY log_ts DESC, id DESC LIMIT ? OFFSET ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DetailRecord
+	for rows.Next() {
+		var r DetailRecord
+		if err := rows.Scan(&r.LogTS, &r.ModelName, &r.KeyID, &r.MemberID, &r.NewapiUserID, &r.PromptTokens, &r.CompletionTokens, &r.ConsumedQuota); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// CountUsageDetail 统计同过滤的明细总行数(分页 total)。
+func (s *Store) CountUsageDetail(ctx context.Context, f DetailFilter) (int64, error) {
+	cond, args := detailWhere(f)
+	var n int64
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_detail WHERE `+cond, args...).Scan(&n)
+	return n, err
+}
+
 // PurgeUsageDetailBefore 删除 log_ts < cutoff 的明细(90 天保留清理)。分批删,避免长事务/大锁。返回删除行数。
 func (s *Store) PurgeUsageDetailBefore(ctx context.Context, cutoff time.Time) (int64, error) {
 	var total int64

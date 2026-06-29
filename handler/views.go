@@ -273,6 +273,19 @@ func atoiDefault(s string, def int) int {
 	return def
 }
 
+// optInt64 解析可选 query 参数为 *int64;缺省或非法 → nil(过滤器不生效,不报错)。
+func optInt64(r *http.Request, name string) *int64 {
+	v := r.URL.Query().Get(name)
+	if v == "" {
+		return nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return nil
+	}
+	return &n
+}
+
 // pathInt64 解析路径参数为 int64;非法 → 400。
 func pathInt64(r *http.Request, name string) (int64, error) {
 	v := r.PathValue(name)

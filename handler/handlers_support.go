@@ -152,6 +152,43 @@ func (h *Handler) handleOrgUsage(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, r, http.StatusOK, usageView(u))
 }
 
+// GET /organizations/{id}/usage/detail — 组织下钻明细(O/A;读 usage_detail 逐条;member_id/key_id/model/page 过滤)。
+func (h *Handler) handleOrgUsageDetail(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	orgID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	q := r.URL.Query()
+	pg, err := h.svc.OrgUsageDetail(r.Context(), c, orgID, sinceHours(r),
+		optInt64(r, "member_id"), optInt64(r, "key_id"), q.Get("model"),
+		atoiDefault(q.Get("page"), 1), atoiDefault(q.Get("page_size"), 50))
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, pg)
+}
+
+// GET /members/{id}/usage/detail — 成员下钻明细(本人/上级/管理员;锁定该 member)。
+func (h *Handler) handleMemberUsageDetail(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	memberID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	q := r.URL.Query()
+	pg, err := h.svc.MemberUsageDetail(r.Context(), c, c.OrgID, memberID, sinceHours(r),
+		atoiDefault(q.Get("page"), 1), atoiDefault(q.Get("page_size"), 50))
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, pg)
+}
+
 // GET /organizations/{id}/budget-ref — 额度参考条(#4·B:已用$/预付$,藏价有意例外,O/A)。
 func (h *Handler) handleBudgetRef(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())

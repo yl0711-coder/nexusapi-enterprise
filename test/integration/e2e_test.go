@@ -1755,6 +1755,30 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		}
 		t.Logf("M2 时间序列端点 ok: 组织折线图 %d 点 sum=%d;成员看组织 403;成员看本人 200", len(tsResp.Series), tsSum)
 	}
+
+	// ===== M2-2 下钻逐条明细端点 =====
+	{
+		var dResp struct {
+			Records []struct {
+				ModelName     string `json:"model_name"`
+				ConsumedQuota int64  `json:"consumed_quota"`
+			} `json:"records"`
+			Total int64 `json:"total"`
+		}
+		if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/usage/detail?since_hours=2208&page_size=100", orgID), adminTok, nil, &dResp); st != http.StatusOK {
+			t.Fatalf("组织下钻明细 HTTP=%d", st)
+		}
+		if dResp.Total <= 0 || len(dResp.Records) == 0 {
+			t.Fatalf("组织下钻明细应有逐条记录,实 total=%d 本页 %d 条", dResp.Total, len(dResp.Records))
+		}
+		if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/usage/detail", orgID), memberTok, nil, nil); st != http.StatusForbidden {
+			t.Fatalf("成员看组织下钻明细应 403,得 %d", st)
+		}
+		if st := api.do("GET", fmt.Sprintf("/api/v1/members/%d/usage/detail?since_hours=2208", openResp.MemberID), memberTok, nil, nil); st != http.StatusOK {
+			t.Fatalf("成员看本人下钻明细应 200,得 %d", st)
+		}
+		t.Logf("M2-2 下钻明细端点 ok: 组织逐条 total=%d;成员看组织 403;成员看本人 200", dResp.Total)
+	}
 }
 
 // ---- helpers ----

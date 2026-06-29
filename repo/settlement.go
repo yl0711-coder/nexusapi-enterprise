@@ -59,10 +59,12 @@ func (s *Store) AdvanceCursorTx(ctx context.Context, x dbtx, orgID, newTS, newLo
 }
 
 // LedgerBucket 是一条结算桶(usage_ledger 一行)。
+// KeyID(v2 M0-S2):平台稳定 key_id(0=未归因);去重键含 key_id,使同 (org,user,model,桶) 下不同 key 各成一行。
 type LedgerBucket struct {
 	OrgID         int64
 	MemberID      int64
 	NewapiUserID  int64
+	KeyID         int64
 	TeamID        *int64
 	ModelName     string
 	TimeBucket    time.Time
@@ -82,11 +84,11 @@ func (s *Store) AddToLedgerBucket(ctx context.Context, b *LedgerBucket) error {
 func (s *Store) AddToLedgerBucketTx(ctx context.Context, x dbtx, b *LedgerBucket) error {
 	_, err := x.ExecContext(ctx,
 		`INSERT INTO usage_ledger
-		    (org_id, member_id, newapi_user_id, team_id, model_name, time_bucket, consumed_quota, log_max_ts)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		    (org_id, member_id, newapi_user_id, key_id, team_id, model_name, time_bucket, consumed_quota, log_max_ts)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON DUPLICATE KEY UPDATE consumed_quota = consumed_quota + VALUES(consumed_quota),
 		                         log_max_ts = GREATEST(log_max_ts, VALUES(log_max_ts))`,
-		b.OrgID, b.MemberID, b.NewapiUserID, b.TeamID, b.ModelName, b.TimeBucket, b.ConsumedQuota, b.LogMaxTS)
+		b.OrgID, b.MemberID, b.NewapiUserID, b.KeyID, b.TeamID, b.ModelName, b.TimeBucket, b.ConsumedQuota, b.LogMaxTS)
 	return err
 }
 
@@ -132,9 +134,9 @@ func (s *Store) DeductBalanceTx(ctx context.Context, x dbtx, orgID, amount int64
 	}
 	var b model.Balance
 	if err := x.QueryRowContext(ctx,
-		`SELECT org_id, total_recharged, total_consumed, total_refunded, balance, low_watermark, version
+		`SELECT org_id, total_recharged, total_consumed, total_refunded, committed, balance, low_watermark, version
 		 FROM company_balance WHERE org_id = ?`, orgID).Scan(
-		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.TotalRefunded, &b.Balance, &b.LowWatermark, &b.Version); err != nil {
+		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.TotalRefunded, &b.Committed, &b.Balance, &b.LowWatermark, &b.Version); err != nil {
 		return nil, err
 	}
 	return &b, nil

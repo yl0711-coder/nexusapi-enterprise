@@ -38,18 +38,34 @@ func (s *Store) CreateMemberProvisional(ctx context.Context, m *model.Member) (i
 
 // FinalizeBootstrap 在代发 key 成功后回填成员:new-api 用户/令牌、密文凭证、脱敏 key,
 // 置 bootstrap_state=done、status=active。
-func (s *Store) FinalizeBootstrap(ctx context.Context, m *model.Member) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE member
-		    SET newapi_user_id = ?, access_token_enc = ?, member_password_enc = ?,
-		        newapi_token_id = ?, key_masked = ?, key_rotation = ?,
-		        bootstrap_state = ?, status = ?, bootstrapped_at = CURRENT_TIMESTAMP(3)
-		  WHERE id = ? AND org_id = ?`,
-		m.NewapiUserID, m.AccessTokenEnc, m.MemberPasswordEnc,
-		m.NewapiTokenID, m.KeyMasked, m.KeyRotation,
-		model.BootstrapDone, model.MemberStatusActive,
-		m.ID, m.OrgID)
-	return err
+// v2(M0/M1):若本次带令牌(NewapiTokenID!=nil),在**同一事务**内建主 key 槽 + 当前令牌(member_key),
+// 使 member.newapi_token_id 指针与 member_key 一致;无令牌(观测期 SkipToken)则只回填成员、不建 key。
+// tokenName 为该令牌的确定性名(nexus_m{member}_v{rotation},归因映射键);无令牌时传 ""。
+func (s *Store) FinalizeBootstrap(ctx context.Context, m *model.Member, tokenName string) error {
+	return s.WithTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE member
+			    SET newapi_user_id = ?, access_token_enc = ?, member_password_enc = ?,
+			        newapi_token_id = ?, key_masked = ?, key_rotation = ?,
+			        bootstrap_state = ?, status = ?, bootstrapped_at = CURRENT_TIMESTAMP(3)
+			  WHERE id = ? AND org_id = ?`,
+			m.NewapiUserID, m.AccessTokenEnc, m.MemberPasswordEnc,
+			m.NewapiTokenID, m.KeyMasked, m.KeyRotation,
+			model.BootstrapDone, model.MemberStatusActive,
+			m.ID, m.OrgID); err != nil {
+			return err
+		}
+		if m.NewapiTokenID != nil {
+			masked := ""
+			if m.KeyMasked != nil {
+				masked = *m.KeyMasked
+			}
+			if _, err := s.ensurePrimaryKeyTx(ctx, tx, m.OrgID, m.ID, *m.NewapiTokenID, tokenName, masked, m.KeyRotation); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // MarkBootstrapFailed 把成员标记为 bootstrap 失败(补偿后:不展示半截账号,10 §2.3)。
@@ -96,12 +112,20 @@ func (s *Store) ListFailedOrphanMembers(ctx context.Context, limit int) ([]*mode
 	return scanMembersRows(rows)
 }
 
-// UpdateMemberKey 轮换后回填新令牌 id / 脱敏 key / 轮换计数(US-07)。
-func (s *Store) UpdateMemberKey(ctx context.Context, orgID, memberID, tokenID int64, keyMasked string, rotation int) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE member SET newapi_token_id = ?, key_masked = ?, key_rotation = ? WHERE id = ? AND org_id = ?`,
-		tokenID, keyMasked, rotation, memberID, orgID)
-	return err
+// UpdateMemberKey 轮换/自助建后回填新令牌 id / 脱敏 key / 轮换计数(US-07)。
+// v2(M0/M1):在**同一事务**内同步 member_key——主槽上把旧 current 令牌置 superseded、插新 current 令牌
+// (无主槽则新建,覆盖观测期首次自助建 key)。旧令牌行留存 → 历史日志按旧 token_id 仍归因到同一 key_id。
+// tokenName 为新令牌确定性名(nexus_m{member}_v{rotation})。
+func (s *Store) UpdateMemberKey(ctx context.Context, orgID, memberID, tokenID int64, keyMasked, tokenName string, rotation int) error {
+	return s.WithTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE member SET newapi_token_id = ?, key_masked = ?, key_rotation = ? WHERE id = ? AND org_id = ?`,
+			tokenID, keyMasked, rotation, memberID, orgID); err != nil {
+			return err
+		}
+		_, err := s.rotatePrimaryKeyTx(ctx, tx, orgID, memberID, tokenID, tokenName, keyMasked, rotation)
+		return err
+	})
 }
 
 // ActivatePlatformAccount 把无代发 key 的平台账号(运营方/组织管理员)直接置 active、

@@ -160,6 +160,11 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	t.Logf("开通成员 ok: member_id=%d newapi_user_id=%d key=%s...", openResp.MemberID, openResp.NewapiUserID, openResp.APIKey[:min(10, len(openResp.APIKey))])
 	originalKey := openResp.APIKey
 
+	// v2 M1:开通后应建主 key 槽 + 当前令牌(1 槽 / 1 令牌 / 1 current / nexus_m{id}_v1)。
+	if sl, tk, cu, nm := queryMemberKey(t, store.DB(), orgID, openResp.MemberID); sl != 1 || tk != 1 || cu != 1 || nm != fmt.Sprintf("nexus_m%d_v1", openResp.MemberID) {
+		t.Fatalf("开通后 member_key 异常: slots=%d tokens=%d current=%d name=%q(应 1/1/1/nexus_m%d_v1)", sl, tk, cu, nm, openResp.MemberID)
+	}
+
 	// 9) 列表脱敏:明文 key 绝不出现在列表里,只见 key_masked。
 	var listResp struct {
 		List []struct {
@@ -202,6 +207,11 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		t.Errorf("轮换应得不同的新 key:old=%s new=%s", mask(originalKey), mask(rotResp.APIKey))
 	}
 	t.Logf("轮换 key ok: 新 masked=%s", rotResp.KeyMasked)
+
+	// v2 M1:轮换后同一主槽,旧令牌置 superseded、插新 current(1 槽 / 2 令牌 / 1 current / v2)= 历史按 key_id 连续。
+	if sl, tk, cu, nm := queryMemberKey(t, store.DB(), orgID, openResp.MemberID); sl != 1 || tk != 2 || cu != 1 || nm != fmt.Sprintf("nexus_m%d_v2", openResp.MemberID) {
+		t.Fatalf("轮换后 member_key 异常: slots=%d tokens=%d current=%d name=%q(应 1/2/1/nexus_m%d_v2)", sl, tk, cu, nm, openResp.MemberID)
+	}
 
 	// ===== RBAC 越权判定(08 §2)=====
 

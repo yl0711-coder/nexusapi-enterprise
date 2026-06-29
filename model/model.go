@@ -104,6 +104,67 @@ type Member struct {
 	UpdatedAt            time.Time
 }
 
+// key 槽 / 物理令牌状态(v2 0015)。
+const (
+	KeySlotActive   = "active"
+	KeySlotRevoked  = "revoked"
+	KeyTokenActive     = "active"
+	KeyTokenRevoked    = "revoked"
+	KeyTokenSuperseded = "superseded" // 轮换后被取代的旧令牌(留作历史归因)
+)
+
+// 周期类型(v2 0017,单一周期三选一)。
+const (
+	PeriodDay   = "day"
+	PeriodWeek  = "week"
+	PeriodMonth = "month"
+)
+
+// MemberKeySlot 对应 member_key_slot 表(v2 0015)。id = 平台稳定 key_id,1:N 挂成员,轮换不变。
+type MemberKeySlot struct {
+	ID        int64 // = 平台稳定 key_id
+	OrgID     int64
+	MemberID  int64
+	IsPrimary bool
+	Status    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// MemberKeyToken 对应 member_key_token 表(v2 0015,append-only)。
+// 物理 new-api 令牌;轮换=插新行 + 旧行 IsCurrent=false,绝不删 → 历史日志按旧 token_id 仍映射回同一 KeyID。
+type MemberKeyToken struct {
+	ID            int64
+	KeyID         int64 // 所属稳定 key 槽(MemberKeySlot.ID)
+	OrgID         int64
+	MemberID      int64
+	NewapiTokenID *int64 // 物理 new-api token id(归因主键;nil=尚未建成)
+	TokenName     string // 确定性令牌名 nexus_m{member}_v{rotation}(归因兜底键)
+	IsCurrent     bool
+	KeyMasked     *string
+	Rotation      int
+	Status        string
+	CreatedAt     time.Time
+}
+
+// MemberBudget 对应 member_budget 表(v2 0017)。每成员一行,单一周期。
+// 本期(观测)只配置不执行:cap/period 可设,granted 恒 0(不发放),spend_cache 由结算派生。
+type MemberBudget struct {
+	ID                int64
+	OrgID             int64
+	MemberID          int64
+	PeriodType        string // day/week/month
+	Cap               int64  // 周期发放上限(quota)
+	Granted           int64  // 本期已发放(quota;占用池子)
+	PeriodAnchor      *time.Time
+	PendingCap        *int64  // 待下周期生效的新 cap
+	PendingPeriodType *string // 待下周期生效的新周期类型
+	SpendCache        int64   // 派生消费缓存(可重算)
+	LastResetAt       *time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
 // grant_type(09 §14 + 08 §3.4)。
 const (
 	GrantQuotaAdd   = "quota_add"   // 临时增额(payload.delta>0)
@@ -143,11 +204,14 @@ type GrantPayload struct {
 }
 
 // Balance 对应 company_balance 表(09 §7)。balance = total_recharged - total_consumed。
+// Committed(v2 0018):组织池"已发放占用"= Σ成员 granted,不超卖与"可分配"派生用;
+// 本期(观测)恒 0(不发放)。可分配 = TotalRecharged - Committed。
 type Balance struct {
 	OrgID          int64
 	TotalRecharged int64
 	TotalConsumed  int64
 	TotalRefunded  int64
+	Committed      int64
 	Balance        int64
 	LowWatermark   int64
 	Version        int64

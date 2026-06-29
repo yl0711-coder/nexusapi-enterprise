@@ -22,9 +22,11 @@ const settlementLagSec int64 = 5
 // settlementMaxPages 单次结算最多读多少页(每页 100),界住窗口、绝不全表(05 §1.1)。
 const settlementMaxPages = 20
 
-// bucketAgg 是一个 (org,user,model,小时桶) 的聚合累加。
+// bucketAgg 是一个 (org,user,key,model,小时桶) 的聚合累加。
+// keyID(v2 M0-S2):日志 token_id 映射回的平台稳定 key_id(0=未归因)。
 type bucketAgg struct {
 	orgID, memberID, newapiUserID int64
+	keyID                         int64
 	teamID                        *int64
 	model                         string
 	bucket                        time.Time
@@ -75,6 +77,7 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 	maxLogID := cur.LastSettledLogID
 	flagCache := map[int64]bool{} // orgID -> billing_enabled
 	memberCache := map[int64]*model.Member{}
+	keyIDCache := map[int64]int64{}   // newapi token_id -> 平台 key_id(0=未归因;v2 M0-S2)
 	orphanAlerted := map[int64]bool{} // newapiUserID -> 已告警(GZ-03 返工·治洞3,每个孤儿每轮只告警一次)
 	for page := 1; page <= settlementMaxPages; page++ {
 		entries, total, rerr := s.upstream.ReadConsumptionLogs(ctx, since, untilSub, page, 100)
@@ -133,11 +136,27 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 			}
 			// 改动⑤(MVP 观测,2026-06-24 拍板):observe 下不在此跳过未开计费组织 →
 			// 全组织一律落账供「用量看板」;余额扣减在下面事务里整体跳过(落账不扣钱)。
+			// v2 M0-S2:按日志 token_id 映射平台稳定 key_id(0=未归因);缓存避免逐条查库。
+			keyID := int64(0)
+			if e.TokenID > 0 {
+				if kid, ok := keyIDCache[e.TokenID]; ok {
+					keyID = kid
+				} else {
+					k, found, kerr := s.store.GetKeyIDByNewapiTokenID(ctx, e.TokenID)
+					if kerr != nil {
+						return 0, apperr.Internal("").WithCause(kerr) // DB 错,非上游故障
+					}
+					if found {
+						keyID = k
+					}
+					keyIDCache[e.TokenID] = keyID
+				}
+			}
 			bkt := hourBucket(e.CreatedAt)
-			key := fmt.Sprintf("%d|%d|%s|%d", m.OrgID, e.UserID, e.ModelName, bkt.Unix())
+			key := fmt.Sprintf("%d|%d|%d|%s|%d", m.OrgID, e.UserID, keyID, e.ModelName, bkt.Unix())
 			a := aggs[key]
 			if a == nil {
-				a = &bucketAgg{orgID: m.OrgID, memberID: m.ID, newapiUserID: int64(e.UserID), teamID: m.TeamID, model: e.ModelName, bucket: bkt}
+				a = &bucketAgg{orgID: m.OrgID, memberID: m.ID, newapiUserID: int64(e.UserID), keyID: keyID, teamID: m.TeamID, model: e.ModelName, bucket: bkt}
 				aggs[key] = a
 			}
 			a.consumed += e.Quota
@@ -165,7 +184,7 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 	txErr := s.store.WithTx(ctx, func(tx *sql.Tx) error {
 		for _, a := range aggs {
 			if err := s.store.AddToLedgerBucketTx(ctx, tx, &repo.LedgerBucket{
-				OrgID: a.orgID, MemberID: a.memberID, NewapiUserID: a.newapiUserID, TeamID: a.teamID,
+				OrgID: a.orgID, MemberID: a.memberID, NewapiUserID: a.newapiUserID, KeyID: a.keyID, TeamID: a.teamID,
 				ModelName: a.model, TimeBucket: a.bucket, ConsumedQuota: a.consumed,
 				LogMaxTS: time.Unix(a.maxTS, 0).UTC(),
 			}); err != nil {

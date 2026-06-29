@@ -200,13 +200,15 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 		MemberPasswordEnc: []byte(newapiPwEnc),
 	}
 	// 改动②:有令牌(非 MVP)才回填令牌字段;MVP 只建用户、无令牌(res.TokenID=0),令牌字段留空,待员工自助建(改动③)。
+	finalTokenName := ""
 	if res.TokenID != 0 {
 		tokenID := int64(res.TokenID)
 		final.NewapiTokenID = &tokenID
 		final.KeyMasked = &keyMasked
 		final.KeyRotation = 1 // bootstrap 建的是 v1(adapter defaultBootstrapTokenSpec)
+		finalTokenName = deriveTokenName(memberID, 1)
 	}
-	if err := s.store.FinalizeBootstrap(ctx, final); err != nil {
+	if err := s.store.FinalizeBootstrap(ctx, final, finalTokenName); err != nil {
 		return nil, apperr.Internal("").WithCause(err)
 	}
 
@@ -412,7 +414,7 @@ func (s *Service) RotateKey(ctx context.Context, c session.Claims, orgID, member
 		return "", "", mapUpstream(berr)
 	}
 	masked = maskKey(newKey)
-	if err := s.store.UpdateMemberKey(ctx, orgID, memberID, int64(newID), masked, nextRotation); err != nil {
+	if err := s.store.UpdateMemberKey(ctx, orgID, memberID, int64(newID), masked, spec.Name, nextRotation); err != nil {
 		return "", "", apperr.Internal("").WithCause(err)
 	}
 	s.audit(ctx, c, orgID, "rotate_key", "member", &memberID, map[string]any{"rotation": nextRotation})
@@ -499,7 +501,7 @@ func (s *Service) CreateMemberToken(ctx context.Context, c session.Claims, membe
 		newID, newKey = id, k
 	}
 	masked = maskKey(newKey)
-	if err := s.store.UpdateMemberKey(ctx, c.OrgID, memberID, int64(newID), masked, nextRotation); err != nil {
+	if err := s.store.UpdateMemberKey(ctx, c.OrgID, memberID, int64(newID), masked, spec.Name, nextRotation); err != nil {
 		return "", "", apperr.Internal("").WithCause(err)
 	}
 	s.audit(ctx, c, c.OrgID, "create_member_token", "member", &memberID, map[string]any{"group": group, "rotation": nextRotation})

@@ -8,6 +8,8 @@ import (
 
 // LogEntry 是 new-api 消费日志的一条(/api/log/ type=2,05 §1)。
 // quota = 该条结算消耗(平台扣公司余额的依据,03 §3.1「以 logs 为准」)。
+// TokenID/TokenName(v2 M0-S2):该次调用所用令牌,结算按 TokenID 映射回平台稳定 key_id 做 key 维度归因
+// (new-api Log 两字段都有,model/log.go:26/35 已核实)。
 type LogEntry struct {
 	ID               int64
 	UserID           int
@@ -16,6 +18,8 @@ type LogEntry struct {
 	Quota            int64
 	PromptTokens     int64
 	CompletionTokens int64
+	TokenID          int64
+	TokenName        string
 }
 
 // ReadConsumptionLogs 读 [sinceUnix, untilUnix] 窗口内的**消费日志**(type=2),分页。
@@ -43,6 +47,8 @@ func (a *Adapter) ReadConsumptionLogs(ctx context.Context, sinceUnix, untilUnix 
 			Quota            int64  `json:"quota"`
 			PromptTokens     int64  `json:"prompt_tokens"`
 			CompletionTokens int64  `json:"completion_tokens"`
+			TokenID          int64  `json:"token_id"`
+			TokenName        string `json:"token_name"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(res.data, &env); err != nil {
@@ -53,6 +59,7 @@ func (a *Adapter) ReadConsumptionLogs(ctx context.Context, sinceUnix, untilUnix 
 		out = append(out, LogEntry{
 			ID: it.ID, UserID: it.UserID, CreatedAt: it.CreatedAt, ModelName: it.ModelName,
 			Quota: it.Quota, PromptTokens: it.PromptTokens, CompletionTokens: it.CompletionTokens,
+			TokenID: it.TokenID, TokenName: it.TokenName,
 		})
 	}
 	return out, env.Total, nil

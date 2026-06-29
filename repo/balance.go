@@ -28,9 +28,9 @@ func (s *Store) GetOrCreateBalance(ctx context.Context, orgID int64) (*model.Bal
 func (s *Store) getBalance(ctx context.Context, orgID int64) (*model.Balance, error) {
 	var b model.Balance
 	err := s.db.QueryRowContext(ctx,
-		`SELECT org_id, total_recharged, total_consumed, total_refunded, balance, low_watermark, version
+		`SELECT org_id, total_recharged, total_consumed, total_refunded, committed, balance, low_watermark, version
 		 FROM company_balance WHERE org_id = ?`, orgID).Scan(
-		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.TotalRefunded, &b.Balance, &b.LowWatermark, &b.Version)
+		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.TotalRefunded, &b.Committed, &b.Balance, &b.LowWatermark, &b.Version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -88,9 +88,9 @@ func (s *Store) AddRecharge(ctx context.Context, r *model.Recharge) (*model.Bala
 
 	var b model.Balance
 	if err := tx.QueryRowContext(ctx,
-		`SELECT org_id, total_recharged, total_consumed, total_refunded, balance, low_watermark, version
+		`SELECT org_id, total_recharged, total_consumed, total_refunded, committed, balance, low_watermark, version
 		 FROM company_balance WHERE org_id = ?`, r.OrgID).Scan(
-		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.TotalRefunded, &b.Balance, &b.LowWatermark, &b.Version); err != nil {
+		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.TotalRefunded, &b.Committed, &b.Balance, &b.LowWatermark, &b.Version); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -138,9 +138,9 @@ func (s *Store) DebitBalance(ctx context.Context, orgID, amount int64, reason, o
 	}
 	var b model.Balance
 	if err := tx.QueryRowContext(ctx,
-		`SELECT org_id, total_recharged, total_consumed, total_refunded, balance, low_watermark, version
+		`SELECT org_id, total_recharged, total_consumed, total_refunded, committed, balance, low_watermark, version
 		 FROM company_balance WHERE org_id = ?`, orgID).Scan(
-		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.TotalRefunded, &b.Balance, &b.LowWatermark, &b.Version); err != nil {
+		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.TotalRefunded, &b.Committed, &b.Balance, &b.LowWatermark, &b.Version); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

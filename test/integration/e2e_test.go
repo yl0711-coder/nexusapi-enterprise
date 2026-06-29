@@ -1728,6 +1728,33 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		}
 		t.Logf("改显示名 ok: 改本人成功+回显新名 + 恶意名被拒(只改本人=端点无id参数)")
 	}
+
+	// ===== M2 用量时间序列(折线图)端点 =====
+	{
+		var tsResp struct {
+			Series []struct {
+				Period        string `json:"period"`
+				ConsumedQuota int64  `json:"consumed_quota"`
+			} `json:"series"`
+		}
+		if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/usage/timeseries?since_hours=2208&granularity=day", orgID), adminTok, nil, &tsResp); st != http.StatusOK {
+			t.Fatalf("组织时间序列 HTTP=%d", st)
+		}
+		var tsSum int64
+		for _, p := range tsResp.Series {
+			tsSum += p.ConsumedQuota
+		}
+		if len(tsResp.Series) == 0 || tsSum <= 0 {
+			t.Fatalf("组织时间序列应非空且有消耗,实得 %d 点 sum=%d", len(tsResp.Series), tsSum)
+		}
+		if st := api.do("GET", fmt.Sprintf("/api/v1/organizations/%d/usage/timeseries", orgID), memberTok, nil, nil); st != http.StatusForbidden {
+			t.Fatalf("成员看组织时间序列应 403,得 %d", st)
+		}
+		if st := api.do("GET", fmt.Sprintf("/api/v1/members/%d/usage/timeseries?since_hours=2208&granularity=day", openResp.MemberID), memberTok, nil, nil); st != http.StatusOK {
+			t.Fatalf("成员看本人时间序列应 200,得 %d", st)
+		}
+		t.Logf("M2 时间序列端点 ok: 组织折线图 %d 点 sum=%d;成员看组织 403;成员看本人 200", len(tsResp.Series), tsSum)
+	}
 }
 
 // ---- helpers ----

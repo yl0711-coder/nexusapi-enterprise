@@ -116,6 +116,71 @@ func (s *Service) MemberUsage(ctx context.Context, c session.Claims, orgID, memb
 	return s.aggregateUsage(ctx, sinceHours, &orgID, &uid, nil)
 }
 
+// UsageSeriesPoint 用量时间序列的一个点(折线图;period 标签 + 该期消耗 quota)。
+type UsageSeriesPoint struct {
+	Period        string `json:"period"`
+	ConsumedQuota int64  `json:"consumed_quota"`
+}
+
+// validGranularity 收敛时间粒度白名单(day/week/month,非法回落 day)。
+func validGranularity(g string) string {
+	switch g {
+	case "week", "month":
+		return g
+	default:
+		return "day"
+	}
+}
+
+// OrgUsageTimeSeries 组织用量时间序列(折线图,O/A;按 UTC+8 自然 day/week/month 上卷)。
+func (s *Service) OrgUsageTimeSeries(ctx context.Context, c session.Claims, orgID int64, sinceHours int, granularity string) ([]UsageSeriesPoint, error) {
+	if err := assertOrgScope(c, orgID); err != nil {
+		return nil, err
+	}
+	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
+		return nil, err
+	}
+	return s.usageTimeSeries(ctx, orgID, sinceHours, granularity, nil)
+}
+
+// MemberUsageTimeSeries 成员用量时间序列(本人/上级/管理员)。
+func (s *Service) MemberUsageTimeSeries(ctx context.Context, c session.Claims, orgID, memberID int64, sinceHours int, granularity string) ([]UsageSeriesPoint, error) {
+	if err := assertOrgScope(c, orgID); err != nil {
+		return nil, err
+	}
+	m, err := s.store.GetMember(ctx, orgID, memberID)
+	if err != nil {
+		return nil, apperr.NotFound("成员不存在")
+	}
+	if err := assertSelf(c, memberID); err != nil {
+		return nil, err
+	}
+	if c.Role == session.RoleTeamLeader {
+		if err := assertTeamScope(c, m.TeamID); err != nil {
+			return nil, err
+		}
+	}
+	uid := m.NewapiUserID
+	return s.usageTimeSeries(ctx, orgID, sinceHours, granularity, &uid)
+}
+
+// usageTimeSeries 时间序列内部聚合(身份过滤已由调用方做);只读 usage_ledger,无 live-logs(看板趋势用已结算数据即可)。
+func (s *Service) usageTimeSeries(ctx context.Context, orgID int64, sinceHours int, granularity string, userFilter *int64) ([]UsageSeriesPoint, error) {
+	if sinceHours <= 0 || sinceHours > 24*92 {
+		sinceHours = 24
+	}
+	since := time.Unix(s.now().Unix()-int64(sinceHours)*3600, 0).UTC()
+	pts, err := s.store.AggregateUsageByTime(ctx, orgID, since, validGranularity(granularity), userFilter, nil)
+	if err != nil {
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	out := make([]UsageSeriesPoint, 0, len(pts))
+	for _, p := range pts {
+		out = append(out, UsageSeriesPoint{Period: p.Period, ConsumedQuota: p.Consumed})
+	}
+	return out, nil
+}
+
 // aggregateUsage 用量聚合(B4:已结算 usage_ledger 为主 + 当期未结小窗口 logs 为辅)。
 // orgFilter 必给(看板按组织);userFilter!=nil 只算该 new-api user。历史读 ledger(分页安全、不压
 // new-api);只对"结算游标→now"小窗口实时读 logs 补当期(限 2 页,绝不长段全量)。

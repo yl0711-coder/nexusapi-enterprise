@@ -102,6 +102,40 @@ func usageView(u *service.UsageReport) map[string]any {
 
 func sinceHours(r *http.Request) int { return atoiDefault(r.URL.Query().Get("since_hours"), 24) }
 
+func granularityParam(r *http.Request) string { return r.URL.Query().Get("granularity") }
+
+// GET /organizations/{id}/usage/timeseries — 组织用量时间序列(折线图,O/A;granularity=day|week|month)。
+func (h *Handler) handleOrgUsageTimeSeries(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	orgID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	pts, err := h.svc.OrgUsageTimeSeries(r.Context(), c, orgID, sinceHours(r), granularityParam(r))
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{"series": pts, "since_hours": sinceHours(r)})
+}
+
+// GET /members/{id}/usage/timeseries — 成员用量时间序列(本人/上级/管理员)。
+func (h *Handler) handleMemberUsageTimeSeries(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	memberID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	pts, err := h.svc.MemberUsageTimeSeries(r.Context(), c, c.OrgID, memberID, sinceHours(r), granularityParam(r))
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{"series": pts, "since_hours": sinceHours(r)})
+}
+
 // GET /organizations/{id}/usage — 组织用量分析(O/A)。
 func (h *Handler) handleOrgUsage(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())

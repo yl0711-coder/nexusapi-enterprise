@@ -321,28 +321,28 @@ async function doCreateOrg() {
 }
 async function enterOrg(id, name) {
   S.orgId = id; S.org = { id, name };
-  const [org, bal, bs, ref] = await Promise.all([
+  const [org, eb, bs] = await Promise.all([
     api("GET", "/organizations/" + id, null),
-    api("GET", "/organizations/" + id + "/balance", null),
+    api("GET", "/organizations/" + id + "/escrow-balance", null).catch(() => ({})), // 模型2 读穿余额(窗口+托管)
     api("GET", "/organizations/" + id + "/billing-settings", null),
-    api("GET", "/organizations/" + id + "/budget-ref", null), // #4:运营方也看 已用$/预付$(垫钱敞口)
   ]);
   const mem = await api("GET", "/organizations/" + id + "/members?page=1&page_size=20", null);
   const main = document.getElementById("main");
   const rows = (mem.list || []).map(m => `<tr><td>${esc(m.display_name || m.login_email)}</td>
     <td>${pill(m.status, m.status === "active" ? "ok" : "mut")}</td><td class="mini">${esc(m.key_masked || "-")}</td></tr>`).join("");
-  main.innerHTML = head(esc(name), S.mvp ? "运营方支持视角 · 成员 / 组织状态 / 支持会话" : "运营方支持视角 · 余额 / 计费灰度 / 成员 / 支持会话")
+  main.innerHTML = head(esc(name), "运营方支持视角 · 余额(读穿) / 计费灰度 / 成员 / 支持会话")
     + `<div class="crumb"><span class="lk" onclick="go('orgs')">客户组织</span><span class="sep">/</span><b>${esc(name)}</b></div>
     <div class="cards">
-      ${S.mvp ? "" : kpi("当前余额", money(bal.balance_quota), "累计充值 " + money(bal.total_recharged_quota))}
-      ${S.mvp ? "" : kpi("累计消耗", money(bal.total_consumed_quota), "")}
+      ${kpi("可用余额", money(eb.available_quota || 0), "窗口+托管(模型2 读穿,不持第二本账)")}
+      ${kpi("可花窗口", money(eb.window_quota || 0), "镜像进 new-api 的当前剩余")}
+      ${kpi("托管", money(eb.holding_quota || 0), "未进窗口的预付")}
       ${kpi("组织状态", pill(org.status, org.status === "active" ? "ok" : "warn"), "")}
       ${S.mvp ? "" : kpi("计费灰度", (bs.billing_enabled ? "扣费开" : "扣费关") + " · " + (bs.hard_stop_enabled ? "硬停开" : "硬停关"), "默认全关")}
     </div>
-    ${S.mvp ? `<div class="panel"><div class="ph">额度参考(仅供参考)</div><div class="pb"><div class="cards">${kpi("累计已用", money(ref.consumed_quota), "")}${kpi("预付总额", money(ref.recharged_quota), "")}${kpi("剩余(参考)", money((ref.recharged_quota || 0) - (ref.consumed_quota || 0)), "额度仅供参考,不影响服务")}</div></div></div>` : ""}
     <div class="toolbar">
-      ${S.mvp ? "" : `<button class="btn pri" onclick="openTopup(${id})">充值入账</button>
-      <button class="btn" onclick="toggleBilling(${id},${!bs.billing_enabled})">${bs.billing_enabled ? "关闭扣费" : "开启扣费(灰度)"}</button>
+      <button class="btn pri" onclick="openTopup(${id})">充值入账</button>
+      <button class="btn" onclick="doRefill(${id})">续充(托管→窗口)</button>
+      ${S.mvp ? "" : `<button class="btn" onclick="toggleBilling(${id},${!bs.billing_enabled})">${bs.billing_enabled ? "关闭扣费" : "开启扣费(灰度)"}</button>
       <button class="btn" onclick="openDiscount(${id})">配置折扣</button>`}
       <button class="btn" onclick="openSupport(${id})">支持会话</button>
     </div>
@@ -360,6 +360,11 @@ async function doTopup(id) {
     await api("POST", "/organizations/" + id + "/recharges", { amount_quota: Math.round(usd * 500000), transfer_no: val("tp_t") });
     closeM(); toast("已入账"); enterOrg(id, S.org.name);
   } catch (e) { toast(e.message); }
+}
+// 模型2 手工续充:把一个托管桶并入可花窗口(运营方;窗口低于阈值时用)。
+async function doRefill(id) {
+  try { await api("POST", "/organizations/" + id + "/escrow/refill", null); toast("已续充(托管并入窗口)"); enterOrg(id, S.org.name); }
+  catch (e) { toast(e.message); }
 }
 async function toggleBilling(id, on) {
   try { await api("PATCH", "/organizations/" + id + "/billing-settings", { billing_enabled: on }); toast(on ? "已开启扣费(灰度)" : "已关闭扣费"); enterOrg(id, S.org.name); }
@@ -404,10 +409,11 @@ VIEWS.dash = async () => {
   // 改动⑦:MVP 看板纯用量化 —— 钱相关(余额/累计消耗/低位阈值)只在非 MVP 拉取与展示。
   // 改动⑦:钱(余额/累计消耗/低位)只非 MVP 展示;MVP 改用 #4 额度参考条(只读,不停服)。
   const reqs = [api("GET", "/organizations/" + id + "/usage?since_hours=" + win, null)];
-  reqs.push(api("GET", "/organizations/" + id + (S.mvp ? "/budget-ref" : "/balance"), null));
+  reqs.push(api("GET", "/organizations/" + id + "/escrow-balance", null).catch(() => ({}))); // 模型2 读穿余额(窗口+托管)
   // M2:用量趋势(折线图);失败不拖垮看板,降级空序列。
   reqs.push(api("GET", "/organizations/" + id + "/usage/timeseries?since_hours=" + win + "&granularity=" + S.gran, null).catch(() => ({ series: [] })));
-  const [usage, extra, ts] = await Promise.all(reqs);
+  reqs.push(api("GET", "/organizations/" + id + "/budget-ref", null).catch(() => ({}))); // 全期消耗(上手清单信号)
+  const [usage, eb, ts, ref] = await Promise.all(reqs);
   const series = (ts && ts.series) || [];
   // #6:模型/员工都全量渲染 + 各自搜索框 + 滚动容器(成员超 8 人也找得到),不再 slice 截断。
   const mods = usage.by_model || [];
@@ -428,35 +434,26 @@ VIEWS.dash = async () => {
     const nm = b.label || ("团队#" + b.key);
     return `<div class="bar lk" onclick="openTeamUsage(${b.key},'${jsstr(nm)}')" title="查看该团队成员/模型明细" data-q="${esc(nm.toLowerCase())}"><span class="nm">${esc(nm)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / maxt * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`;
   }).join("") || `<div class="empty">${wl}暂无用量(或未建团队)</div>`;
-  const moneyCards = S.mvp ? "" : `
-      ${kpi("当前余额", money(extra.balance_quota), "累计充值 " + money(extra.total_recharged_quota))}
-      ${kpi("累计消耗", money(extra.total_consumed_quota), "")}
-      ${kpi("低位阈值", money(extra.low_watermark_quota), "")}`;
-  // #4 额度参考条(MVP):已用$/预付$/剩余$,仅供参考、本期不停服。
-  const refBar = S.mvp ? `<div class="panel"><div class="ph">额度参考(仅供参考)</div><div class="pb"><div class="cards">
-      ${kpi("累计已用", money(extra.consumed_quota), "按实际调用量统计")}
-      ${kpi("预付总额", money(extra.recharged_quota), "")}
-      ${kpi("剩余(参考)", money(Math.max(0, (extra.recharged_quota || 0) - (extra.consumed_quota || 0))), "额度仅供参考,不影响服务")}
-    </div></div></div>` : "";
+  // 模型2 读穿余额(可用=窗口+托管);org_admin 可见(余额无价,不涉藏价)。
+  const balCards = `${kpi("可用余额", money(eb.available_quota || 0), "可花窗口+托管(读穿,不持第二本账)")}${kpi("可花窗口", money(eb.window_quota || 0), "镜像进 new-api 当前剩余")}${kpi("托管", money(eb.holding_quota || 0), "未进窗口的预付")}`;
   const srch = (iid, cid, ph) => `<input id="${iid}" placeholder="${ph}" oninput="filterEls('${iid}','${cid}')" style="float:right;width:150px;padding:2px 8px;font-size:12px">`;
   // 数据安全承诺条(仅客户 org_admin);文案站得住:MVP 下成员 key 员工自助建、平台不经手,观测不扣款。
   const safebar = S.role === "org_admin" ? `<div class="safebar">本平台仅统计您的用量,不接触您的 API 密钥;观测期不扣款,数据仅用于用量统计。</div>` : "";
   // 新组织上手清单:只看「累计消耗==0」(全期,非当前窗口),避免老组织淡季/周末零调用回弹"快速上手";真正用过即永久消失。
   // 兼容两路 extra:MVP=budget-ref(consumed_quota) / 非 MVP=balance(total_consumed_quota)。
-  const cumConsumed = S.mvp ? (extra.consumed_quota || 0) : (extra.total_consumed_quota || 0);
+  const cumConsumed = ref.consumed_quota || 0; // 全期消耗(budget-ref);上手清单信号
   const showOnboard = S.role === "org_admin" && cumConsumed === 0;
   const onboard = showOnboard ? `<div class="panel onboard"><div class="ph">快速上手</div><div class="pb">
     <div class="ob-row"><span class="ob-n">1</span><div><b>开通员工</b><div class="mini">在「成员」开通员工账号,交付登录凭证</div></div><button class="btn sm pri" onclick="go('members')">去开通</button></div>
     <div class="ob-row"><span class="ob-n">2</span><div><b>(可选)建团队</b><div class="mini">想按团队看用量就先建团队,再把员工归入</div></div><button class="btn sm" onclick="go('teams')">建团队</button></div>
     <div class="ob-row"><span class="ob-n">3</span><div><b>查看用量</b><div class="mini">员工开始调用后,这里会显示按团队 / 员工 / 模型的用量</div></div></div>
   </div></div>` : "";
-  return head("概览", S.mvp ? "公司用量总览(只读)" : "公司余额 + 用量")
+  return head("概览", "公司余额(读穿) + 用量")
     + safebar
     + `<div class="toolbar"><div class="search"></div><button class="btn" onclick="downloadUsageCsv()">导出CSV(员工名·美元)</button><span class="mini">时间窗</span>${winSelect()}</div>
     <div class="cards">
-      ${kpi(wl + "消耗", money(usage.total_quota), "按实际调用量统计")}${moneyCards}
+      ${kpi(wl + "消耗", money(usage.total_quota), "按实际调用量统计")}${balCards}
     </div>
-    ${refBar}
     ${onboard}
     <div class="panel"><div class="ph">用量趋势(${wl})<span class="mini" style="font-weight:400;float:right">粒度 ${granSelect()}</span></div><div class="pb">${lineChart(series)}</div></div>
     <div class="panel"><div class="ph">按团队用量(${wl})· 点团队下钻 <span class="mini" style="font-weight:400">团队用量按成员当前归属聚合${srch("teamSearch", "teamBars", "搜团队…")}</span></div><div class="pb" id="teamBars" style="max-height:300px;overflow:auto">${tbars}</div></div>
@@ -561,7 +558,9 @@ async function doAdjust(mid) {
   } catch (e) { toast(e.message); }
 }
 async function toggleMember(mid, enable) {
-  try { await api("POST", "/members/" + mid + "/status", { enabled: enable }); toast(enable ? "已恢复" : "已停用"); renderView(); }
+  // 模型2:停用=删该员工令牌(key 立即失效);恢复后需员工自助重建 key(恢复 key 会变,待总监定终态语义)。
+  if (!enable && !confirm("停用将立即使该员工的 API key 失效(删除其令牌);恢复后需员工自助重建 key。确认停用?")) return;
+  try { await api("POST", "/members/" + mid + "/status", { enabled: enable }); toast(enable ? "已恢复(请提示员工重建 key)" : "已停用(key 已失效)"); renderView(); }
   catch (e) { toast(e.message); }
 }
 VIEWS.teams = async () => {
@@ -694,16 +693,17 @@ VIEWS.approvals = async () => {
 async function decide(id, ok) { try { await api("POST", "/approvals/" + id + "/decide", { approved: ok, comment: "" }); toast(ok ? "已批准" : "已驳回"); renderView(); } catch (e) { toast(e.message); } }
 VIEWS.billing = async () => {
   const id = S.orgId;
-  const [bal, recs, reqs] = await Promise.all([
-    api("GET", "/organizations/" + id + "/balance", null),
+  const [eb, ref, recs, reqs] = await Promise.all([
+    api("GET", "/organizations/" + id + "/escrow-balance", null).catch(() => ({})), // 模型2 读穿余额
+    api("GET", "/organizations/" + id + "/budget-ref", null).catch(() => ({})),      // 累计充值/消耗
     api("GET", "/organizations/" + id + "/recharges?page=1&page_size=10", null),
     api("GET", "/organizations/" + id + "/recharge-requests?page=1&page_size=10", null),
   ]);
   let pricing = null; try { pricing = await api("GET", "/organizations/" + id + "/pricing", null); } catch (e) {}
   const rrows = (recs.list || []).map(r => `<tr><td>${esc(r.recharged_at.slice(0, 10))}</td><td>${money(r.amount_quota)}</td><td class="mini">${esc(r.operator_name || r.operator)}</td></tr>`).join("");
   const qrows = (reqs.list || []).map(r => `<tr><td>${esc(r.request_type)}</td><td>${money(r.amount_quota)}</td><td>${pill(r.status, r.status === "pending" ? "warn" : "ok")}</td></tr>`).join("");
-  return head("余额与计费", "预付余额 = 累计充值 − 累计消耗;充值由运营方入账,你可发起申请")
-    + `<div class="cards">${kpi("当前余额", money(bal.balance_quota), "")}${kpi("累计充值", money(bal.total_recharged_quota), "")}${kpi("累计消耗", money(bal.total_consumed_quota), "")}${kpi("累计退款", money(bal.total_refunded_quota || 0), "冲正/退款累计")}</div>
+  return head("余额与计费", "可用余额 = 可花窗口 + 托管(读穿 new-api,不持第二本账);充值由运营方入账,你可发起申请")
+    + `<div class="cards">${kpi("可用余额", money(eb.available_quota || 0), "窗口+托管")}${kpi("可花窗口", money(eb.window_quota || 0), "")}${kpi("托管", money(eb.holding_quota || 0), "")}${kpi("累计充值", money(ref.recharged_quota || 0), "")}${kpi("累计消耗", money(ref.consumed_quota || 0), "")}</div>
     ${pricingReadonly(pricing)}
     <div class="toolbar"><button class="btn pri" onclick="openReqTopup()">申请充值</button></div>
     <div class="row2"><div class="panel"><div class="ph">入账记录</div><div class="pb"><table><tbody>${rrows || '<tr><td class="empty">暂无</td></tr>'}</tbody></table></div></div>

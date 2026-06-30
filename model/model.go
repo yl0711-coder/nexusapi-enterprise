@@ -177,13 +177,6 @@ const (
 	KeyTokenSuperseded = "superseded" // 轮换后被取代的旧令牌(留作历史归因)
 )
 
-// 周期类型(v2 0017,单一周期三选一)。
-const (
-	PeriodDay   = "day"
-	PeriodWeek  = "week"
-	PeriodMonth = "month"
-)
-
 // MemberKeySlot 对应 member_key_slot 表(v2 0015)。id = 平台稳定 key_id,1:N 挂成员,轮换不变。
 type MemberKeySlot struct {
 	ID        int64 // = 平台稳定 key_id
@@ -211,23 +204,6 @@ type MemberKeyToken struct {
 	CreatedAt     time.Time
 }
 
-// MemberBudget 对应 member_budget 表(v2 0017)。每成员一行,单一周期。
-// 本期(观测)只配置不执行:cap/period 可设,granted 恒 0(不发放),spend_cache 由结算派生。
-type MemberBudget struct {
-	ID                int64
-	OrgID             int64
-	MemberID          int64
-	PeriodType        string // day/week/month
-	Cap               int64  // 周期发放上限(quota)
-	Granted           int64  // 本期已发放(quota;占用池子)
-	PeriodAnchor      *time.Time
-	PendingCap        *int64  // 待下周期生效的新 cap
-	PendingPeriodType *string // 待下周期生效的新周期类型
-	SpendCache        int64   // 派生消费缓存(可重算)
-	LastResetAt       *time.Time
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-}
 
 // grant_type(09 §14 + 08 §3.4)。
 const (
@@ -268,14 +244,13 @@ type GrantPayload struct {
 }
 
 // Balance 对应 company_balance 表(09 §7)。balance = total_recharged - total_consumed。
-// Committed(v2 0018):组织池"已发放占用"= Σ成员 granted,不超卖与"可分配"派生用;
-// 本期(观测)恒 0(不发放)。可分配 = TotalRecharged - Committed。
+// 模型2:company_balance 降为派生影子/对账用(真相=工单+日志,余额读穿 escrow);
+// model1 的 committed 字段已删(不超卖靠原生闸门,未来划拨用 unit_budget,14 §74)。
 type Balance struct {
 	OrgID          int64
 	TotalRecharged int64
 	TotalConsumed  int64
 	TotalRefunded  int64
-	Committed      int64
 	Balance        int64
 	LowWatermark   int64
 	Version        int64

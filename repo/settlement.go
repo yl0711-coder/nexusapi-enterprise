@@ -134,9 +134,9 @@ func (s *Store) DeductBalanceTx(ctx context.Context, x dbtx, orgID, amount int64
 	}
 	var b model.Balance
 	if err := x.QueryRowContext(ctx,
-		`SELECT org_id, total_recharged, total_consumed, total_refunded, committed, balance, low_watermark, version
+		`SELECT org_id, total_recharged, total_consumed, total_refunded, balance, low_watermark, version
 		 FROM company_balance WHERE org_id = ?`, orgID).Scan(
-		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.TotalRefunded, &b.Committed, &b.Balance, &b.LowWatermark, &b.Version); err != nil {
+		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.TotalRefunded, &b.Balance, &b.LowWatermark, &b.Version); err != nil {
 		return nil, err
 	}
 	return &b, nil

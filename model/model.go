@@ -45,6 +45,8 @@ type Organization struct {
 	BillingMode       string
 	DefaultTokenGroup *string    // 组织级默认令牌计价分组(D1 两级;nil=回落 default)
 	ArchivedAt        *time.Time // 归档时间(NULL=未归档,T12)
+	NewapiUserID      *int64     // 模型2(0020):组织=一个 new-api user,此为池子锚(user.quota=预付池子);nil=尚未开通
+	AccessTokenEnc    []byte     // 模型2(0020):该组织 new-api user 的 access_token,应用层加密存(建员工 token 用);列 newapi_access_token_enc
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 }
@@ -57,6 +59,68 @@ type Team struct {
 	LeaderMemberID *int64
 	DefaultTierID  *int64
 	Status         string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+// ===== 模型2(0020)新增实体:组织树 / 托管多桶 / 开通 outbox =====
+
+// org_unit 状态/类型(模型2)。
+const (
+	OrgUnitActive   = "active"
+	OrgUnitArchived = "archived"
+)
+
+// escrow_bucket 状态(模型2 托管多桶)。
+const (
+	EscrowActive  = "active"  // 桶1:镜像进 org user.quota 的可花窗口
+	EscrowHolding = "holding" // 平台库托管,未进窗口
+	EscrowMerged  = "merged"  // 已并入窗口(续充消耗)
+)
+
+// outbox 状态(模型2 开通意图)。
+const (
+	OutboxPending = "pending"
+	OutboxDone    = "done"
+	OutboxFailed  = "failed"
+)
+
+// OrgUnit 对应 org_unit 表(模型2,0020)。组织内部任意深度树;Path 物化路径含首尾斜杠 "/1/7/22/"。
+type OrgUnit struct {
+	ID        int64
+	OrgID     int64
+	ParentID  *int64 // 根节点 nil
+	Path      string
+	Name      string
+	Type      string
+	Status    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	DeletedAt *time.Time
+}
+
+// EscrowBucket 对应 escrow_bucket 表(模型2,0020)。Seq=1/Active=镜像进 user.quota 的可花窗口,其余托管。
+type EscrowBucket struct {
+	ID        int64
+	OrgID     int64
+	Seq       int
+	Amount    int64
+	Status    string
+	Threshold int64
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// Outbox 对应 outbox 表(模型2,0020)。开通意图;IdempotencyKey 唯一=幂等键。
+type Outbox struct {
+	ID             int64
+	AggregateType  string // organization / member
+	AggregateID    int64
+	Payload        []byte // JSON
+	Status         string
+	IdempotencyKey string
+	Attempts       int
+	LastError      *string
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }

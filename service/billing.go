@@ -2,10 +2,12 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strconv"
 	"strings"
 
+	"github.com/nexusapi-platform/enterprise/adapter/newapi"
 	"github.com/nexusapi-platform/enterprise/model"
 	"github.com/nexusapi-platform/enterprise/pkg/apperr"
 	"github.com/nexusapi-platform/enterprise/pkg/session"
@@ -46,7 +48,9 @@ func (s *Service) Recharge(ctx context.Context, c session.Claims, orgID int64, i
 	if in.Note != "" {
 		note = &in.Note
 	}
-	bal, err := s.store.AddRecharge(ctx, &model.Recharge{
+	// 模型2:入账=持 per-org 锁的原子操作{记账+影子+escrow 分桶}+ 提交后 add 进 newapi(applyRecharge)。
+	// 取代旧"AddRecharge 后再 allocateRecharge"两步非原子(R5 F5 修复)。
+	bal, err := s.applyRecharge(ctx, orgID, &model.Recharge{
 		OrgID: orgID, Amount: in.AmountQuota, AmountCNY: in.AmountCNY,
 		TransferNo: in.TransferNo, Operator: actorOf(c), Note: note,
 	})
@@ -57,14 +61,7 @@ func (s *Service) Recharge(ctx context.Context, c session.Claims, orgID int64, i
 		return nil, apperr.OptimisticLock("余额并发更新冲突,请重试")
 	}
 	if err != nil {
-		return nil, apperr.Internal("").WithCause(err)
-	}
-
-	// 模型2:把本次入账分配进托管多桶并 add 进 org user.quota(桶1 填窗口、余下托管)。已记账成功才到这;
-	// allocate 失败=窗口欠拨(不超拨,reconcile 可发现),返错让运营重试(记账幂等键 transfer_no 已占,重试不重复记)。
-	if aerr := s.allocateRecharge(ctx, orgID, in.AmountQuota); aerr != nil {
-		s.log.Error("入账分配进 escrow/newapi 失败(已记账,窗口欠拨待重试/对账)", "org_id", orgID, "err", aerr)
-		return nil, aerr
+		return nil, err // applyRecharge 已包 apperr.Internal
 	}
 	if err := s.recomputeOrgStatus(ctx, orgID, bal); err != nil {
 		s.log.Error("入账后重算组织状态失败", "org_id", orgID, "err", err)
@@ -82,7 +79,9 @@ type DebitInput struct {
 }
 
 // DebitBalance 运营方执行退款冲正(US-12 / D1:平台是数字台账,线下退款后在平台录入减余额)。
-// 动钱红线:仅运营方;金额≤余额;乐观锁;重算组织状态;强制留痕(actor+原因)。
+// 模型2(R5 F3 修复):退款必须**真减花钱能力**——持 per-org 锁,单事务{影子余额−refund流水 + escrow 减额
+// (先减托管后减桶1,ReduceEscrowTx)}+ 桶1 减的部分对应 newapi 窗口 subtract。绝不只减死账(那样退款后客户照花=双付)。
+// 金额≤可用(影子 balance==escrow available,二者守恒一致);乐观锁;newapi subtract 失败由 reconcile 自愈。
 func (s *Service) DebitBalance(ctx context.Context, c session.Claims, orgID int64, in DebitInput) (*model.Balance, error) {
 	if err := assertRole(c, session.RoleOperator); err != nil {
 		return nil, err
@@ -93,18 +92,50 @@ func (s *Service) DebitBalance(ctx context.Context, c session.Claims, orgID int6
 	if in.Reason == "" {
 		return nil, apperr.InvalidParam("冲正须填原因(留痕)")
 	}
-	bal, err := s.store.DebitBalance(ctx, orgID, in.AmountQuota, in.Reason, actorOf(c))
-	if errors.Is(err, repo.ErrInsufficientBalance) {
-		return nil, apperr.InvalidParam("冲正金额超过当前余额")
-	}
-	if errors.Is(err, repo.ErrNotFound) {
-		return nil, apperr.NotFound("组织无余额记录")
-	}
-	if errors.Is(err, repo.ErrOptimisticLock) {
-		return nil, apperr.OptimisticLock("余额并发冲突,请重试")
-	}
+	uid, _, ok, err := s.store.GetOrgNewapiCred(ctx, orgID)
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)
+	}
+	if !ok {
+		return nil, apperr.InvalidParam("组织未开通池子,无可冲正余额")
+	}
+	release, lerr := s.quotaLocker.Acquire(ctx, escrowLockKey(orgID))
+	if lerr != nil {
+		return nil, apperr.Internal("").WithCause(lerr)
+	}
+	defer release()
+
+	var bal *model.Balance
+	var windowDec int64
+	if err := s.store.WithTx(ctx, func(tx *sql.Tx) error {
+		b, derr := s.store.DebitBalanceTx(ctx, tx, orgID, in.AmountQuota, in.Reason, actorOf(c)) // 影子+refund流水+amount≤balance
+		if derr != nil {
+			return derr
+		}
+		bal = b
+		wd, eerr := s.store.ReduceEscrowTx(ctx, tx, orgID, in.AmountQuota) // 先减托管后减桶1
+		if eerr != nil {
+			return eerr
+		}
+		windowDec = wd
+		return nil
+	}); err != nil {
+		if errors.Is(err, repo.ErrInsufficientBalance) {
+			return nil, apperr.InvalidParam("冲正金额超过当前可用余额")
+		}
+		if errors.Is(err, repo.ErrNotFound) {
+			return nil, apperr.NotFound("组织无余额记录")
+		}
+		if errors.Is(err, repo.ErrOptimisticLock) {
+			return nil, apperr.OptimisticLock("余额并发冲突,请重试")
+		}
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	// 桶1 减的部分对应 newapi 窗口 subtract(托管减不动 newapi)。失败→reconcile 自愈窗口。
+	if windowDec > 0 {
+		if err := s.upstream.ManageUserQuota(ctx, int(uid), newapi.QuotaSubtract, windowDec); err != nil {
+			s.log.Error("退款 subtract newapi 窗口失败(DB 已原子提交,reconcile 将自愈)", "org_id", orgID, "dec", windowDec, "err", err)
+		}
 	}
 	if err := s.recomputeOrgStatus(ctx, orgID, bal); err != nil {
 		s.log.Error("冲正后重算组织状态失败", "org_id", orgID, "err", err)

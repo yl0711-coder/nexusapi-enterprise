@@ -55,6 +55,11 @@ func (w *ReconcileWorker) Run(ctx context.Context) {
 				if lerr := w.svc.ReconcileBalanceLedger(rc); lerr != nil {
 					w.log.Error("余额-台账对账失败(下轮重试)", "err", lerr)
 				}
+				// 模型2 escrow 对账(R5 F4):窗口纠偏(桶1 vs newapi quota+used 自愈入账/续充/退款的写残窗)
+				// + 守恒断言(已释放+托管==充值−退款)。observe 下 ReconcileEscrow 内部短路。
+				if eerr := w.svc.ReconcileEscrow(rc); eerr != nil {
+					w.log.Error("escrow 对账失败(下轮重试)", "err", eerr)
+				}
 				// v2 M2-2:逐条明细 90 天保留清理(只删本库,housekeeping,不涉钱)。
 				if perr := w.svc.PurgeOldUsageDetail(rc); perr != nil {
 					w.log.Error("用量明细保留清理失败(下轮重试)", "err", perr)

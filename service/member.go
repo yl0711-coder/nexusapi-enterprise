@@ -414,6 +414,11 @@ func (s *Service) EnsureOrgProvisioned(ctx context.Context, orgID int64, orgName
 	if err := s.upstream.SetUserGroup(ctx, res.NewapiUserID, s.orgUserGroup(ctx, orgID)); err != nil {
 		s.log.Warn("设 org user 分组失败(可后续补)", "org_id", orgID, "err", err)
 	}
+	// 模型2 escrow 对账前提:org user 初始额度/邀请赠送清零,使"已释放(桶1)==newapi(quota+used)"恒成立。
+	// 一次性、刚建无令牌无消费,override 0 安全(override 禁令针对花钱热路径,不含此处)。失败也由 reconcile 自愈。
+	if err := s.upstream.ManageUserQuota(ctx, res.NewapiUserID, newapi.QuotaOverride, 0); err != nil {
+		s.log.Warn("org user 初始额度清零失败(reconcile 将纠偏)", "org_id", orgID, "err", err)
+	}
 	return newapi.MemberCred{NewapiUserID: res.NewapiUserID, AccessToken: res.AccessToken}, nil
 }
 

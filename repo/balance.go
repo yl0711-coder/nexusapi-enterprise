@@ -40,22 +40,14 @@ func (s *Store) getBalance(ctx context.Context, orgID int64) (*model.Balance, er
 	return &b, nil
 }
 
-// AddRecharge 在一个事务内:写 recharge(transfer_no 幂等)+ 累加 company_balance(乐观锁)。
-// 返回入账后的余额。重复 transfer_no → ErrConflict(由调用方按"已入账"幂等处理)。
-func (s *Store) AddRecharge(ctx context.Context, r *model.Recharge) (*model.Balance, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
+// AddRechargeTx 在调用方事务上:写 recharge(transfer_no 幂等)+ 累加 company_balance(影子账,乐观锁)。
+// 模型2:与 escrow 分桶收进同一事务(billing.Recharge 持 per-org 锁包裹),保证"记账+释放"原子。
+// 返回入账后的影子余额。重复 transfer_no → ErrConflict。
+func (s *Store) AddRechargeTx(ctx context.Context, x dbtx, r *model.Recharge) (*model.Balance, error) {
+	if _, err := x.ExecContext(ctx, `INSERT IGNORE INTO company_balance (org_id) VALUES (?)`, r.OrgID); err != nil {
 		return nil, err
 	}
-	defer tx.Rollback() //nolint:errcheck
-
-	// 确保余额行存在。
-	if _, err := tx.ExecContext(ctx, `INSERT IGNORE INTO company_balance (org_id) VALUES (?)`, r.OrgID); err != nil {
-		return nil, err
-	}
-
-	// 写入账记录(幂等键 transfer_no)。
-	if _, err := tx.ExecContext(ctx,
+	if _, err := x.ExecContext(ctx,
 		`INSERT INTO recharge (org_id, amount, amount_cny, transfer_no, operator, note)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		r.OrgID, r.Amount, r.AmountCNY, r.TransferNo, r.Operator, r.Note); err != nil {
@@ -64,16 +56,13 @@ func (s *Store) AddRecharge(ctx context.Context, r *model.Recharge) (*model.Bala
 		}
 		return nil, err
 	}
-
-	// 累加余额(乐观锁:读 version → 带 version 写)。同事务内无并发,version 主要为跨事务防护。
 	var ver int64
-	if err := tx.QueryRowContext(ctx,
+	if err := x.QueryRowContext(ctx,
 		`SELECT version FROM company_balance WHERE org_id = ? FOR UPDATE`, r.OrgID).Scan(&ver); err != nil {
 		return nil, err
 	}
-	// 注意 MySQL 单表 UPDATE 左到右求值、后续赋值会看到前面已更新的列:
-	// 故 balance 赋值放在 total_recharged 之前,用其**原值**算,避免把 amount 加两次。
-	res, err := tx.ExecContext(ctx,
+	// MySQL 单表 UPDATE 左到右求值:balance 赋值放在 total_recharged 之前用其原值算,避免 amount 加两次。
+	res, err := x.ExecContext(ctx,
 		`UPDATE company_balance
 		    SET balance = total_recharged + ? - total_consumed - total_refunded,
 		        total_recharged = total_recharged + ?,
@@ -85,15 +74,15 @@ func (s *Store) AddRecharge(ctx context.Context, r *model.Recharge) (*model.Bala
 	if n, _ := res.RowsAffected(); n != 1 {
 		return nil, ErrOptimisticLock
 	}
+	return s.getBalanceTx(ctx, x, r.OrgID)
+}
 
+func (s *Store) getBalanceTx(ctx context.Context, x dbtx, orgID int64) (*model.Balance, error) {
 	var b model.Balance
-	if err := tx.QueryRowContext(ctx,
+	if err := x.QueryRowContext(ctx,
 		`SELECT org_id, total_recharged, total_consumed, total_refunded, balance, low_watermark, version
-		 FROM company_balance WHERE org_id = ?`, r.OrgID).Scan(
+		 FROM company_balance WHERE org_id = ?`, orgID).Scan(
 		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.TotalRefunded, &b.Balance, &b.LowWatermark, &b.Version); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return &b, nil
@@ -102,14 +91,9 @@ func (s *Store) AddRecharge(ctx context.Context, r *model.Recharge) (*model.Bala
 // DebitBalance 减余额冲正(退款,US-12 执行半段,R2-S1 修正):**不动 total_recharged**,
 // 改 total_refunded += amount(守恒 balance = 充值 - 退款 - 消耗),并落独立 refund 流水。
 // amount 必须 ≤ 当前余额(冲正不得使余额为负)。乐观锁。返回扣后余额。
-func (s *Store) DebitBalance(ctx context.Context, orgID, amount int64, reason, operator string) (*model.Balance, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback() //nolint:errcheck
+func (s *Store) DebitBalanceTx(ctx context.Context, x dbtx, orgID, amount int64, reason, operator string) (*model.Balance, error) {
 	var ver, bal int64
-	if err := tx.QueryRowContext(ctx,
+	if err := x.QueryRowContext(ctx,
 		`SELECT version, balance FROM company_balance WHERE org_id = ? FOR UPDATE`, orgID).Scan(&ver, &bal); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -119,12 +103,11 @@ func (s *Store) DebitBalance(ctx context.Context, orgID, amount int64, reason, o
 	if amount > bal {
 		return nil, ErrInsufficientBalance
 	}
-	// 独立退款流水(可变 recharge 表保持不动,审计可追溯)。
-	if _, err := tx.ExecContext(ctx,
+	if _, err := x.ExecContext(ctx,
 		`INSERT INTO refund (org_id, amount, reason, operator) VALUES (?, ?, ?, ?)`, orgID, amount, reason, operator); err != nil {
 		return nil, err
 	}
-	res, err := tx.ExecContext(ctx,
+	res, err := x.ExecContext(ctx,
 		`UPDATE company_balance
 		    SET balance = total_recharged - total_consumed - total_refunded - ?,
 		        total_refunded = total_refunded + ?,
@@ -136,17 +119,7 @@ func (s *Store) DebitBalance(ctx context.Context, orgID, amount int64, reason, o
 	if n, _ := res.RowsAffected(); n != 1 {
 		return nil, ErrOptimisticLock
 	}
-	var b model.Balance
-	if err := tx.QueryRowContext(ctx,
-		`SELECT org_id, total_recharged, total_consumed, total_refunded, balance, low_watermark, version
-		 FROM company_balance WHERE org_id = ?`, orgID).Scan(
-		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.TotalRefunded, &b.Balance, &b.LowWatermark, &b.Version); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return &b, nil
+	return s.getBalanceTx(ctx, x, orgID)
 }
 
 // ErrInsufficientBalance 表示冲正/退款金额超过当前余额。

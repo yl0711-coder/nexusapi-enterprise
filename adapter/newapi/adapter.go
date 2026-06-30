@@ -136,6 +136,23 @@ func (a *Adapter) GetUserQuota(ctx context.Context, userID int) (int64, error) {
 	return env.Quota, nil
 }
 
+// GetUserQuotaUsed 读 new-api 用户的 quota(剩余)+ used_quota(累计已用)。escrow 对账用:
+// 已释放_实际 = quota + used_quota(new-api 自己的累计口径);对账 delta = 桶1 已释放_意图 − 已释放_实际。
+func (a *Adapter) GetUserQuotaUsed(ctx context.Context, userID int) (quota, used int64, err error) {
+	res, derr := a.c.do(ctx, stepGetUser, "GET", fmt.Sprintf("/api/user/%d", userID), adminAuth(a.c.cfg), nil)
+	if derr != nil {
+		return 0, 0, derr
+	}
+	var env struct {
+		Quota     int64 `json:"quota"`
+		UsedQuota int64 `json:"used_quota"`
+	}
+	if e := json.Unmarshal(res.data, &env); e != nil {
+		return 0, 0, &UpstreamError{Step: stepGetUser, PlatformCode: CodeInternal, Message: "解析用户额度失败", class: classNonRetryable, cause: e}
+	}
+	return env.Quota, env.UsedQuota, nil
+}
+
 // SetUserStatus 启停成员(enable/disable)。停用即断、恢复即通,无需重 bootstrap(05 §5.3)。
 // 目标态幂等:重复 enable/disable 无害(10 §4.5)。
 func (a *Adapter) SetUserStatus(ctx context.Context, userID int, enabled bool) error {

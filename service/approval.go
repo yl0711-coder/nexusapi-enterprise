@@ -214,7 +214,7 @@ func (s *Service) dispatchApproval(ctx context.Context, a *model.Approval, appli
 	}); err != nil {
 		return err
 	}
-	if applicant.BootstrapState == model.BootstrapDone && applicant.NewapiUserID != 0 {
+	if applicant.BootstrapState == model.BootstrapDone && applicant.NewapiTokenID != nil {
 		if _, err := s.applyMemberOverride(ctx, applicant); err != nil {
 			return err
 		}

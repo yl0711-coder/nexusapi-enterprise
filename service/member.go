@@ -23,7 +23,6 @@ type OpenMemberInput struct {
 // OpenMemberResult 开通成员产物。APIKey 明文仅本次回显一次(10 §1.8.1 / §3.1)。
 type OpenMemberResult struct {
 	MemberID        int64
-	NewapiUserID    int64
 	APIKey          string // 明文,仅此一次
 	KeyMasked       string
 	InitialPassword string // 成员平台登录初始密码,仅此一次回显(交付成员、首登改密;C2)
@@ -104,20 +103,12 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 		email = org.Slug + "-" + randEmailSuffix() + "@nexus.local"
 	}
 
-	// 生成 new-api 密码(加密留存,重 bootstrap 兜底)+ 平台登录初始密码(bcrypt)。
-	newapiPw, err := genNewapiPassword()
-	if err != nil {
-		return nil, apperr.Internal("").WithCause(err)
-	}
+	// 平台登录初始密码(bcrypt)。模型2:member 不持 new-api 用户,不再生成/存 new-api 密码(那归 organization)。
 	platPw, err := genPlatformPassword()
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)
 	}
 	platHash, err := hashPassword(platPw)
-	if err != nil {
-		return nil, apperr.Internal("").WithCause(err)
-	}
-	newapiPwEnc, err := s.keyring.EncryptString(newapiPw)
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)
 	}
@@ -132,7 +123,6 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 		Role:                 string(session.RoleMember),
 		NewapiGroup:          &grpSnap, // 令牌分组快照(T17-1)
 		PlatformPasswordHash: &platHash,
-		MemberPasswordEnc:    []byte(newapiPwEnc),
 	}
 	if tier != nil {
 		prov.TierID = &tier.ID
@@ -145,113 +135,65 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 		return nil, apperr.Internal("").WithCause(err)
 	}
 
-	// 代发 key 全链路(adapter,真机打 new-api)。username 确定性派生(<=20)。
-	res, berr := s.upstream.BootstrapMember(ctx, newapi.BootstrapInput{
-		OrgID:       orgID,
-		MemberID:    memberID,
-		Username:    deriveUsername(orgID, memberID),
-		Password:    newapiPw,
-		DisplayName: in.Name,
-		SkipToken:   s.observeMode, // 改动②:MVP 只建用户、令牌由员工自助建(改动③);非 MVP 走全链路(④⑤)
-	})
-	if berr != nil {
-		// GZ-03 修复(收口路线):区分失败步骤。②③ adapter 已禁用用户(无孤儿,res 为空);
-		// ④⑤ 用户已 active(res 带 NewapiUserID)——new-api 侧会留下平台不认识的活跃孤儿(失管 + 漏扣)。
-		// 这里立即收口禁用该孤儿(SetUserStatus false),绝不留 active 可调用孤儿;再标失败并释放邮箱(墓碑改写)。
-		if res.NewapiUserID != 0 {
-			// GZ-03 返工·治洞1:禁用失败不能记条日志就算——重试 3 次;仍失败交后台 orphan 扫描(ReconcileOrphans)
-			// 幂等再禁用兜底(墓碑行已回写 newapi_user_id,扫描据此反查),消除"禁用又失败仍留活跃孤儿"。
-			disabled := false
-			for attempt := 1; attempt <= 3; attempt++ {
-				if derr := s.upstream.SetUserStatus(ctx, res.NewapiUserID, false); derr == nil {
-					disabled = true
-					break
-				} else if attempt == 3 {
-					s.log.Error("收口禁用孤儿用户重试 3 次仍失败(交后台 orphan 扫描兜底)", "member_id", memberID, "newapi_user_id", res.NewapiUserID, "err", derr)
-				}
-			}
-			if disabled {
-				s.log.Warn("开通部分失败,已收口禁用孤儿用户", "member_id", memberID, "newapi_user_id", res.NewapiUserID)
-			}
-		}
-		// 标 bootstrap 失败 + 释放 login_email(墓碑改写),允许同邮箱重开(缺陷3)。
-		if merr := s.store.MarkBootstrapFailedAndRelease(ctx, orgID, memberID, int64(res.NewapiUserID)); merr != nil {
+	// 模型2:确保组织有 new-api user(池子锚),员工 token 挂其下。EnsureOrgProvisioned 幂等(确定性 username adopt)。
+	cred, perr := s.EnsureOrgProvisioned(ctx, orgID, org.Name)
+	if perr != nil {
+		// 组织池子未就绪:org user 共享、由 EnsureOrgProvisioned 自身幂等管,无孤儿可留;仅标成员失败 + 释放邮箱。
+		if merr := s.store.MarkBootstrapFailedAndRelease(ctx, orgID, memberID); merr != nil {
 			s.log.Error("标记 bootstrap 失败/释放邮箱失败", "member_id", memberID, "err", merr)
 		}
-		s.audit(ctx, c, orgID, "open_member", "member", &memberID, map[string]any{"name": in.Name, "result": "bootstrap_failed"})
-		return nil, mapUpstream(berr)
+		s.audit(ctx, c, orgID, "open_member", "member", &memberID, map[string]any{"name": in.Name, "result": "org_provision_failed"})
+		return nil, perr
 	}
 
-	// 成功:加密 access_token,回填成员。
-	accessTokenEnc, err := s.keyring.EncryptString(res.AccessToken)
-	if err != nil {
-		return nil, apperr.Internal("").WithCause(err)
+	// 把员工令牌分组加进 org 可用分组(§3 硬约束,不补则令牌用业务分组 403)+ total 折扣覆盖新分组。best-effort,须在建 token 前。
+	if err := s.upstream.AddOrgUsableGroup(ctx, s.orgUserGroup(ctx, orgID), grp); err != nil {
+		s.log.Warn("加可用分组失败(令牌用业务分组会 403,需补)", "member_id", memberID, "group", grp, "err", err)
 	}
-	// 改动②:无令牌(MVP/SkipToken,PlaintextKey 为空)时脱敏串也留空,避免回出误导性的"••••"(成员实际没 key)。
-	keyMasked := ""
-	if res.TokenID != 0 {
-		keyMasked = maskKey(res.PlaintextKey)
-	}
-	final := &model.Member{
-		ID:                memberID,
-		OrgID:             orgID,
-		NewapiUserID:      int64(res.NewapiUserID),
-		AccessTokenEnc:    []byte(accessTokenEnc),
-		MemberPasswordEnc: []byte(newapiPwEnc),
-	}
-	// 改动②:有令牌(非 MVP)才回填令牌字段;MVP 只建用户、无令牌(res.TokenID=0),令牌字段留空,待员工自助建(改动③)。
-	finalTokenName := ""
-	if res.TokenID != 0 {
-		tokenID := int64(res.TokenID)
-		final.NewapiTokenID = &tokenID
+	s.ensureTotalDiscountCoversGroup(ctx, orgID, grp)
+
+	// 建员工 token(挂 org user 下,用 org 凭证)。观测期 SkipToken:只开账号,令牌由员工自助建(改动③)。
+	final := &model.Member{ID: memberID, OrgID: orgID, TierID: prov.TierID, TeamID: in.TeamID}
+	keyMasked, apiKey, finalTokenName := "", "", ""
+	if !s.observeMode {
+		spec := newapi.TokenSpec{Name: deriveTokenName(memberID, 1), UnlimitedQuota: true, ExpiredTime: -1, Group: grp}
+		if tier != nil {
+			spec.ModelLimits = tier.ModelSet // B2:网关数据面限模型(真拦截)
+		}
+		tokenID, berr := s.upstream.CreateToken(ctx, cred, spec)
+		if berr != nil {
+			// 建 token 失败:残留 token(若有)靠确定性名在重开时 adopt 自愈,无需禁用;标失败 + 释放邮箱。
+			if merr := s.store.MarkBootstrapFailedAndRelease(ctx, orgID, memberID); merr != nil {
+				s.log.Error("标记 bootstrap 失败/释放邮箱失败", "member_id", memberID, "err", merr)
+			}
+			s.audit(ctx, c, orgID, "open_member", "member", &memberID, map[string]any{"name": in.Name, "result": "create_token_failed"})
+			return nil, mapUpstream(berr)
+		}
+		key, kerr := s.upstream.RevealTokenKey(ctx, cred, tokenID)
+		if kerr != nil {
+			// token 已建、取 key 失败:不回滚(确定性名重开可补取);标失败留重试。
+			if merr := s.store.MarkBootstrapFailedAndRelease(ctx, orgID, memberID); merr != nil {
+				s.log.Error("标记 bootstrap 失败失败", "member_id", memberID, "err", merr)
+			}
+			return nil, mapUpstream(kerr)
+		}
+		tid := int64(tokenID)
+		keyMasked, apiKey, finalTokenName = maskKey(key), key, deriveTokenName(memberID, 1)
+		final.NewapiTokenID = &tid
 		final.KeyMasked = &keyMasked
-		final.KeyRotation = 1 // bootstrap 建的是 v1(adapter defaultBootstrapTokenSpec)
-		finalTokenName = deriveTokenName(memberID, 1)
+		final.KeyRotation = 1
 	}
 	if err := s.store.FinalizeBootstrap(ctx, final, finalTokenName); err != nil {
 		return nil, apperr.Internal("").WithCause(err)
 	}
 
-	// 设 new-api 用户分组 = org_{id}(A2:折扣按用户分组归属,GroupGroupRatio 按此查)。best-effort。
-	if err := s.upstream.SetUserGroup(ctx, res.NewapiUserID, s.orgUserGroup(ctx, orgID)); err != nil {
-		s.log.Warn("设成员 new-api 用户分组失败(可后续补)", "member_id", memberID, "err", err)
-	}
-	// T17-2:把业务令牌分组加进该 org 用户可用分组(§3 硬约束,不补则令牌用业务分组时 403)。best-effort。
-	if err := s.upstream.AddOrgUsableGroup(ctx, s.orgUserGroup(ctx, orgID), grp); err != nil {
-		s.log.Warn("加成员可用分组失败(令牌用业务分组会 403,需补)", "member_id", memberID, "group", grp, "err", err)
-	}
-	// T17-3/Q1:该 org 若已配 total 折扣,新落到的分组自动补折扣(否则新分组回原价、客户被多收)。best-effort。
-	s.ensureTotalDiscountCoversGroup(ctx, orgID, grp)
-	// 令牌设计价分组 = grp(T17-1)+ model_limits = 层级模型集(B2:网关数据面限模型,真拦截)。best-effort。
-	// grp=default 且无模型集时是无意义写,跳过。
-	if res.TokenID != 0 && (grp != "default" || (tier != nil && len(tier.ModelSet) > 0)) {
-		cred := newapi.MemberCred{NewapiUserID: res.NewapiUserID, AccessToken: res.AccessToken}
-		spec := newapi.TokenSpec{Name: deriveTokenName(memberID, 1), UnlimitedQuota: true, ExpiredTime: -1, Group: grp}
-		if tier != nil {
-			spec.ModelLimits = tier.ModelSet
-		}
-		if err := s.upstream.UpdateToken(ctx, cred, res.TokenID, spec); err != nil {
-			s.log.Warn("设令牌分组/model_limits 失败(可后续补)", "member_id", memberID, "err", err)
-		}
-	}
-
-	// 下发初始 quota = 解析基线(tier 链 + 显式覆盖,B1)。失败不回滚开通(key 是主交付物),仅告警。
-	final.TierID = prov.TierID
-	final.TeamID = in.TeamID
-	final.NewapiUserID = int64(res.NewapiUserID)
-	initialQuota, oerr := s.applyMemberOverride(ctx, final)
-	if oerr != nil {
-		s.log.Warn("开通成员后下发初始 quota 失败(可后续重算补下发)", "member_id", memberID, "err", oerr)
-	}
-
 	s.audit(ctx, c, orgID, "open_member", "member", &memberID, map[string]any{
-		"name": in.Name, "newapi_user_id": res.NewapiUserID, "adopted_existing": res.AdoptedExisting, "init_quota": initialQuota,
+		"name": in.Name, "org_newapi_user_id": cred.NewapiUserID,
 	})
 
 	out := &OpenMemberResult{
 		MemberID:        memberID,
-		NewapiUserID:    int64(res.NewapiUserID),
-		APIKey:          res.PlaintextKey,
+		APIKey:          apiKey,
 		KeyMasked:       keyMasked,
 		InitialPassword: platPw, // 仅此一次回显;成员首登改密
 		LoginEmail:      email,
@@ -359,14 +301,13 @@ func (s *Service) SetKeyIPWhitelist(ctx context.Context, c session.Claims, orgID
 	if err != nil {
 		return apperr.Internal("").WithCause(err)
 	}
-	if m.BootstrapState != model.BootstrapDone || len(m.AccessTokenEnc) == 0 || m.NewapiTokenID == nil {
+	if m.BootstrapState != model.BootstrapDone || m.NewapiTokenID == nil {
 		return apperr.New(apperr.CodeInvalidParam, 409, "该成员尚无可用 key")
 	}
-	accessToken, err := s.keyring.DecryptString(string(m.AccessTokenEnc))
+	cred, err := s.orgCred(ctx, orgID)
 	if err != nil {
-		return apperr.Internal("").WithCause(err)
+		return err
 	}
-	cred := newapi.MemberCred{NewapiUserID: int(m.NewapiUserID), AccessToken: accessToken}
 	// 重申令牌分组快照,防白名单更新把令牌分组丢回 default(T17-1/Q2)。
 	spec := newapi.TokenSpec{Name: deriveTokenName(memberID, m.KeyRotation), UnlimitedQuota: true, ExpiredTime: -1, AllowIPs: allowIPs, Group: memberTokenGroup(m)}
 	if err := s.upstream.UpdateToken(ctx, cred, int(*m.NewapiTokenID), spec); err != nil {
@@ -396,15 +337,13 @@ func (s *Service) RotateKey(ctx context.Context, c session.Claims, orgID, member
 	if err != nil {
 		return "", "", apperr.Internal("").WithCause(err)
 	}
-	if m.BootstrapState != model.BootstrapDone || len(m.AccessTokenEnc) == 0 || m.NewapiTokenID == nil {
+	if m.BootstrapState != model.BootstrapDone || m.NewapiTokenID == nil {
 		return "", "", apperr.New(apperr.CodeInvalidParam, 409, "该成员尚无可用 key,无法轮换")
 	}
-
-	accessToken, err := s.keyring.DecryptString(string(m.AccessTokenEnc))
+	cred, err := s.orgCred(ctx, orgID)
 	if err != nil {
-		return "", "", apperr.Internal("").WithCause(err)
+		return "", "", err
 	}
-	cred := newapi.MemberCred{NewapiUserID: int(m.NewapiUserID), AccessToken: accessToken}
 	nextRotation := m.KeyRotation + 1
 	// 轮换重申令牌分组快照,防新 token 丢回 default(T17-1/Q2 必测)。
 	spec := newapi.TokenSpec{Name: deriveTokenName(memberID, nextRotation), UnlimitedQuota: true, ExpiredTime: -1, Group: memberTokenGroup(m)}
@@ -431,6 +370,70 @@ func (s *Service) MemberUsableGroups(ctx context.Context, c session.Claims) ([]s
 	return groups, nil
 }
 
+// EnsureOrgProvisioned 模型2:确保组织有一个 new-api user(池子锚),返回其凭证(给 org 下建员工 token 用)。
+// 已开通→直接返回;未开通→建 org user(确定性 username,adopt-existing 幂等)+取 access_token,加密存
+// organization 的 user_id/access_token/password。BootstrapMember 的 (orgID,0) 锁串行化并发开通。
+func (s *Service) EnsureOrgProvisioned(ctx context.Context, orgID int64, orgName string) (newapi.MemberCred, error) {
+	uid, encAccess, ok, err := s.store.GetOrgNewapiCred(ctx, orgID)
+	if errors.Is(err, repo.ErrNotFound) {
+		return newapi.MemberCred{}, apperr.NotFound("组织不存在")
+	}
+	if err != nil {
+		return newapi.MemberCred{}, apperr.Internal("").WithCause(err)
+	}
+	if ok {
+		at, derr := s.keyring.DecryptString(string(encAccess))
+		if derr != nil {
+			return newapi.MemberCred{}, apperr.Internal("").WithCause(derr)
+		}
+		return newapi.MemberCred{NewapiUserID: int(uid), AccessToken: at}, nil
+	}
+	// 未开通:建 org user(SkipToken=true:只建 user + 取 access_token,不建令牌)。
+	pw, err := genNewapiPassword()
+	if err != nil {
+		return newapi.MemberCred{}, apperr.Internal("").WithCause(err)
+	}
+	res, berr := s.upstream.BootstrapMember(ctx, newapi.BootstrapInput{
+		OrgID: orgID, MemberID: 0, Username: deriveOrgUsername(orgID), Password: pw, DisplayName: orgName, SkipToken: true,
+	})
+	if berr != nil {
+		return newapi.MemberCred{}, mapUpstream(berr)
+	}
+	encAccessNew, err := s.keyring.EncryptString(res.AccessToken)
+	if err != nil {
+		return newapi.MemberCred{}, apperr.Internal("").WithCause(err)
+	}
+	encPw, err := s.keyring.EncryptString(pw)
+	if err != nil {
+		return newapi.MemberCred{}, apperr.Internal("").WithCause(err)
+	}
+	if err := s.store.SetOrgNewapiUser(ctx, orgID, int64(res.NewapiUserID), []byte(encAccessNew), []byte(encPw)); err != nil {
+		return newapi.MemberCred{}, apperr.Internal("").WithCause(err)
+	}
+	// 设 org user 分组 = org_{id}(折扣按用户分组归属,A2)。best-effort。
+	if err := s.upstream.SetUserGroup(ctx, res.NewapiUserID, s.orgUserGroup(ctx, orgID)); err != nil {
+		s.log.Warn("设 org user 分组失败(可后续补)", "org_id", orgID, "err", err)
+	}
+	return newapi.MemberCred{NewapiUserID: res.NewapiUserID, AccessToken: res.AccessToken}, nil
+}
+
+// orgCred 取组织的 new-api 凭证(模型2:员工 token 一律在 org user 下建/管,用 org 的 user_id + access_token)。
+// 组织尚未开通池子 user → 409;access_token 解密自 organization.newapi_access_token_enc。
+func (s *Service) orgCred(ctx context.Context, orgID int64) (newapi.MemberCred, error) {
+	uid, encAccess, ok, err := s.store.GetOrgNewapiCred(ctx, orgID)
+	if err != nil {
+		return newapi.MemberCred{}, apperr.Internal("").WithCause(err)
+	}
+	if !ok {
+		return newapi.MemberCred{}, apperr.New(apperr.CodeInvalidParam, 409, "组织尚未开通 new-api 池子,无法操作令牌")
+	}
+	accessToken, err := s.keyring.DecryptString(string(encAccess))
+	if err != nil {
+		return newapi.MemberCred{}, apperr.Internal("").WithCause(err)
+	}
+	return newapi.MemberCred{NewapiUserID: int(uid), AccessToken: accessToken}, nil
+}
+
 // CreateMemberToken 员工自助建/重建 API key,选一个本企业可用的模型分组(改动③·方案A 单 key)。
 // 方案A:平台只跟踪最近一枚——首次(无令牌)CreateToken;重建(已有令牌)RotateToken 替换上一枚(旧 key 失效)。
 // RBAC:仅本人(MVP)。校验所选分组 ∈ 本企业可用模型分组(隔离边界:不能选别家分组)。返回明文 key(仅回显一次)+ 脱敏。
@@ -451,8 +454,9 @@ func (s *Service) CreateMemberToken(ctx context.Context, c session.Claims, membe
 	if err != nil {
 		return "", "", apperr.Internal("").WithCause(err)
 	}
-	if m.NewapiUserID == 0 || len(m.AccessTokenEnc) == 0 {
-		return "", "", apperr.New(apperr.CodeInvalidParam, 409, "成员尚未就绪,无法建 key")
+	cred, derr := s.orgCred(ctx, c.OrgID)
+	if derr != nil {
+		return "", "", derr
 	}
 
 	// 隔离边界:所选分组必须在本企业可用模型分组内(default 天然可用)。
@@ -473,11 +477,6 @@ func (s *Service) CreateMemberToken(ctx context.Context, c session.Claims, membe
 		}
 	}
 
-	accessToken, derr := s.keyring.DecryptString(string(m.AccessTokenEnc))
-	if derr != nil {
-		return "", "", apperr.Internal("").WithCause(derr)
-	}
-	cred := newapi.MemberCred{NewapiUserID: int(m.NewapiUserID), AccessToken: accessToken}
 	nextRotation := m.KeyRotation + 1
 	spec := newapi.TokenSpec{Name: deriveTokenName(memberID, nextRotation), UnlimitedQuota: true, ExpiredTime: -1, Group: group}
 

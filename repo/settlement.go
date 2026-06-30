@@ -143,40 +143,41 @@ func (s *Store) DeductBalanceTx(ctx context.Context, x dbtx, orgID, amount int64
 }
 
 // AggregateUsageLedger 从已结算台账聚合用量(看板主数据源,B4:分页安全、不压 new-api)。
-// since 起的 time_bucket;userFilter!=nil 只算该 new-api user。返回 按模型 / 按用户 的消耗 + 总量。
-func (s *Store) AggregateUsageLedger(ctx context.Context, orgID int64, since time.Time, userFilter *int64) (byModel map[string]int64, byUser map[int64]int64, total int64, err error) {
+// since 起的 time_bucket;memberFilter!=nil 只算该成员。模型2:按 member_id 聚合(成员共享 org user,
+// 绝不能按 newapi_user_id);ledger.member_id 由结算正确归因写入。返回 按模型 / 按成员(member_id) / 总量。
+func (s *Store) AggregateUsageLedger(ctx context.Context, orgID int64, since time.Time, memberFilter *int64) (byModel map[string]int64, byMember map[int64]int64, total int64, err error) {
 	byModel = map[string]int64{}
-	byUser = map[int64]int64{}
+	byMember = map[int64]int64{}
 	cond := "org_id = ? AND time_bucket >= ?"
 	args := []any{orgID, since}
-	if userFilter != nil {
-		cond += " AND newapi_user_id = ?"
-		args = append(args, *userFilter)
+	if memberFilter != nil {
+		cond += " AND member_id = ?"
+		args = append(args, *memberFilter)
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT model_name, newapi_user_id, SUM(consumed_quota) FROM usage_ledger WHERE `+cond+` GROUP BY model_name, newapi_user_id`, args...)
+		`SELECT model_name, member_id, SUM(consumed_quota) FROM usage_ledger WHERE `+cond+` GROUP BY model_name, member_id`, args...)
 	if err != nil {
 		return nil, nil, 0, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var model string
-		var uid, q int64
-		if err := rows.Scan(&model, &uid, &q); err != nil {
+		var mid, q int64
+		if err := rows.Scan(&model, &mid, &q); err != nil {
 			return nil, nil, 0, err
 		}
 		byModel[model] += q
-		byUser[uid] += q
+		byMember[mid] += q
 		total += q
 	}
-	return byModel, byUser, total, rows.Err()
+	return byModel, byMember, total, rows.Err()
 }
 
 // AggregateUsageLedgerByTeam 团队下钻聚合(口径A:JOIN member.team_id 现算,不在 ledger 固化 team 列)。
-// teamID==0 → 未分组(member.team_id IS NULL)。返回该团队当前成员的 byModel/byUser/total。只读 join,不碰落账写链路。
-func (s *Store) AggregateUsageLedgerByTeam(ctx context.Context, orgID int64, since time.Time, teamID int64) (byModel map[string]int64, byUser map[int64]int64, total int64, err error) {
+// teamID==0 → 未分组(member.team_id IS NULL)。返回该团队当前成员的 byModel/byMember/total。模型2:JOIN/聚合按 member_id。
+func (s *Store) AggregateUsageLedgerByTeam(ctx context.Context, orgID int64, since time.Time, teamID int64) (byModel map[string]int64, byMember map[int64]int64, total int64, err error) {
 	byModel = map[string]int64{}
-	byUser = map[int64]int64{}
+	byMember = map[int64]int64{}
 	args := []any{orgID, since}
 	teamCond := "m.team_id = ?"
 	if teamID == 0 {
@@ -185,34 +186,35 @@ func (s *Store) AggregateUsageLedgerByTeam(ctx context.Context, orgID int64, sin
 		args = append(args, teamID)
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT ul.model_name, ul.newapi_user_id, SUM(ul.consumed_quota)
-		 FROM usage_ledger ul JOIN member m ON m.newapi_user_id = ul.newapi_user_id AND m.org_id = ul.org_id
+		`SELECT ul.model_name, ul.member_id, SUM(ul.consumed_quota)
+		 FROM usage_ledger ul JOIN member m ON m.id = ul.member_id AND m.org_id = ul.org_id
 		 WHERE ul.org_id = ? AND ul.time_bucket >= ? AND `+teamCond+`
-		 GROUP BY ul.model_name, ul.newapi_user_id`, args...)
+		 GROUP BY ul.model_name, ul.member_id`, args...)
 	if err != nil {
 		return nil, nil, 0, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var model string
-		var uid, q int64
-		if err := rows.Scan(&model, &uid, &q); err != nil {
+		var mid, q int64
+		if err := rows.Scan(&model, &mid, &q); err != nil {
 			return nil, nil, 0, err
 		}
 		byModel[model] += q
-		byUser[uid] += q
+		byMember[mid] += q
 		total += q
 	}
-	return byModel, byUser, total, rows.Err()
+	return byModel, byMember, total, rows.Err()
 }
 
 // SumMemberModelToday 累计某成员某模型在 since 之后的已结算消耗(单模型软限额 E4 用)。
-func (s *Store) SumMemberModelToday(ctx context.Context, orgID, newapiUserID int64, model string, since time.Time) (int64, error) {
+// 模型2:按 member_id 过滤(成员共享 org user,绝不能按 newapi_user_id=会算成整组织)。
+func (s *Store) SumMemberModelToday(ctx context.Context, orgID, memberID int64, model string, since time.Time) (int64, error) {
 	var q sql.NullInt64
 	err := s.db.QueryRowContext(ctx,
 		`SELECT SUM(consumed_quota) FROM usage_ledger
-		 WHERE org_id = ? AND newapi_user_id = ? AND model_name = ? AND time_bucket >= ?`,
-		orgID, newapiUserID, model, since).Scan(&q)
+		 WHERE org_id = ? AND member_id = ? AND model_name = ? AND time_bucket >= ?`,
+		orgID, memberID, model, since).Scan(&q)
 	if err != nil {
 		return 0, err
 	}

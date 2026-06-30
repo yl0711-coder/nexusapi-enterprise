@@ -160,7 +160,17 @@ func (s *Service) applyMemberOverride(ctx context.Context, m *model.Member) (int
 	if err != nil {
 		return 0, err
 	}
-	if err := s.upstream.ManageUserQuota(ctx, int(m.NewapiUserID), newapi.QuotaOverride, final); err != nil {
+	// 模型2:员工额度落到其 token.remain_quota(不再写 user.quota=那是组织池子,由 escrow/续充 管)。
+	// 这是 R4 额度执行;v1 观测下调用方(reset/converge/grant)全 observe-gated 不会到这,开 flag(R4)才真下发。
+	if m.NewapiTokenID == nil {
+		return final, nil // 员工尚无令牌(观测自助前),无可执行额度
+	}
+	cred, cerr := s.orgCred(ctx, m.OrgID)
+	if cerr != nil {
+		return 0, cerr
+	}
+	spec := newapi.TokenSpec{Name: deriveTokenName(m.ID, m.KeyRotation), RemainQuota: final, UnlimitedQuota: false, ExpiredTime: -1, Group: memberTokenGroup(m)}
+	if err := s.upstream.UpdateToken(ctx, cred, int(*m.NewapiTokenID), spec); err != nil {
 		return 0, mapUpstream(err)
 	}
 	return final, nil
@@ -344,8 +354,20 @@ func (s *Service) SetMemberStatus(ctx context.Context, c session.Claims, orgID, 
 	if err != nil {
 		return err
 	}
-	if err := s.upstream.SetUserStatus(ctx, int(m.NewapiUserID), enabled); err != nil {
-		return mapUpstream(err)
+	// 模型2:成员=org user 下的 token,停用作用在其令牌上(member 无自己的 newapi user)。
+	// 停用=删该成员当前令牌(key 立即失效)+清指针;恢复=仅置 active,员工自助重建 key(确定性名)。
+	// 注:恢复后 key 会变;token 级"禁用不删"待 adapter 增能力(交付说明已标,待总监定产品语义)。
+	if !enabled && m.NewapiTokenID != nil {
+		cred, cerr := s.orgCred(ctx, orgID)
+		if cerr != nil {
+			return cerr
+		}
+		if derr := s.upstream.DeleteToken(ctx, cred, int(*m.NewapiTokenID)); derr != nil {
+			return mapUpstream(derr)
+		}
+		if cerr := s.store.ClearMemberToken(ctx, orgID, memberID); cerr != nil {
+			return apperr.Internal("").WithCause(cerr)
+		}
 	}
 	status := model.MemberStatusDisabled
 	if enabled {
@@ -379,8 +401,8 @@ func (s *Service) loadManageableMember(ctx context.Context, c session.Claims, or
 			return nil, err
 		}
 	}
-	if m.BootstrapState != model.BootstrapDone || m.NewapiUserID == 0 {
-		return nil, apperr.New(apperr.CodeInvalidParam, 409, "该成员尚未就绪(无可用 new-api 用户)")
+	if m.BootstrapState != model.BootstrapDone {
+		return nil, apperr.New(apperr.CodeInvalidParam, 409, "该成员尚未就绪")
 	}
 	return m, nil
 }

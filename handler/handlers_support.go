@@ -189,6 +189,38 @@ func (h *Handler) handleMemberUsageDetail(w http.ResponseWriter, r *http.Request
 	writeOK(w, r, http.StatusOK, pg)
 }
 
+// GET /organizations/{id}/escrow-balance — 模型2 读穿余额(窗口=桶1读穿 newapi + 托管之和,O/A)。
+func (h *Handler) handleEscrowBalance(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	orgID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	bal, err := h.svc.GetDerivedBalance(r.Context(), c, orgID)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, bal)
+}
+
+// POST /organizations/{id}/escrow/refill — 手工续充:把一个托管桶并入桶1 可花窗口(运营方,v1 无自动 worker)。
+func (h *Handler) handleEscrowRefill(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	orgID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	bal, err := h.svc.RefillWindow(r.Context(), c, orgID)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, bal)
+}
+
 // GET /organizations/{id}/budget-ref — 额度参考条(#4·B:已用$/预付$,藏价有意例外,O/A)。
 func (h *Handler) handleBudgetRef(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())

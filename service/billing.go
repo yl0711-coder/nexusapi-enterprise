@@ -60,6 +60,12 @@ func (s *Service) Recharge(ctx context.Context, c session.Claims, orgID int64, i
 		return nil, apperr.Internal("").WithCause(err)
 	}
 
+	// 模型2:把本次入账分配进托管多桶并 add 进 org user.quota(桶1 填窗口、余下托管)。已记账成功才到这;
+	// allocate 失败=窗口欠拨(不超拨,reconcile 可发现),返错让运营重试(记账幂等键 transfer_no 已占,重试不重复记)。
+	if aerr := s.allocateRecharge(ctx, orgID, in.AmountQuota); aerr != nil {
+		s.log.Error("入账分配进 escrow/newapi 失败(已记账,窗口欠拨待重试/对账)", "org_id", orgID, "err", aerr)
+		return nil, aerr
+	}
 	if err := s.recomputeOrgStatus(ctx, orgID, bal); err != nil {
 		s.log.Error("入账后重算组织状态失败", "org_id", orgID, "err", err)
 	}

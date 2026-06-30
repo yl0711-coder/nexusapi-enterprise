@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS outbox (
   KEY idx_outbox_status (status, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 4. organization 加池子锚 + 组织 access_token 凭证(应用层加密存)。模型2:组织=一个 new-api user(持 user.quota=池子)。
+-- 4. organization 加池子锚 + 组织 user 凭证(应用层加密存)。模型2:组织=一个 new-api user(持 user.quota=池子)。
+--    access_token 供日常以 org 身份建员工 token;password 供 access_token 失效时重登录自愈(类比 member.member_password_enc)。
 ALTER TABLE organization ADD COLUMN newapi_user_id BIGINT NULL AFTER slug;
-ALTER TABLE organization ADD COLUMN newapi_access_token_enc VARBINARY(512) NULL AFTER newapi_user_id;
+ALTER TABLE organization ADD COLUMN newapi_access_token_enc VARBINARY(1024) NULL AFTER newapi_user_id;
+ALTER TABLE organization ADD COLUMN newapi_password_enc VARBINARY(1024) NULL AFTER newapi_access_token_enc;

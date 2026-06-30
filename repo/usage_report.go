@@ -30,13 +30,13 @@ func timeBucketPeriodExpr(granularity string) string {
 // AggregateUsageByTime 按时间粒度(day/week/month,UTC+8 自然边界)聚合 usage_ledger 消耗,出时间序列(折线图)。
 // userFilter!=nil 只算该 new-api user;keyFilter!=nil 只算该平台 key_id。结果按 period 升序(时间正序)。
 // 只读 ledger,分页安全、不压 new-api;90 天看板用 since=now-90d。
-func (s *Store) AggregateUsageByTime(ctx context.Context, orgID int64, since time.Time, granularity string, userFilter, keyFilter *int64) ([]UsageTimePoint, error) {
+func (s *Store) AggregateUsageByTime(ctx context.Context, orgID int64, since time.Time, granularity string, memberFilter, keyFilter *int64) ([]UsageTimePoint, error) {
 	periodExpr := timeBucketPeriodExpr(granularity)
 	cond := "org_id = ? AND time_bucket >= ?"
 	args := []any{orgID, since}
-	if userFilter != nil {
-		cond += " AND newapi_user_id = ?"
-		args = append(args, *userFilter)
+	if memberFilter != nil {
+		cond += " AND member_id = ?" // 模型2:按 member_id(成员共享 org user)
+		args = append(args, *memberFilter)
 	}
 	if keyFilter != nil {
 		cond += " AND key_id = ?"

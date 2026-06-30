@@ -57,12 +57,6 @@ func TestIntegration_ObserveQuotaWorkerGate(t *testing.T) {
 		t.Fatalf("建策略失败: %v", err)
 	}
 
-	// 一个 bootstrap_failed 孤儿成员(有 newapi_user_id):非 observe 下 ReconcileOrphans 会对其 SetUserStatus。
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO member (id, org_id, login_email, bootstrap_state, newapi_user_id) VALUES (1, ?, 'orphan@test.local', 'failed', 990001)`, orgID); err != nil {
-		t.Fatalf("建孤儿成员失败: %v", err)
-	}
-
 	// B:ResetDuePolicies observe 下必须返回 0 且不标记重置。
 	n, err := svc.ResetDuePolicies(ctx)
 	if err != nil || n != 0 {
@@ -76,11 +70,6 @@ func TestIntegration_ObserveQuotaWorkerGate(t *testing.T) {
 		t.Fatalf("observe 闸失效:策略被 MarkPolicyReset(last_reset_at=%v)——闸已回归,周期重置会写 new-api 绝对额度可停服", lastReset.Time)
 	}
 
-	// C:ReconcileOrphans observe 下必须返回 0(不触达 new-api 禁用)。
-	on, oerr := svc.ReconcileOrphans(ctx)
-	if oerr != nil || on != 0 {
-		t.Fatalf("observe 下 ReconcileOrphans 应 (0,nil),实 (%d,%v)", on, oerr)
-	}
-
-	t.Logf("observe 漏闸回归 ok: ResetDuePolicies/ReconcileOrphans 在观测下均短路返 0、不写 new-api(策略未被标记重置)")
+	// 注:模型2 已移除 ReconcileOrphans(member≠user 无孤儿用户),原 C 项删除。
+	t.Logf("observe 漏闸回归 ok: ResetDuePolicies 在观测下短路返 0、不写 new-api(策略未被标记重置)")
 }

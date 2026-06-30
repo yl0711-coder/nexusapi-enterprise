@@ -65,7 +65,7 @@ func TestIntegration_UsageDetail(t *testing.T) {
 	}
 	masked := "sk-dddd...v001"
 	t1 := tok1
-	m1 := &model.Member{ID: memberID, OrgID: orgID, NewapiUserID: userID, NewapiTokenID: &t1, KeyMasked: &masked, KeyRotation: 1}
+	m1 := &model.Member{ID: memberID, OrgID: orgID, NewapiTokenID: &t1, KeyMasked: &masked, KeyRotation: 1} // 模型2:归因走 token
 	if err := store.FinalizeBootstrap(ctx, m1, "nexus_m1_v1"); err != nil {
 		t.Fatalf("FinalizeBootstrap 失败: %v", err)
 	}

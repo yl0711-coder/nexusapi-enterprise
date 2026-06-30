@@ -46,8 +46,8 @@ func (s *Service) ResetDuePolicies(ctx context.Context) (int, error) {
 			continue
 		}
 		for _, m := range members {
-			if m.BootstrapState != model.BootstrapDone || m.NewapiUserID == 0 {
-				continue
+			if m.BootstrapState != model.BootstrapDone || m.NewapiTokenID == nil {
+				continue // 模型2:无令牌的成员无可执行额度(额度落 token.remain_quota)
 			}
 			if _, err := s.applyMemberOverride(ctx, m); err != nil {
 				s.log.Error("周期重置下发 override 失败", "member_id", m.ID, "err", err)

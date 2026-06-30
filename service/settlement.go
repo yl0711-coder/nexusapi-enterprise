@@ -34,6 +34,13 @@ type bucketAgg struct {
 	maxTS                         int64
 }
 
+// tokenAttr 模型2 结算归因缓存项:按 new-api token_id 查到的平台成员 + 稳定 key_id(found=false 即非平台 token)。
+type tokenAttr struct {
+	found  bool
+	member *model.Member
+	keyID  int64
+}
+
 // RunSettlement 是计费结算的单次扫描(leader 单写者,03 §3.1 / GZ-01 原子化版):
 // 选一个不超限的时间子窗口(路径B,永不截断少收)→ 读 new-api 消费 logs 按 (org,user,model,小时桶) 聚合 →
 // 在一个事务里原子提交:usage_ledger 落账 + 扣对应组织 company_balance(乐观锁,FOR UPDATE)+ 推进水位;
@@ -76,10 +83,9 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 	aggs := map[string]*bucketAgg{}
 	var details []repo.DetailRow // v2 M2-2:逐条明细(下钻读本库),与 ledger 同事务落,observe 下也写
 	maxLogID := cur.LastSettledLogID
-	flagCache := map[int64]bool{} // orgID -> billing_enabled
-	memberCache := map[int64]*model.Member{}
-	keyIDCache := map[int64]int64{}   // newapi token_id -> 平台 key_id(0=未归因;v2 M0-S2)
-	orphanAlerted := map[int64]bool{} // newapiUserID -> 已告警(GZ-03 返工·治洞3,每个孤儿每轮只告警一次)
+	flagCache := map[int64]bool{}      // orgID -> billing_enabled
+	attrCache := map[int64]tokenAttr{} // 模型2:token_id -> 归因(member+key_id);成员共享 org user,只能按 token 归因
+	orphanAlerted := map[int64]bool{}  // token_id -> 已告警(每个孤儿令牌每轮只告警一次)
 	for page := 1; page <= settlementMaxPages; page++ {
 		entries, total, rerr := s.upstream.ReadConsumptionLogs(ctx, since, untilSub, page, 100)
 		if rerr != nil {
@@ -95,33 +101,30 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 			if e.Quota <= 0 {
 				continue
 			}
-			m := memberCache[int64(e.UserID)]
-			if m == nil {
-				mm, merr := s.store.GetMemberByNewapiUserID(ctx, int64(e.UserID))
-				if errors.Is(merr, repo.ErrNotFound) {
-					memberCache[int64(e.UserID)] = &model.Member{} // 标记非平台成员,跳过
-					continue
+			// 模型2 归因:按 token_id 反查平台成员 + 稳定 key_id(成员共享 org user,绝不能按 user_id 归因)。
+			// 缓存避免逐条查库;非平台成员的 token / 无 token 的日志 → 跳过(无法归因)。
+			att, cached := attrCache[e.TokenID]
+			if !cached {
+				mm, kid, found, aerr := s.store.GetMemberByNewapiTokenID(ctx, e.TokenID)
+				if aerr != nil {
+					return 0, apperr.Internal("").WithCause(aerr) // DB 错,非上游故障(P1-3:勿误走 mapUpstream)
 				}
-				if merr != nil {
-					return 0, apperr.Internal("").WithCause(merr) // DB 错,非上游故障(P1-3:勿误走 mapUpstream)
-				}
-				memberCache[int64(e.UserID)] = mm
-				m = mm
+				att = tokenAttr{found: found, member: mm, keyID: kid}
+				attrCache[e.TokenID] = att
 			}
-			if m.ID == 0 {
-				continue // 非平台成员
+			if !att.found {
+				continue // 非平台成员的 token(或无 token 日志),无法归因
 			}
-			// GZ-03 返工·治洞3:反查到的是"开通失败收口"的成员(bootstrap_state=failed,墓碑行已回写 user_id)
-			// 却仍在产生消费 = 孤儿消费。不再静默跳过:告警(日志+审计+指标 TODO)使漏扣"可发现",
-			// 并继续走下面正常计费聚合 = 把这部分真实消费扣回组织(money 不漏)。
-			if m.BootstrapState == model.BootstrapFailed && !orphanAlerted[int64(e.UserID)] {
-				orphanAlerted[int64(e.UserID)] = true
-				s.log.Error("孤儿消费告警:开通失败收口的成员仍在产生消费(应已禁用,需核 new-api)",
-					"member_id", m.ID, "org_id", m.OrgID, "newapi_user_id", e.UserID, "model", e.ModelName)
+			m := att.member
+			keyID := att.keyID
+			// GZ-03:开通失败的成员令牌仍在消费 = 孤儿消费。告警使漏扣"可发现",仍正常聚合(money 不漏)。
+			if m.BootstrapState == model.BootstrapFailed && !orphanAlerted[e.TokenID] {
+				orphanAlerted[e.TokenID] = true
+				s.log.Error("孤儿消费告警:开通失败的成员令牌仍在产生消费(需核 new-api)",
+					"member_id", m.ID, "org_id", m.OrgID, "token_id", e.TokenID, "model", e.ModelName)
 				s.auditSystem(ctx, m.OrgID, "orphan_consumption", "member", &m.ID, map[string]any{
-					"newapi_user_id": e.UserID, "model": e.ModelName,
+					"token_id": e.TokenID, "model": e.ModelName,
 				}, "alert")
-				// TODO(可观测工单): settlement_orphan_consumption 指标 +1。
 			}
 			billing, ok := flagCache[m.OrgID]
 			if !ok {
@@ -135,24 +138,7 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 			if !billing && !s.observeMode {
 				continue // 该组织未开计费,读到但不扣
 			}
-			// 改动⑤(MVP 观测,2026-06-24 拍板):observe 下不在此跳过未开计费组织 →
-			// 全组织一律落账供「用量看板」;余额扣减在下面事务里整体跳过(落账不扣钱)。
-			// v2 M0-S2:按日志 token_id 映射平台稳定 key_id(0=未归因);缓存避免逐条查库。
-			keyID := int64(0)
-			if e.TokenID > 0 {
-				if kid, ok := keyIDCache[e.TokenID]; ok {
-					keyID = kid
-				} else {
-					k, found, kerr := s.store.GetKeyIDByNewapiTokenID(ctx, e.TokenID)
-					if kerr != nil {
-						return 0, apperr.Internal("").WithCause(kerr) // DB 错,非上游故障
-					}
-					if found {
-						keyID = k
-					}
-					keyIDCache[e.TokenID] = keyID
-				}
-			}
+			// 改动⑤(MVP 观测):observe 下不在此跳过未开计费组织 → 全组织一律落账供看板;扣余额在事务里整体跳过。
 			bkt := hourBucket(e.CreatedAt)
 			key := fmt.Sprintf("%d|%d|%d|%s|%d", m.OrgID, e.UserID, keyID, e.ModelName, bkt.Unix())
 			a := aggs[key]
@@ -302,7 +288,7 @@ func (s *Service) checkModelSoftLimit(ctx context.Context, a *bucketAgg) {
 	}
 	now := s.now()
 	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-	sumToday, err := s.store.SumMemberModelToday(ctx, a.orgID, a.newapiUserID, a.model, dayStart)
+	sumToday, err := s.store.SumMemberModelToday(ctx, a.orgID, a.memberID, a.model, dayStart)
 	if err != nil {
 		return
 	}
@@ -347,17 +333,18 @@ func (s *Service) ReconcileBilling(ctx context.Context) error {
 			if e.Quota <= 0 {
 				continue
 			}
-			m := memberCache[int64(e.UserID)]
+			// 模型2:按 token_id 归因(成员共享 org user)。缓存按 token_id。
+			m := memberCache[e.TokenID]
 			if m == nil {
-				mm, merr := s.store.GetMemberByNewapiUserID(ctx, int64(e.UserID))
-				if errors.Is(merr, repo.ErrNotFound) {
-					memberCache[int64(e.UserID)] = &model.Member{}
-					continue
-				}
+				mm, _, found, merr := s.store.GetMemberByNewapiTokenID(ctx, e.TokenID)
 				if merr != nil {
 					return apperr.Internal("").WithCause(merr) // DB 错,非上游故障(P1-3:勿误走 mapUpstream)
 				}
-				memberCache[int64(e.UserID)] = mm
+				if !found {
+					memberCache[e.TokenID] = &model.Member{} // 非平台 token,标记跳过
+					continue
+				}
+				memberCache[e.TokenID] = mm
 				m = mm
 			}
 			if m.ID == 0 {

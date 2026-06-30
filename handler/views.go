@@ -71,7 +71,6 @@ type memberView struct {
 	ID             int64   `json:"id"`
 	OrgID          int64   `json:"org_id"`
 	TeamID         *int64  `json:"team_id"`
-	NewapiUserID   int64   `json:"newapi_user_id"`
 	LoginEmail     string  `json:"login_email"`
 	DisplayName    *string `json:"display_name"`
 	Role           string  `json:"role"`
@@ -85,7 +84,7 @@ type memberView struct {
 
 func toMemberView(m *model.Member) memberView {
 	return memberView{
-		ID: m.ID, OrgID: m.OrgID, TeamID: m.TeamID, NewapiUserID: m.NewapiUserID,
+		ID: m.ID, OrgID: m.OrgID, TeamID: m.TeamID,
 		LoginEmail: m.LoginEmail, DisplayName: m.DisplayName, Role: m.Role, TierID: m.TierID, NewapiGroup: m.NewapiGroup,
 		Status: m.Status, KeyMasked: m.KeyMasked, BootstrapState: m.BootstrapState,
 		CreatedAt: m.CreatedAt.Format(time.RFC3339),

@@ -48,12 +48,12 @@ func (s *Store) GetOrganizationBySlug(ctx context.Context, slug string) (*model.
 	return scanOrg(row)
 }
 
-// SetOrgNewapiUser 模型2(0020):记录组织的 new-api user 池子锚 + 加密 access_token 凭证(开通组织时写)。
-// access_token 由 service 层加密后传入(密钥不进库)。
-func (s *Store) SetOrgNewapiUser(ctx context.Context, orgID, newapiUserID int64, accessTokenEnc []byte) error {
+// SetOrgNewapiUser 模型2(0020):记录组织的 new-api user 池子锚 + 加密 access_token + 加密密码(开通组织时写)。
+// access_token/password 由 service 层加密后传入(密钥不进库);password 供 access_token 失效时重登录自愈。
+func (s *Store) SetOrgNewapiUser(ctx context.Context, orgID, newapiUserID int64, accessTokenEnc, passwordEnc []byte) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE organization SET newapi_user_id = ?, newapi_access_token_enc = ? WHERE id = ? AND deleted_at IS NULL`,
-		newapiUserID, accessTokenEnc, orgID)
+		`UPDATE organization SET newapi_user_id = ?, newapi_access_token_enc = ?, newapi_password_enc = ? WHERE id = ? AND deleted_at IS NULL`,
+		newapiUserID, accessTokenEnc, passwordEnc, orgID)
 	return err
 }
 

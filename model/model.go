@@ -47,6 +47,7 @@ type Organization struct {
 	ArchivedAt        *time.Time // 归档时间(NULL=未归档,T12)
 	NewapiUserID      *int64     // 模型2(0020):组织=一个 new-api user,此为池子锚(user.quota=预付池子);nil=尚未开通
 	AccessTokenEnc    []byte     // 模型2(0020):该组织 new-api user 的 access_token,应用层加密存(建员工 token 用);列 newapi_access_token_enc
+	PasswordEnc       []byte     // 模型2(0020):该组织 new-api user 的密码,加密存(access_token 失效时重登录自愈);列 newapi_password_enc
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 }
@@ -144,11 +145,12 @@ type Tier struct {
 
 // Member 对应 member 表(09 §4 + 平台补列)。
 // 密文/哈希字段不出 repo 边界给前端;service 负责加解密与脱敏。
+// 模型2:member 不持 NewapiUserID(那是 organization 的池子锚)、不持 AccessTokenEnc/MemberPasswordEnc
+// (员工 token 在 org user 下建,凭证归 org)。归因走 member_key(token_id→key_id→member)。
 type Member struct {
 	ID                   int64
 	OrgID                int64
-	TeamID               *int64
-	NewapiUserID         int64
+	TeamID               *int64 // 兼容层(R2 切 org_unit)
 	LoginEmail           string
 	DisplayName          *string
 	Role                 string
@@ -157,10 +159,8 @@ type Member struct {
 	Status               string
 	ExpireAt             *time.Time
 	PlatformPasswordHash *string
-	AccessTokenEnc       []byte
-	MemberPasswordEnc    []byte
 	BootstrappedAt       *time.Time
-	NewapiTokenID        *int64
+	NewapiTokenID        *int64 // 该成员当前令牌(挂 org user 下)的 token id;全历史在 member_key_token
 	KeyMasked            *string
 	KeyRotation          int
 	BootstrapState       string

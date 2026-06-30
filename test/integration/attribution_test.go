@@ -71,7 +71,7 @@ func TestIntegration_KeyIDAttribution(t *testing.T) {
 	}
 	masked1, masked2 := "sk-aaaa...v001", "sk-bbbb...v002"
 	t1 := tok1
-	m1 := &model.Member{ID: memberID, OrgID: orgID, NewapiUserID: userID, NewapiTokenID: &t1, KeyMasked: &masked1, KeyRotation: 1}
+	m1 := &model.Member{ID: memberID, OrgID: orgID, NewapiTokenID: &t1, KeyMasked: &masked1, KeyRotation: 1} // 模型2:归因走 token,member 不持 user_id
 	if err := store.FinalizeBootstrap(ctx, m1, "nexus_m1_v1"); err != nil {
 		t.Fatalf("FinalizeBootstrap(建主 key)失败: %v", err)
 	}

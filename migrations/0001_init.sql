@@ -89,35 +89,33 @@ CREATE TABLE IF NOT EXISTS tier (
   KEY idx_tier_org (org_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 4. member(成员)—— 09 §4 + 平台登录密码哈希补列
+-- 4. member(成员)—— 模型2(组织=newapi user、员工=该 user 下的 token)。
+-- 模型2 改:member **不再持** newapi_user_id/access_token_enc/member_password_enc(那是 organization 的,见 0020);
+-- 员工 token 在 org user 下建,member 仅留"当前令牌指针"(newapi_token_id/key_masked/key_rotation,member_key 表存全历史)。
+-- team_id 暂留(兼容层,team→org_unit 切换在 R2);login_email 暂沿用 per-org 唯一(email 全局唯一化另起一刀)。
 CREATE TABLE IF NOT EXISTS member (
   id                     BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   org_id                 BIGINT UNSIGNED NOT NULL,
-  team_id                BIGINT UNSIGNED NULL,
-  newapi_user_id         BIGINT          NULL,                       -- new-api user_id 1:1。provisioning 中间态尚无→NULL(09 标 NOT NULL,因 US-01 中间态放宽为 NULL,唯一键允许多 NULL,需回填 09)
+  team_id                BIGINT UNSIGNED NULL,                       -- 兼容层(R2 切 org_unit)
   login_email            VARCHAR(191)    NOT NULL,                   -- 平台登录标识
   display_name           VARCHAR(128)    NULL,
   role                   VARCHAR(24)     NOT NULL DEFAULT 'member',  -- operator/org_admin/team_leader/member
   tier_id                BIGINT UNSIGNED NULL,
   status                 VARCHAR(16)     NOT NULL DEFAULT 'active',  -- active/disabled/expired/pending/provisioning
   expire_at              DATETIME(3)     NULL,
-  -- 平台登录凭证(本期补:bcrypt 单向哈希,非密文。回填 09)
+  -- 平台登录凭证(bcrypt 单向哈希,非密文)
   platform_password_hash VARCHAR(100)    NULL,
-  -- new-api 代发 key 凭证(密文,算法/主密钥见 10 §3)
-  access_token_enc       VARBINARY(1024) NULL,
-  member_password_enc    VARBINARY(1024) NULL,
   bootstrapped_at        DATETIME(3)     NULL,
-  -- 代发 key 产物(脱敏展示用;明文不落库,见 10 §3.1)
-  newapi_token_id        BIGINT          NULL,                       -- 该成员当前令牌的 new-api token id
+  -- 代发 key 产物(脱敏展示用;明文不落库,见 10 §3.1)。token 在 org user 下,这里是该成员当前令牌指针。
+  newapi_token_id        BIGINT          NULL,                       -- 该成员当前令牌的 new-api token id(挂在 org user 下)
   key_masked             VARCHAR(64)     NULL,                       -- 脱敏 key(列表/详情回显)
   key_rotation           INT             NOT NULL DEFAULT 0,         -- 令牌轮换计数(派生确定性 token name)
-  bootstrap_state        VARCHAR(16)     NOT NULL DEFAULT 'pending', -- pending/done/failed(10 §2.5)
+  bootstrap_state        VARCHAR(16)     NOT NULL DEFAULT 'pending', -- pending/done/failed
   created_at             DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at             DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   deleted_at             DATETIME(3)     NULL,
   PRIMARY KEY (id),
   UNIQUE KEY uk_member_org_email (org_id, login_email),
-  UNIQUE KEY uk_member_newapi_user (newapi_user_id),
   KEY idx_member_org_team (org_id, team_id),
   KEY idx_member_org_status (org_id, status),
   KEY idx_member_org_role (org_id, role)

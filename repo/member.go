@@ -45,11 +45,9 @@ func (s *Store) FinalizeBootstrap(ctx context.Context, m *model.Member, tokenNam
 	return s.WithTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE member
-			    SET newapi_user_id = ?, access_token_enc = ?, member_password_enc = ?,
-			        newapi_token_id = ?, key_masked = ?, key_rotation = ?,
+			    SET newapi_token_id = ?, key_masked = ?, key_rotation = ?,
 			        bootstrap_state = ?, status = ?, bootstrapped_at = CURRENT_TIMESTAMP(3)
 			  WHERE id = ? AND org_id = ?`,
-			m.NewapiUserID, m.AccessTokenEnc, m.MemberPasswordEnc,
 			m.NewapiTokenID, m.KeyMasked, m.KeyRotation,
 			model.BootstrapDone, model.MemberStatusActive,
 			m.ID, m.OrgID); err != nil {
@@ -78,20 +76,9 @@ func (s *Store) MarkBootstrapFailed(ctx context.Context, orgID, memberID int64) 
 
 // MarkBootstrapFailedAndRelease 标 bootstrap 失败,并把 login_email 墓碑改写(前缀 failed-{id}-,LEFT 截到列宽 191)
 // 以释放 uk_member_org_email 占用、允许同邮箱重开(GZ-03 缺陷3)。
-// newapiUserID>0(④⑤ 收口了 active 孤儿)时:**回写 newapi_user_id**(GZ-03 返工·治洞3)——让结算/对账能按
-// user_id 反查认领该孤儿的消费、不再因 NULL 命不中而静默漏扣;status 记 disabled(孤儿已在 new-api 禁用)。
-// 回写不撞 uk_member_newapi_user:该 user_id 唯一,重开走新 memberID→新派生用户名→新 new-api 用户,不复用此 id。
-// newapiUserID=0(②③ 无孤儿)时:不回写,status 维持 provisioning。墓碑保留原邮箱便于审计。
-func (s *Store) MarkBootstrapFailedAndRelease(ctx context.Context, orgID, memberID, newapiUserID int64) error {
-	if newapiUserID > 0 {
-		_, err := s.db.ExecContext(ctx,
-			`UPDATE member
-			    SET bootstrap_state = ?, status = ?, newapi_user_id = ?,
-			        login_email = LEFT(CONCAT('failed-', id, '-', login_email), 191)
-			  WHERE id = ? AND org_id = ?`,
-			model.BootstrapFailed, model.MemberStatusDisabled, newapiUserID, memberID, orgID)
-		return err
-	}
+// 模型2:member 不映射 new-api 用户,开通失败=员工 token 未建成——**无孤儿用户**(org user 共享、不动;残留 token 靠
+// 确定性名 adopt 在重开时自愈),故去掉 model1 的 newapi_user_id 回写与 orphan-用户机制。status 维持 provisioning。
+func (s *Store) MarkBootstrapFailedAndRelease(ctx context.Context, orgID, memberID int64) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE member
 		    SET bootstrap_state = ?, status = ?,
@@ -99,17 +86,6 @@ func (s *Store) MarkBootstrapFailedAndRelease(ctx context.Context, orgID, member
 		  WHERE id = ? AND org_id = ?`,
 		model.BootstrapFailed, model.MemberStatusProvisioning, memberID, orgID)
 	return err
-}
-
-// ListFailedOrphanMembers 列出"开通失败收口、且回写了 newapi_user_id"的成员(GZ-03 返工·治洞1 兜底)。
-// 后台 orphan 扫描据此对仍可能 active 的孤儿幂等再禁用(SetUserStatus false),消除"禁用又失败仍留活跃孤儿"。
-func (s *Store) ListFailedOrphanMembers(ctx context.Context, limit int) ([]*model.Member, error) {
-	rows, err := s.db.QueryContext(ctx,
-		memberSelect+` WHERE bootstrap_state = 'failed' AND newapi_user_id IS NOT NULL AND deleted_at IS NULL LIMIT ?`, limit)
-	if err != nil {
-		return nil, err
-	}
-	return scanMembersRows(rows)
 }
 
 // UpdateMemberKey 轮换/自助建后回填新令牌 id / 脱敏 key / 轮换计数(US-07)。
@@ -134,6 +110,13 @@ func (s *Store) ActivatePlatformAccount(ctx context.Context, orgID, memberID int
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE member SET status = ?, bootstrap_state = ? WHERE id = ? AND org_id = ?`,
 		model.MemberStatusActive, model.BootstrapDone, memberID, orgID)
+	return err
+}
+
+// ClearMemberToken 模型2:清成员当前令牌指针(停用删 token 后调,防悬挂指针;员工恢复后自助重建新 key)。
+func (s *Store) ClearMemberToken(ctx context.Context, orgID, memberID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE member SET newapi_token_id = NULL, key_masked = NULL WHERE id = ? AND org_id = ?`, memberID, orgID)
 	return err
 }
 
@@ -234,6 +217,29 @@ func (s *Store) GetMember(ctx context.Context, orgID, id int64) (*model.Member, 
 	return scanMember(row)
 }
 
+// GetMemberByNewapiTokenID 模型2 结算归因:按 new-api token id 反查平台成员 + 稳定 key_id。
+// 成员共享 org user,归因只能走 token→member_key_token→member(绝不能按 user_id)。无 org 谓词(leader 跨租户);
+// 命不中(非平台 token/无对应行/成员已删)返 found=false。轮换后旧 token_id 仍命中(member_key_token append-only)。
+func (s *Store) GetMemberByNewapiTokenID(ctx context.Context, newapiTokenID int64) (*model.Member, int64, bool, error) {
+	var orgID, memberID, keyID int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT org_id, member_id, key_id FROM member_key_token WHERE newapi_token_id = ?`, newapiTokenID).Scan(&orgID, &memberID, &keyID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, 0, false, nil
+	}
+	if err != nil {
+		return nil, 0, false, err
+	}
+	m, merr := s.GetMember(ctx, orgID, memberID)
+	if errors.Is(merr, ErrNotFound) {
+		return nil, 0, false, nil
+	}
+	if merr != nil {
+		return nil, 0, false, merr
+	}
+	return m, keyID, true, nil
+}
+
 // GetMemberByEmail 按平台登录邮箱取成员(登录用)。
 // MVP login_email 在 (org_id, login_email) 上唯一;跨 org 可能重名,这里取首条(运营方/管理员邮箱实际唯一)。
 // 多 org 同邮箱属边角,待登录引入组织选择后细化。
@@ -286,24 +292,21 @@ func (s *Store) ListMembers(ctx context.Context, orgID int64, f MemberFilter) ([
 	return out, total, rows.Err()
 }
 
-const memberSelect = `SELECT id, org_id, team_id, newapi_user_id, login_email, display_name, role, tier_id, newapi_group,
-	status, expire_at, platform_password_hash, access_token_enc, member_password_enc, bootstrapped_at,
+// memberSelect 模型2:不含 newapi_user_id/access_token_enc/member_password_enc(已从 member 移除,归 organization)。
+const memberSelect = `SELECT id, org_id, team_id, login_email, display_name, role, tier_id, newapi_group,
+	status, expire_at, platform_password_hash, bootstrapped_at,
 	newapi_token_id, key_masked, key_rotation, bootstrap_state, created_at, updated_at FROM member`
 
 func scanMember(r rowScanner) (*model.Member, error) {
 	var m model.Member
-	var newapiUserID sql.NullInt64
-	err := r.Scan(&m.ID, &m.OrgID, &m.TeamID, &newapiUserID, &m.LoginEmail, &m.DisplayName, &m.Role, &m.TierID, &m.NewapiGroup,
-		&m.Status, &m.ExpireAt, &m.PlatformPasswordHash, &m.AccessTokenEnc, &m.MemberPasswordEnc, &m.BootstrappedAt,
+	err := r.Scan(&m.ID, &m.OrgID, &m.TeamID, &m.LoginEmail, &m.DisplayName, &m.Role, &m.TierID, &m.NewapiGroup,
+		&m.Status, &m.ExpireAt, &m.PlatformPasswordHash, &m.BootstrappedAt,
 		&m.NewapiTokenID, &m.KeyMasked, &m.KeyRotation, &m.BootstrapState, &m.CreatedAt, &m.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
-	}
-	if newapiUserID.Valid {
-		m.NewapiUserID = newapiUserID.Int64
 	}
 	return &m, nil
 }

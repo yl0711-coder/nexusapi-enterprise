@@ -64,10 +64,5 @@ func (w *QuotaWorker) tick(ctx context.Context) {
 	} else if rn > 0 {
 		w.log.Info("quota-worker 周期重置", "members", rn)
 	}
-	// 后台 orphan 扫描兜底(GZ-03 返工·治洞1):对收口禁用失败仍可能 active 的孤儿幂等再禁用。
-	if on, oerr := w.svc.ReconcileOrphans(c); oerr != nil {
-		w.log.Error("quota-worker orphan 扫描失败", "err", oerr)
-	} else if on > 0 {
-		w.log.Info("quota-worker orphan 再禁用", "count", on)
-	}
+	// 模型2:已移除 orphan 用户扫描(member 不映射 newapi user,无孤儿用户;残留 token 靠确定性名重开自愈)。
 }

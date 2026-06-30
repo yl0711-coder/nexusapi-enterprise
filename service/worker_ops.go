@@ -63,17 +63,24 @@ func (s *Service) reverseGrant(ctx context.Context, g *model.Grant) error {
 	}
 	switch g.GrantType {
 	case model.GrantQuotaAdd, model.GrantQuotaSub:
-		if m.NewapiUserID == 0 {
-			return nil
+		if m.NewapiTokenID == nil {
+			return nil // 模型2:无令牌无可执行额度
 		}
-		_, err := s.applyMemberOverride(ctx, m) // grant 已 expired,合成时自动不含它
+		_, err := s.applyMemberOverride(ctx, m) // grant 已 expired,合成时自动不含它(落 token.remain_quota)
 		return err
 	case model.GrantAccountTTL:
-		if m.NewapiUserID == 0 {
-			return nil
-		}
-		if err := s.upstream.SetUserStatus(ctx, int(m.NewapiUserID), false); err != nil {
-			return mapUpstream(err)
+		// 模型2:账号到期 = 停该成员令牌(member 无自己的 newapi user)。无令牌则只置 expired。
+		if m.NewapiTokenID != nil {
+			cred, cerr := s.orgCred(ctx, g.OrgID)
+			if cerr != nil {
+				return cerr
+			}
+			if derr := s.upstream.DeleteToken(ctx, cred, int(*m.NewapiTokenID)); derr != nil {
+				return mapUpstream(derr)
+			}
+			if cerr := s.store.ClearMemberToken(ctx, g.OrgID, g.MemberID); cerr != nil {
+				return cerr
+			}
 		}
 		return s.store.UpdateMemberStatus(ctx, g.OrgID, g.MemberID, model.MemberStatusExpired)
 	case model.GrantModelAdd:
@@ -101,30 +108,6 @@ func (s *Service) auditSystem(ctx context.Context, orgID int64, action, targetTy
 	}
 }
 
-// ReconcileOrphans 后台 orphan 扫描兜底(GZ-03 返工·治洞1):对"开通失败收口、已回写 newapi_user_id"的成员,
-// 幂等再禁用其 new-api 用户——消除"收口时 SetUserStatus 重试仍失败、留下活跃孤儿"。SetUserStatus(false) 幂等,
-// 已禁用的再调无副作用。LIMIT 控批量;返回本次再禁用条数。quota-worker 每 tick 调一次。
-func (s *Service) ReconcileOrphans(ctx context.Context) (int, error) {
-	if s.observeMode {
-		return 0, nil // MVP(观测)下不碰 new-api 写(禁用孤儿是计费期保护;观测期无钱可漏,与 ReverseExpiredGrants:19 同口径)
-	}
-	members, err := s.store.ListFailedOrphanMembers(ctx, 100)
-	if err != nil {
-		return 0, err
-	}
-	n := 0
-	for _, m := range members {
-		if m.NewapiUserID == 0 {
-			continue
-		}
-		if derr := s.upstream.SetUserStatus(ctx, int(m.NewapiUserID), false); derr != nil {
-			s.log.Error("后台 orphan 扫描:再禁用孤儿用户失败(下轮重试)", "member_id", m.ID, "newapi_user_id", m.NewapiUserID, "err", derr)
-			continue
-		}
-		n++
-	}
-	if n > 0 {
-		s.log.Info("后台 orphan 扫描:幂等再禁用孤儿用户", "count", n)
-	}
-	return n, nil
-}
+// 模型2:删除 ReconcileOrphans —— 它是 model1(员工=newapi user)的孤儿"用户"扫描兜底。
+// 模型2 member 不映射 newapi user,开通失败只是员工 token 未建成(无孤儿用户;残留 token 靠确定性名
+// 在重开时 adopt 自愈),故该机制 obsolete,整体移除(连同 worker 调用),不留死代码。

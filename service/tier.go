@@ -150,7 +150,7 @@ func (s *Service) UpdateTier(ctx context.Context, c session.Claims, orgID, tierI
 	// 改层级后:对引用该层级、已就绪的成员重算 override 下发(当期上限按新档,best-effort)。
 	if members, lerr := s.store.ListMembersByTier(ctx, orgID, tierID); lerr == nil {
 		for _, m := range members {
-			if m.BootstrapState == model.BootstrapDone && m.NewapiUserID != 0 {
+			if m.BootstrapState == model.BootstrapDone && m.NewapiTokenID != nil {
 				if _, aerr := s.applyMemberOverride(ctx, m); aerr != nil {
 					s.log.Error("改层级后成员 override 重算失败(待对账/重试)", "member_id", m.ID, "tier_id", tierID, "err", aerr)
 				}

@@ -3,6 +3,7 @@ package newapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -117,6 +118,22 @@ func (a *Adapter) ManageUserQuota(ctx context.Context, userID int, mode QuotaMod
 		return err
 	}
 	return nil
+}
+
+// GetUserQuota 读 new-api 用户当前剩余额度(quota 列;模型2 读穿余额=桶1 实际剩余,GetUserQuota user.go:782 源码核实)。
+// GET /api/user/{id}(管理员);res.data 即用户对象。
+func (a *Adapter) GetUserQuota(ctx context.Context, userID int) (int64, error) {
+	res, err := a.c.do(ctx, stepGetUser, "GET", fmt.Sprintf("/api/user/%d", userID), adminAuth(a.c.cfg), nil)
+	if err != nil {
+		return 0, err
+	}
+	var env struct {
+		Quota int64 `json:"quota"`
+	}
+	if e := json.Unmarshal(res.data, &env); e != nil {
+		return 0, &UpstreamError{Step: stepGetUser, PlatformCode: CodeInternal, Message: "解析用户额度失败", class: classNonRetryable, cause: e}
+	}
+	return env.Quota, nil
 }
 
 // SetUserStatus 启停成员(enable/disable)。停用即断、恢复即通,无需重 bootstrap(05 §5.3)。

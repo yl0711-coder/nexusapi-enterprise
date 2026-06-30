@@ -48,6 +48,34 @@ func (s *Store) GetOrganizationBySlug(ctx context.Context, slug string) (*model.
 	return scanOrg(row)
 }
 
+// SetOrgNewapiUser 模型2(0020):记录组织的 new-api user 池子锚 + 加密 access_token 凭证(开通组织时写)。
+// access_token 由 service 层加密后传入(密钥不进库)。
+func (s *Store) SetOrgNewapiUser(ctx context.Context, orgID, newapiUserID int64, accessTokenEnc []byte) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE organization SET newapi_user_id = ?, newapi_access_token_enc = ? WHERE id = ? AND deleted_at IS NULL`,
+		newapiUserID, accessTokenEnc, orgID)
+	return err
+}
+
+// GetOrgNewapiCred 模型2(0020):读组织的 new-api user_id + 加密 access_token(建员工 token 用,R1)。
+// ok=false 表示该组织尚未开通 new-api user(newapi_user_id 为 NULL);组织不存在 → ErrNotFound。
+func (s *Store) GetOrgNewapiCred(ctx context.Context, orgID int64) (newapiUserID int64, accessTokenEnc []byte, ok bool, err error) {
+	var uid sql.NullInt64
+	var enc []byte
+	row := s.db.QueryRowContext(ctx,
+		`SELECT newapi_user_id, newapi_access_token_enc FROM organization WHERE id = ? AND deleted_at IS NULL`, orgID)
+	if e := row.Scan(&uid, &enc); e != nil {
+		if errors.Is(e, sql.ErrNoRows) {
+			return 0, nil, false, ErrNotFound
+		}
+		return 0, nil, false, e
+	}
+	if !uid.Valid {
+		return 0, nil, false, nil // 尚未开通 org user
+	}
+	return uid.Int64, enc, true, nil
+}
+
 // ListOrganizations 列出组织(运营方视角,分页)。includeArchived=false 时默认隐藏已归档(T12)。
 func (s *Store) ListOrganizations(ctx context.Context, limit, offset int, includeArchived bool) ([]*model.Organization, int, error) {
 	cond := "deleted_at IS NULL"

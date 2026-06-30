@@ -12,6 +12,9 @@ import (
 // 跨过边界且本期未重置的策略 → 对其 scope 内成员重算 override 下发(把当期上限设回基线)。
 // 返回本次重置的成员数。时区精化(reset_anchor 的 HH:MM / 按组织时区)为后续项,本期按 UTC 期初。
 func (s *Service) ResetDuePolicies(ctx context.Context) (int, error) {
+	if s.observeMode {
+		return 0, nil // MVP(观测)下 quota-worker 绝不碰 new-api 写/停服(与 ReverseExpiredGrants:19 同口径,放行前必做)
+	}
 	policies, err := s.store.ListActivePoliciesForReset(ctx)
 	if err != nil {
 		return 0, err

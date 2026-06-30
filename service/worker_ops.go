@@ -105,6 +105,9 @@ func (s *Service) auditSystem(ctx context.Context, orgID int64, action, targetTy
 // 幂等再禁用其 new-api 用户——消除"收口时 SetUserStatus 重试仍失败、留下活跃孤儿"。SetUserStatus(false) 幂等,
 // 已禁用的再调无副作用。LIMIT 控批量;返回本次再禁用条数。quota-worker 每 tick 调一次。
 func (s *Service) ReconcileOrphans(ctx context.Context) (int, error) {
+	if s.observeMode {
+		return 0, nil // MVP(观测)下不碰 new-api 写(禁用孤儿是计费期保护;观测期无钱可漏,与 ReverseExpiredGrants:19 同口径)
+	}
 	members, err := s.store.ListFailedOrphanMembers(ctx, 100)
 	if err != nil {
 		return 0, err

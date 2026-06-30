@@ -49,17 +49,20 @@ CREATE TABLE IF NOT EXISTS member_key_token (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- 3. 回填:现有"已开通且有令牌"的成员各建 1 主 slot。
+--    幂等(D 修复 2026-06-30):NOT EXISTS 防中断重跑重复建主槽(MySQL 不支持 ALTER/INSERT IF NOT EXISTS,故用子查询)。
 INSERT INTO member_key_slot (org_id, member_id, is_primary, status)
-SELECT org_id, id, 1, 'active'
-  FROM member
- WHERE newapi_token_id IS NOT NULL AND deleted_at IS NULL;
+SELECT m.org_id, m.id, 1, 'active'
+  FROM member m
+ WHERE m.newapi_token_id IS NOT NULL AND m.deleted_at IS NULL
+   AND NOT EXISTS (SELECT 1 FROM member_key_slot s WHERE s.member_id = m.id AND s.is_primary = 1);
 
 -- 4. 回填:为上面每个 slot 建 1 条 current token,token_name 按现 (member.id, key_rotation) 重建
 --    (与 deriveTokenName 的 nexus_m%d_v%d 完全一致),newapi_token_id 取现有 member.newapi_token_id。
-INSERT INTO member_key_token
+--    幂等:INSERT IGNORE 靠 uk_key_token_newapi(newapi_token_id 唯一)兜重跑,不重复落令牌。
+INSERT IGNORE INTO member_key_token
   (key_id, org_id, member_id, newapi_token_id, token_name, is_current, key_masked, rotation, status)
 SELECT s.id, m.org_id, m.id, m.newapi_token_id,
        CONCAT('nexus_m', m.id, '_v', m.key_rotation), 1, m.key_masked, m.key_rotation, 'active'
   FROM member m
-  JOIN member_key_slot s ON s.member_id = m.id AND s.org_id = m.org_id
+  JOIN member_key_slot s ON s.member_id = m.id AND s.org_id = m.org_id AND s.is_primary = 1
  WHERE m.newapi_token_id IS NOT NULL AND m.deleted_at IS NULL;

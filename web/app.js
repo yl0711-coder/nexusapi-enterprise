@@ -71,9 +71,14 @@ async function api(method, path, body) {
   return j.data;
 }
 const money = q => "$" + (q / 500000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); // quota→美元(锚定 500000=$1),统一两位
-// GZ-05 修复A:补单引号与反引号转义。' → &#39; 放进单引号 JS 串内即变普通文本,无法闭合 onclick 参数;
-// ` → &#96; 顺手堵掉模板串反引号面。对「文本内容」与「双引号属性」渲染无副作用。
+// esc:HTML 文本/双引号属性转义(用于可见文本、title=、value= 等 HTML 上下文)。
+// 安全审计 2026-06-30 修正:esc 仅适用 HTML 上下文,绝不可用于内联事件处理器(onclick="…")里的 JS 字符串参数——
+// HTML 解析器会先把 &#39; 解码回 ',字符串被闭合可注入任意 JS(经典嵌套上下文坑;原"&#39; 能堵 onclick"判断为误)。
+// onclick 内的字符串参数一律用 jsstr。
 const esc = s => String(s == null ? "" : s).replace(/[&<>"'`]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "`": "&#96;" }[c]));
+// jsstr:编码成「HTML 属性 + JS 字符串」双重上下文都安全的形式——非字母数字下划线一律转 \xHH / \uHHHH。
+// 产物只含 反斜杠/x/u/十六进制,无 ' " < > & → HTML 解码后原样保留,JS 里是字面字符、不闭合字符串。用于 onclick 等内联处理器参数。
+const jsstr = s => String(s == null ? "" : s).replace(/[^a-zA-Z0-9_]/g, c => { const n = c.charCodeAt(0); return n < 256 ? "\\x" + n.toString(16).padStart(2, "0") : "\\u" + n.toString(16).padStart(4, "0"); });
 const roleCN = r => ({ operator: "运营方", org_admin: "组织管理员", team_leader: "团队负责人", member: "成员" }[r] || r);
 
 /* ---------- 登录 ---------- */
@@ -238,12 +243,12 @@ VIEWS.orgs = async () => {
   // 过滤掉平台运营方伪组织(slug=_operator),只列真实客户(R2-轻微)。
   const list = (d.list || []).filter(o => o.slug !== "_operator");
   const rows = list.map(o => `<tr data-q="${esc((o.name + " " + o.slug).toLowerCase())}">
-    <td><span class="lk" style="display:inline-block;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle" title="${esc(o.name)}" onclick="enterOrg(${o.id},'${esc(o.name)}')">${esc(o.name)}</span><div class="mini">${esc(o.slug)}</div></td>
+    <td><span class="lk" style="display:inline-block;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle" title="${esc(o.name)}" onclick="enterOrg(${o.id},'${jsstr(o.name)}')">${esc(o.name)}</span><div class="mini">${esc(o.slug)}</div></td>
     <td>${pill(o.status, o.status === "active" ? "ok" : o.status === "low" ? "warn" : "bad")}${o.archived ? ' <span class="tag">已归档</span>' : ''}</td>
     <td>${esc(o.timezone)}</td><td>${esc(o.billing_mode)}</td>
-    <td class="right"><span class="btn sm" onclick="enterOrg(${o.id},'${esc(o.name)}')">进入</span> ${o.archived
-      ? `<span class="btn sm" onclick="doArchiveOrg(${o.id},'${esc(o.name)}',false)">取消归档</span>`
-      : `<span class="btn sm" onclick="doArchiveOrg(${o.id},'${esc(o.name)}',true)">归档</span>`}</td></tr>`).join("");
+    <td class="right"><span class="btn sm" onclick="enterOrg(${o.id},'${jsstr(o.name)}')">进入</span> ${o.archived
+      ? `<span class="btn sm" onclick="doArchiveOrg(${o.id},'${jsstr(o.name)}',false)">取消归档</span>`
+      : `<span class="btn sm" onclick="doArchiveOrg(${o.id},'${jsstr(o.name)}',true)">归档</span>`}</td></tr>`).join("");
   return head("客户组织", "运营方:管理所有客户组织、入账、计费灰度、支持会话")
     + `<div class="toolbar"><div class="search"><input id="orgSearch" placeholder="搜索组织名或 slug…" oninput="filterRows('orgSearch','orgTbody')"></div>
        <label class="mini" style="margin:0 10px;cursor:pointer"><input type="checkbox" ${inclArch ? "checked" : ""} onchange="S.orgShowArchived=this.checked;renderView()"> 显示已归档</label>
@@ -413,7 +418,7 @@ VIEWS.dash = async () => {
   const maxm = Math.max(1, ...mem.map(b => b.consumed_quota));
   const mbars = mem.map(b => {
     const nm = b.label || ("用户#" + b.key);
-    const attrs = b.member_id ? `class="bar lk" onclick="openMemberUsage(${b.member_id},'${esc(nm)}')" title="查看该员工按模型明细"` : `class="bar"`;
+    const attrs = b.member_id ? `class="bar lk" onclick="openMemberUsage(${b.member_id},'${jsstr(nm)}')" title="查看该员工按模型明细"` : `class="bar"`;
     return `<div ${attrs} data-q="${esc(nm.toLowerCase())}"><span class="nm">${esc(nm)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / maxm * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`;
   }).join("") || `<div class="empty">${wl}暂无用量</div>`;
   // F3:按团队用量排行(含"未分组"桶);行可点 → 下钻该团队成员/模型明细。
@@ -421,7 +426,7 @@ VIEWS.dash = async () => {
   const maxt = Math.max(1, ...tms.map(b => b.consumed_quota));
   const tbars = tms.map(b => {
     const nm = b.label || ("团队#" + b.key);
-    return `<div class="bar lk" onclick="openTeamUsage(${b.key},'${esc(nm)}')" title="查看该团队成员/模型明细" data-q="${esc(nm.toLowerCase())}"><span class="nm">${esc(nm)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / maxt * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`;
+    return `<div class="bar lk" onclick="openTeamUsage(${b.key},'${jsstr(nm)}')" title="查看该团队成员/模型明细" data-q="${esc(nm.toLowerCase())}"><span class="nm">${esc(nm)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / maxt * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`;
   }).join("") || `<div class="empty">${wl}暂无用量(或未建团队)</div>`;
   const moneyCards = S.mvp ? "" : `
       ${kpi("当前余额", money(extra.balance_quota), "累计充值 " + money(extra.total_recharged_quota))}
@@ -514,7 +519,7 @@ async function doAddMember() {
     const tm = val("am_team"); if (tm) body.team_id = parseInt(tm); // F2-1:开通时选团队(留空=未分组)
     const d = await api("POST", "/organizations/" + S.orgId + "/members", body);
     const keyRow = d.api_key
-      ? `<tr><td class="k">API Key</td><td><b>${esc(d.api_key)}</b> <span class="lk" onclick="navigator.clipboard&&navigator.clipboard.writeText('${esc(d.api_key)}');toast('已复制')">复制</span></td></tr>`
+      ? `<tr><td class="k">API Key</td><td><b>${esc(d.api_key)}</b> <span class="lk" onclick="navigator.clipboard&&navigator.clipboard.writeText('${jsstr(d.api_key)}');toast('已复制')">复制</span></td></tr>`
       : `<tr><td class="k">API Key</td><td class="mini">本平台不代发 Key,员工登录后自助创建</td></tr>`;
     modal("已开通 · 交付登录凭证", `<div class="note">以下凭证仅此一次显示,请交付员工本人,首次登录后请改密:</div>
       <table class="kvtable">
@@ -567,9 +572,9 @@ VIEWS.teams = async () => {
   const rows = list.map(t => {
     const arch = t.status === "archived";
     const acts = isA ? `<td class="right">
-      <span class="btn sm" onclick="openTeamUsage(${t.id},'${esc(t.name)}')">用量</span>
-      <span class="btn sm" onclick="openRenameTeam(${t.id},'${esc(t.name)}')">改名</span>
-      ${arch ? `<span class="btn sm" onclick="doUnarchiveTeam(${t.id})">恢复</span>` : `<span class="btn sm" onclick="doArchiveTeam(${t.id},'${esc(t.name)}')">归档</span>`}
+      <span class="btn sm" onclick="openTeamUsage(${t.id},'${jsstr(t.name)}')">用量</span>
+      <span class="btn sm" onclick="openRenameTeam(${t.id},'${jsstr(t.name)}')">改名</span>
+      ${arch ? `<span class="btn sm" onclick="doUnarchiveTeam(${t.id})">恢复</span>` : `<span class="btn sm" onclick="doArchiveTeam(${t.id},'${jsstr(t.name)}')">归档</span>`}
     </td>` : "<td></td>";
     return `<tr><td>${esc(t.name)}${arch ? ' <span class="tag">已归档</span>' : ""}</td><td>${t.member_count} 人</td>${acts}</tr>`;
   }).join("");
@@ -606,7 +611,7 @@ VIEWS.tiers = async () => {
     <td>${t.newapi_group ? esc(t.newapi_group) : '<span class="mini">默认</span>'}</td>
     ${S.mvp ? "" : `<td>${t.monthly_limit_quota != null ? money(t.monthly_limit_quota) + " / 月" : '<span class="mini">不限</span>'}</td>`}
     <td>${(t.model_set || []).map(m => `<span class="mcap">${esc(m)}</span>`).join("") || '<span class="mini">沿用上级</span>'}</td>
-    <td class="right"><span class="btn sm" onclick="openEditTier(${t.id})">编辑</span> <span class="btn sm danger" onclick="doDeleteTier(${t.id},'${esc(t.name)}')">删除</span></td></tr>`).join("");
+    <td class="right"><span class="btn sm" onclick="openEditTier(${t.id})">编辑</span> <span class="btn sm danger" onclick="doDeleteTier(${t.id},'${jsstr(t.name)}')">删除</span></td></tr>`).join("");
   const tierColspan = S.mvp ? 4 : 5;
   return head("可用模型档位", S.mvp ? "可复用档位 = 一组可用模型 + 模型清单(决定成员能调用哪些模型)" : "可复用档位 = 计费分组 + 模型集 + 月额度 + 单模型日上限")
     + `<div class="toolbar"><button class="btn pri" onclick="openCreateTier()">+ ${S.mvp ? "新建档位" : "新建层级"}</button></div>
@@ -763,7 +768,7 @@ async function saveIP() {
 };
 async function rotateKey() {
   try { const d = await api("POST", "/members/" + S.me.id + "/key:rotate", null);
-    modal("新 API Key", `<div class="note">已轮换,旧 key 失效。新明文仅此一次:</div><div class="keybox"><span>${esc(d.api_key)}</span><span class="lk" onclick="navigator.clipboard&&navigator.clipboard.writeText('${esc(d.api_key)}');toast('已复制')">复制</span></div>`, `<button class="btn pri" onclick="closeM();renderView()">完成</button>`);
+    modal("新 API Key", `<div class="note">已轮换,旧 key 失效。新明文仅此一次:</div><div class="keybox"><span>${esc(d.api_key)}</span><span class="lk" onclick="navigator.clipboard&&navigator.clipboard.writeText('${jsstr(d.api_key)}');toast('已复制')">复制</span></div>`, `<button class="btn pri" onclick="closeM();renderView()">完成</button>`);
   } catch (e) { toast(e.message); }
 }
 // 改动③:员工自助建 key——先拉本企业可用模型分组,选一个生成 key(明文仅一次)。
@@ -781,7 +786,7 @@ async function doCreateKey() {
   try {
     const d = await api("POST", "/members/" + S.me.id + "/tokens", { group: val("nk_grp") });
     modal("新建成功 · 明文 Key(仅显示一次)", `<div class="note">请立即复制保存,关闭后只能看到脱敏串。</div>
-      <div class="keybox"><span>${esc(d.api_key)}</span><span class="lk" onclick="navigator.clipboard&&navigator.clipboard.writeText('${esc(d.api_key)}');toast('已复制')">复制</span></div>`,
+      <div class="keybox"><span>${esc(d.api_key)}</span><span class="lk" onclick="navigator.clipboard&&navigator.clipboard.writeText('${jsstr(d.api_key)}');toast('已复制')">复制</span></div>`,
       `<button class="btn pri" onclick="closeM();renderView()">完成</button>`);
   } catch (e) { toast(e.message); }
 }

@@ -35,6 +35,9 @@ func (s *Service) GetDerivedBalance(ctx context.Context, c session.Claims, orgID
 	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
 		return nil, err
 	}
+	if err := s.mvpHidePrice(c); err != nil { // R5 RBAC:与 GetBalance 一致,observe 下客户不可读余额(藏价一致性)
+		return nil, err
+	}
 	uid, _, ok, err := s.store.GetOrgNewapiCred(ctx, orgID)
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)
@@ -55,9 +58,11 @@ func (s *Service) GetDerivedBalance(ctx context.Context, c session.Claims, orgID
 }
 
 // allocateRecharge 模型2 入账分配(由 Recharge 在记账成功后调):把本次充值额分进托管多桶并把"桶1 可进部分"add 进
-// org user.quota。桶1 填到窗口上限(按 newapi 当前窗口读穿计算可进空间),余下入新 holding 桶。
-// 涉钱安全:**add 不 override**;合并后桶1 断言 ≤ escrowWindowCap(防 int32 溢出);**DB-first 再 add**——
-// 失败方向恒为"欠拨"(窗口少于已记账)、绝不超拨,reconcile(已释放−日志≈窗口)可发现,运维重试/人工 add 兜底。
+// org user.quota。桶1 填到窗口上限(按 newapi 当前窗口读穿计算可进空间),余下入新 holding 桶。add 不 override。
+// ⚠R5 审计已知缺口(开钱前必修,F1/F2/F4/F5):读 active/seq 在事务外+UPDATE 无 version → 并发丢失更新/seq 撞 uk/
+//   陈旧 window 判断被并发击穿越 cap(int32);AddRecharge 与本函数非原子(transfer_no 幂等反锁死失败重试);
+//   且尚无 escrow 对账 worker——"已释放+托管=总充值"无人核,漂移静默。**v1 观测期 recharge 路由 404 不可达=休眠,
+//   开 recharge 前必须修**(并发收进同一事务+FOR UPDATE/乐观锁、事务内重读 window 重算、补 escrow 对账)。
 func (s *Service) allocateRecharge(ctx context.Context, orgID, amount int64) error {
 	org, err := s.store.GetOrganization(ctx, orgID)
 	if err != nil {
@@ -123,8 +128,11 @@ func (s *Service) allocateRecharge(ctx context.Context, orgID, amount int64) err
 }
 
 // RefillWindow 手工续充(运营方,v1):把一个托管桶并入桶1 可花窗口(window<threshold 时调;v1 无自动 worker,ADR §9)。
-// 可并入额 = min(该桶额, 窗口剩余空间);全并→该桶 merged、部分→减额仍 holding。
-// 涉钱安全:**add 不 override**;**DB-first 再 add**(失败恒"欠拨"不超拨,重试不会重复并同一桶=幂等安全)。
+// 可并入额 = min(该桶额, 窗口剩余空间);全并→该桶 merged、部分→减额仍 holding。add 不 override。
+// ⚠R5 审计已知缺口(开钱前必修,F1/F6):读 window/active/holding 在事务外+无锁 → 并发双击重复释放=超拨(平台真亏);
+//   DB-first 在 newapi add 失败时是"漏钱"方向(holding 已减、窗口未加,派生余额净掉)、重试取下一个桶越赔——
+//   **此处 DB-first 非安全方向**(与 allocateRecharge 不同)。**v1 观测期 refill 路由 404 不可达=休眠,开钱前必须修**
+//   (改 newapi-first 或可重入恢复 + 桶状态 CAS 幂等 + 加锁)。
 func (s *Service) RefillWindow(ctx context.Context, c session.Claims, orgID int64) (*DerivedBalance, error) {
 	if err := assertOrgScope(c, orgID); err != nil {
 		return nil, err

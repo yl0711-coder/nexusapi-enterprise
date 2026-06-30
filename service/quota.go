@@ -160,8 +160,16 @@ func (s *Service) applyMemberOverride(ctx context.Context, m *model.Member) (int
 	if err != nil {
 		return 0, err
 	}
+	// 观测闸(R5 OBS-1 必修):observe 下绝不写员工 token 限额——写 spec{RemainQuota:final, UnlimitedQuota:false}
+	// 会把员工从"无限额"翻成"限额"=消费到顶即被网关切断=停人,违反观测铁律。上次 b35d2dc 只在 reset/orphan
+	// 调用方修了闸,而 applyMemberOverride 本身漏闸,且 UpdateTier/UpdateMember(HTTP 白名单放行的可达路径)
+	// 会触达这里。把闸下沉到此处=一处覆盖全部调用方(reset/converge/grant/tier/member/approval)。
+	// gateByOrgStatus 的 observe 分支只防"0-clamp",不够——"写有限额度"这个动作本身就是停人。
+	if s.observeMode {
+		return final, nil
+	}
 	// 模型2:员工额度落到其 token.remain_quota(不再写 user.quota=那是组织池子,由 escrow/续充 管)。
-	// 这是 R4 额度执行;v1 观测下调用方(reset/converge/grant)全 observe-gated 不会到这,开 flag(R4)才真下发。
+	// 这是 R4 额度执行;开 flag(R4)才真下发(observe 已在上面短路)。
 	if m.NewapiTokenID == nil {
 		return final, nil // 员工尚无令牌(观测自助前),无可执行额度
 	}

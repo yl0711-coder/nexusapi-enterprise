@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/nexusapi-platform/enterprise/adapter/newapi"
@@ -370,23 +371,47 @@ func (s *Service) MemberUsableGroups(ctx context.Context, c session.Claims) ([]s
 	return groups, nil
 }
 
-// EnsureOrgProvisioned 模型2:确保组织有一个 new-api user(池子锚),返回其凭证(给 org 下建员工 token 用)。
-// 已开通→直接返回;未开通→建 org user(确定性 username,adopt-existing 幂等)+取 access_token,加密存
-// organization 的 user_id/access_token/password。BootstrapMember 的 (orgID,0) 锁串行化并发开通。
-func (s *Service) EnsureOrgProvisioned(ctx context.Context, orgID int64, orgName string) (newapi.MemberCred, error) {
+// provisionLockKey 是组织首开(建 org user + 落库凭证)的 per-org 串行锁键(R5 OBS-3)。
+func provisionLockKey(orgID int64) string { return fmt.Sprintf("provision:org:%d", orgID) }
+
+// loadOrgCred 读组织已落库的池子凭证(解密 access_token)。ok=false=尚未开通;组织不存在→NotFound。
+func (s *Service) loadOrgCred(ctx context.Context, orgID int64) (newapi.MemberCred, bool, error) {
 	uid, encAccess, ok, err := s.store.GetOrgNewapiCred(ctx, orgID)
 	if errors.Is(err, repo.ErrNotFound) {
-		return newapi.MemberCred{}, apperr.NotFound("组织不存在")
+		return newapi.MemberCred{}, false, apperr.NotFound("组织不存在")
 	}
 	if err != nil {
-		return newapi.MemberCred{}, apperr.Internal("").WithCause(err)
+		return newapi.MemberCred{}, false, apperr.Internal("").WithCause(err)
 	}
-	if ok {
-		at, derr := s.keyring.DecryptString(string(encAccess))
-		if derr != nil {
-			return newapi.MemberCred{}, apperr.Internal("").WithCause(derr)
-		}
-		return newapi.MemberCred{NewapiUserID: int(uid), AccessToken: at}, nil
+	if !ok {
+		return newapi.MemberCred{}, false, nil
+	}
+	at, derr := s.keyring.DecryptString(string(encAccess))
+	if derr != nil {
+		return newapi.MemberCred{}, false, apperr.Internal("").WithCause(derr)
+	}
+	return newapi.MemberCred{NewapiUserID: int(uid), AccessToken: at}, true, nil
+}
+
+// EnsureOrgProvisioned 模型2:确保组织有一个 new-api user(池子锚),返回其凭证(给 org 下建员工 token 用)。
+// 已开通→直接返回;未开通→建 org user(确定性 username,adopt-existing 幂等)+取 access_token,加密存。
+// R5 OBS-3:持 per-org 开通锁 + 锁内 double-check 串行化首开——消除并发首开时"第二次 adopt 旋转作废前者
+// access_token、写序与锁解耦致落库失效 token"的竞态;SetOrgNewapiUser 再加 IS NULL 守卫(多节点兜底)。
+func (s *Service) EnsureOrgProvisioned(ctx context.Context, orgID int64, orgName string) (newapi.MemberCred, error) {
+	if cred, ok, err := s.loadOrgCred(ctx, orgID); err != nil {
+		return newapi.MemberCred{}, err
+	} else if ok {
+		return cred, nil // 快路径:已开通(无锁读)
+	}
+	release, lerr := s.quotaLocker.Acquire(ctx, provisionLockKey(orgID))
+	if lerr != nil {
+		return newapi.MemberCred{}, apperr.Internal("").WithCause(lerr)
+	}
+	defer release()
+	if cred, ok, err := s.loadOrgCred(ctx, orgID); err != nil {
+		return newapi.MemberCred{}, err
+	} else if ok {
+		return cred, nil // 等锁期间别的请求已开通
 	}
 	// 未开通:建 org user(SkipToken=true:只建 user + 取 access_token,不建令牌)。
 	pw, err := genNewapiPassword()
@@ -407,8 +432,17 @@ func (s *Service) EnsureOrgProvisioned(ctx context.Context, orgID int64, orgName
 	if err != nil {
 		return newapi.MemberCred{}, apperr.Internal("").WithCause(err)
 	}
-	if err := s.store.SetOrgNewapiUser(ctx, orgID, int64(res.NewapiUserID), []byte(encAccessNew), []byte(encPw)); err != nil {
-		return newapi.MemberCred{}, apperr.Internal("").WithCause(err)
+	wrote, serr := s.store.SetOrgNewapiUser(ctx, orgID, int64(res.NewapiUserID), []byte(encAccessNew), []byte(encPw))
+	if serr != nil {
+		return newapi.MemberCred{}, apperr.Internal("").WithCause(serr)
+	}
+	if !wrote {
+		// 多节点首开竞态(本进程锁管不到跨节点):别处已先落库凭证。本次新建的 newapi user 成无主孤儿(待清),改用已落库凭证。
+		s.log.Warn("org 池子凭证已被并发写入(多节点首开竞态),本次新建 user 成孤儿待清", "org_id", orgID, "orphan_user", res.NewapiUserID)
+		if cred, ok, lerr := s.loadOrgCred(ctx, orgID); lerr == nil && ok {
+			return cred, nil
+		}
+		return newapi.MemberCred{}, apperr.Internal("org 凭证落库竞态且回读失败")
 	}
 	// 设 org user 分组 = org_{id}(折扣按用户分组归属,A2)。best-effort。
 	if err := s.upstream.SetUserGroup(ctx, res.NewapiUserID, s.orgUserGroup(ctx, orgID)); err != nil {

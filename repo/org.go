@@ -50,11 +50,18 @@ func (s *Store) GetOrganizationBySlug(ctx context.Context, slug string) (*model.
 
 // SetOrgNewapiUser 模型2(0020):记录组织的 new-api user 池子锚 + 加密 access_token + 加密密码(开通组织时写)。
 // access_token/password 由 service 层加密后传入(密钥不进库);password 供 access_token 失效时重登录自愈。
-func (s *Store) SetOrgNewapiUser(ctx context.Context, orgID, newapiUserID int64, accessTokenEnc, passwordEnc []byte) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE organization SET newapi_user_id = ?, newapi_access_token_enc = ?, newapi_password_enc = ? WHERE id = ? AND deleted_at IS NULL`,
+// **WHERE newapi_user_id IS NULL 守卫**(R5 OBS-3):仅首写生效,返回 wrote=是否本次写入。并发/多节点首开
+// 同组织时后到者落空(wrote=false)→ 调用方改读已落库凭证,防把"已被旋转作废的 access_token"覆盖掉有效凭证。
+func (s *Store) SetOrgNewapiUser(ctx context.Context, orgID, newapiUserID int64, accessTokenEnc, passwordEnc []byte) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE organization SET newapi_user_id = ?, newapi_access_token_enc = ?, newapi_password_enc = ?
+		   WHERE id = ? AND deleted_at IS NULL AND newapi_user_id IS NULL`,
 		newapiUserID, accessTokenEnc, passwordEnc, orgID)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
 }
 
 // GetOrgNewapiCred 模型2(0020):读组织的 new-api user_id + 加密 access_token(建员工 token 用,R1)。

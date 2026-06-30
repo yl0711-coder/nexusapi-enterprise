@@ -148,6 +148,42 @@ func TestIntegration_EscrowRefundReconcile(t *testing.T) {
 	t.Logf("F3/F4 真账 ok: 退款真减 newapi 窗口(−%d)+守恒;对账自愈漂移窗口(−%d 纠回 %d)", Z, D, w2)
 }
 
+// OBS-3 回归:并发首开同组织 → 单一 org user + 落库 access_token 有效(不落被旋转作废的失效 token)。
+func TestIntegration_ProvisionConcurrency(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	svc, store, upstream := escrowSvc(t, ctx, "nexus_prov")
+	const orgID = int64(201)
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'prov-org', 'prov-slug')`, orgID); err != nil {
+		t.Fatalf("建组织失败: %v", err)
+	}
+	const N = 5
+	var wg sync.WaitGroup
+	creds := make([]newapi.MemberCred, N)
+	errs := make([]error, N)
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(i int) { defer wg.Done(); creds[i], errs[i] = svc.EnsureOrgProvisioned(ctx, orgID, "prov-org") }(i)
+	}
+	wg.Wait()
+	for i, e := range errs {
+		if e != nil {
+			t.Fatalf("并发开通#%d 失败: %v", i, e)
+		}
+	}
+	uid0 := creds[0].NewapiUserID
+	for i, c := range creds {
+		if c.NewapiUserID != uid0 {
+			t.Fatalf("🔴并发开通竞态分叉:#%d user_id=%d != %d(应同一 org user)", i, c.NewapiUserID, uid0)
+		}
+	}
+	// 落库 access_token 有效(非被旋转作废):用开通返回凭证建一个 token 应成功。
+	if _, err := upstream.CreateToken(ctx, creds[0], newapi.TokenSpec{Name: "nexus_provtest_v1", UnlimitedQuota: true, ExpiredTime: -1}); err != nil {
+		t.Fatalf("🔴落库 access_token 失效(OBS-3 旋转竞态未修):用开通凭证建 token 失败: %v", err)
+	}
+	t.Logf("OBS-3 并发首开真账 ok: %d 并发 → 单一 org user(#%d)+ 落库 access_token 有效(建 token 成功)", N, uid0)
+}
+
 func TestIntegration_EscrowRecharge(t *testing.T) {
 	dsn := os.Getenv("NEXUS_IT_DSN")
 	newapiURL := os.Getenv("NEXUS_IT_NEWAPI_URL")

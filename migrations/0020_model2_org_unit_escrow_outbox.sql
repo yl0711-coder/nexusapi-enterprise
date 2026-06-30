@@ -35,23 +35,8 @@ CREATE TABLE IF NOT EXISTS escrow_bucket (
   KEY idx_escrow_org_status (org_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- 3. outbox:开通意图(Transactional Outbox,崩溃安全)。开通请求与平台库记录同一本地事务写 outbox,worker 拉取执行。
---    idempotency_key 唯一=显式幂等键(重试不在 new-api 建重复 user/token);前向恢复(重试到成功),不补偿回滚。
-CREATE TABLE IF NOT EXISTS outbox (
-  id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  aggregate_type  VARCHAR(32)     NOT NULL,                  -- organization / member
-  aggregate_id    BIGINT UNSIGNED NOT NULL,
-  payload         JSON            NULL,
-  status          VARCHAR(16)     NOT NULL DEFAULT 'pending', -- pending/done/failed
-  idempotency_key VARCHAR(128)    NOT NULL,
-  attempts        INT             NOT NULL DEFAULT 0,
-  last_error      VARCHAR(512)    NULL,
-  created_at      DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  updated_at      DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
-  PRIMARY KEY (id),
-  UNIQUE KEY uk_outbox_idem (idempotency_key),
-  KEY idx_outbox_status (status, id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+-- 3.(原 outbox 表已删除,R5 OBS-4)开通无需 outbox:首开走 per-org 锁 + adopt-existing 确定性 username 幂等,
+--    崩溃后重试经 adopt 自愈;escrow 动钱的 newapi 写失败由 ReconcileEscrow 对账自愈。不留"看似有兜底实际没用"的死表。
 
 -- 4. organization 加池子锚 + 组织 user 凭证(应用层加密存)。模型2:组织=一个 new-api user(持 user.quota=池子)。
 --    access_token 供日常以 org 身份建员工 token;password 供 access_token 失效时重登录自愈(类比 member.member_password_enc)。

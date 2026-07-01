@@ -173,12 +173,10 @@ func (s *Service) applyMemberOverride(ctx context.Context, m *model.Member) (int
 	if m.NewapiTokenID == nil {
 		return final, nil // 员工尚无令牌(观测自助前),无可执行额度
 	}
-	cred, cerr := s.orgCred(ctx, m.OrgID)
-	if cerr != nil {
-		return 0, cerr
-	}
 	spec := newapi.TokenSpec{Name: deriveTokenName(m.ID, m.KeyRotation), RemainQuota: final, UnlimitedQuota: false, ExpiredTime: -1, Group: memberTokenGroup(m)}
-	if err := s.upstream.UpdateToken(ctx, cred, int(*m.NewapiTokenID), spec); err != nil {
+	if err := s.withOrgCred(ctx, m.OrgID, func(cred newapi.MemberCred) error {
+		return s.upstream.UpdateToken(ctx, cred, int(*m.NewapiTokenID), spec)
+	}); err != nil {
 		return 0, mapUpstream(err)
 	}
 	return final, nil
@@ -366,11 +364,9 @@ func (s *Service) SetMemberStatus(ctx context.Context, c session.Claims, orgID, 
 	// 恢复=启用**同一** token。额度预留不回=R4(v1 成员 unlimited,无 per-member 分配可退)。
 	// 删除/离职是**单独危险操作**(OffboardMember:删 token + 软删转离职列表),不走这里。
 	if m.NewapiTokenID != nil {
-		cred, cerr := s.orgCred(ctx, orgID)
-		if cerr != nil {
-			return cerr
-		}
-		if serr := s.upstream.SetTokenStatus(ctx, cred, int(*m.NewapiTokenID), enabled); serr != nil {
+		if serr := s.withOrgCred(ctx, orgID, func(cred newapi.MemberCred) error {
+			return s.upstream.SetTokenStatus(ctx, cred, int(*m.NewapiTokenID), enabled)
+		}); serr != nil {
 			return mapUpstream(serr)
 		}
 	}
@@ -393,11 +389,9 @@ func (s *Service) OffboardMember(ctx context.Context, c session.Claims, orgID, m
 		return err
 	}
 	if m.NewapiTokenID != nil {
-		cred, cerr := s.orgCred(ctx, orgID)
-		if cerr != nil {
-			return cerr
-		}
-		if derr := s.upstream.DeleteToken(ctx, cred, int(*m.NewapiTokenID)); derr != nil {
+		if derr := s.withOrgCred(ctx, orgID, func(cred newapi.MemberCred) error {
+			return s.upstream.DeleteToken(ctx, cred, int(*m.NewapiTokenID))
+		}); derr != nil {
 			return mapUpstream(derr)
 		}
 	}

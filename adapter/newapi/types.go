@@ -92,6 +92,8 @@ type NewapiAdapter interface {
 
 	// ProbeAccessToken 运行期探测 access_token 是否仍有效(10 §2.7)。
 	ProbeAccessToken(ctx context.Context, cred MemberCred) (valid bool, err error)
+	// RefreshAccessToken 用 username+password 重登派生新 access_token(401 自愈:失效才重登)。
+	RefreshAccessToken(ctx context.Context, in BootstrapInput) (accessToken string, err error)
 
 	// ReadConsumptionLogs 读消费日志窗口(type=2,小窗口分页,绝不全表),供计费结算(03 §3.1)。
 	ReadConsumptionLogs(ctx context.Context, sinceUnix, untilUnix int64, page, pageSize int) ([]LogEntry, int, error)

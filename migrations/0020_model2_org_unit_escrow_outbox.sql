@@ -1,4 +1,5 @@
--- 迁移 0020(模型2 R0 地基·增量部分):组织树 org_unit + 托管多桶 escrow_bucket + 开通 outbox + organization 加池子锚/凭证列。
+-- 迁移 0020(模型2 R0 地基·增量部分):组织树 org_unit + 托管多桶 escrow_bucket + organization 加池子锚/凭证列。
+-- 注(R5后):原计划的 outbox 表已删除(零引用假兜底,见 §3);文件名保留 _outbox 后缀是历史命名,不再迁移 outbox。
 -- 纯增量(新表 + 加列),不动 member 旧身份字段——身份翻转(去 member.newapi_user_id 等)在后续迁移单独做,使本步编译/迁移零破坏。
 -- 范式见 10-ADR / 14-技术方案 §2。约定:InnoDB + utf8mb4_0900_ai_ci;VARCHAR 枚举(不用 MySQL ENUM);DATETIME(3) UTC;org_id 前缀索引;无外键。
 

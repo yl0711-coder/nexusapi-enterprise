@@ -83,6 +83,24 @@ func (s *Store) GetOrgNewapiCred(ctx context.Context, orgID int64) (newapiUserID
 	return uid.Int64, enc, true, nil
 }
 
+// GetOrgNewapiPassword 读组织 new-api user 的加密密码(401 自愈:access_token 失效时用它重登派生新 token)。
+func (s *Store) GetOrgNewapiPassword(ctx context.Context, orgID int64) ([]byte, error) {
+	var enc []byte
+	err := s.db.QueryRowContext(ctx,
+		`SELECT newapi_password_enc FROM organization WHERE id = ? AND deleted_at IS NULL`, orgID).Scan(&enc)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return enc, err
+}
+
+// UpdateOrgAccessToken 刷新组织 access_token(401 自愈重登后落库;无 IS NULL 守卫,就是要覆盖旧的失效值)。
+func (s *Store) UpdateOrgAccessToken(ctx context.Context, orgID int64, accessTokenEnc []byte) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE organization SET newapi_access_token_enc = ? WHERE id = ? AND deleted_at IS NULL`, accessTokenEnc, orgID)
+	return err
+}
+
 // ListOrganizations 列出组织(运营方视角,分页)。includeArchived=false 时默认隐藏已归档(T12)。
 func (s *Store) ListOrganizations(ctx context.Context, limit, offset int, includeArchived bool) ([]*model.Organization, int, error) {
 	cond := "deleted_at IS NULL"

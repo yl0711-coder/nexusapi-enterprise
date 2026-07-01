@@ -305,13 +305,11 @@ func (s *Service) SetKeyIPWhitelist(ctx context.Context, c session.Claims, orgID
 	if m.BootstrapState != model.BootstrapDone || m.NewapiTokenID == nil {
 		return apperr.New(apperr.CodeInvalidParam, 409, "该成员尚无可用 key")
 	}
-	cred, err := s.orgCred(ctx, orgID)
-	if err != nil {
-		return err
-	}
 	// 重申令牌分组快照,防白名单更新把令牌分组丢回 default(T17-1/Q2)。
 	spec := newapi.TokenSpec{Name: deriveTokenName(memberID, m.KeyRotation), UnlimitedQuota: true, ExpiredTime: -1, AllowIPs: allowIPs, Group: memberTokenGroup(m)}
-	if err := s.upstream.UpdateToken(ctx, cred, int(*m.NewapiTokenID), spec); err != nil {
+	if err := s.withOrgCred(ctx, orgID, func(cred newapi.MemberCred) error {
+		return s.upstream.UpdateToken(ctx, cred, int(*m.NewapiTokenID), spec)
+	}); err != nil {
 		return mapUpstream(err)
 	}
 	s.audit(ctx, c, orgID, "set_key_ip_whitelist", "member", &memberID, map[string]any{"allow_ips": allowIPs})
@@ -341,16 +339,17 @@ func (s *Service) RotateKey(ctx context.Context, c session.Claims, orgID, member
 	if m.BootstrapState != model.BootstrapDone || m.NewapiTokenID == nil {
 		return "", "", apperr.New(apperr.CodeInvalidParam, 409, "该成员尚无可用 key,无法轮换")
 	}
-	cred, err := s.orgCred(ctx, orgID)
-	if err != nil {
-		return "", "", err
-	}
 	nextRotation := m.KeyRotation + 1
 	// 轮换重申令牌分组快照,防新 token 丢回 default(T17-1/Q2 必测)。
 	spec := newapi.TokenSpec{Name: deriveTokenName(memberID, nextRotation), UnlimitedQuota: true, ExpiredTime: -1, Group: memberTokenGroup(m)}
 
-	newID, newKey, berr := s.upstream.RotateToken(ctx, cred, int(*m.NewapiTokenID), spec)
-	if berr != nil {
+	var newID int
+	var newKey string
+	if berr := s.withOrgCred(ctx, orgID, func(cred newapi.MemberCred) error {
+		var e error
+		newID, newKey, e = s.upstream.RotateToken(ctx, cred, int(*m.NewapiTokenID), spec)
+		return e
+	}); berr != nil {
 		return "", "", mapUpstream(berr)
 	}
 	masked = maskKey(newKey)
@@ -473,6 +472,73 @@ func (s *Service) orgCred(ctx context.Context, orgID int64) (newapi.MemberCred, 
 	return newapi.MemberCred{NewapiUserID: int(uid), AccessToken: accessToken}, nil
 }
 
+// EnsureFreshCred 401 自愈(R5后步骤5,§15):持 per-org 锁 → 锁内先 Probe 现存 access_token(有效即用,别无谓轮换)
+// → 失效则用**存的加密密码重登**派生新 token、加密落库 → 返回新凭证。重登失败=放弃返错(调用方报警)。
+// org user 凭证当内部密钥用(别给人登以降误旋转);probe-first 复用弱化 OBS-3 旋转竞态。
+func (s *Service) EnsureFreshCred(ctx context.Context, orgID int64) (newapi.MemberCred, error) {
+	release, lerr := s.quotaLocker.Acquire(ctx, provisionLockKey(orgID))
+	if lerr != nil {
+		return newapi.MemberCred{}, apperr.Internal("").WithCause(lerr)
+	}
+	defer release()
+	cred, ok, err := s.loadOrgCred(ctx, orgID)
+	if err != nil {
+		return newapi.MemberCred{}, err
+	}
+	if !ok {
+		return newapi.MemberCred{}, apperr.New(apperr.CodeInvalidParam, 409, "组织尚未开通 new-api 池子")
+	}
+	if valid, perr := s.upstream.ProbeAccessToken(ctx, cred); perr == nil && valid {
+		return cred, nil // 现存令牌有效,复用(不轮换)
+	}
+	// 失效/探测失败:用存的密码重登派生新 access_token。
+	pwEnc, gerr := s.store.GetOrgNewapiPassword(ctx, orgID)
+	if gerr != nil {
+		return newapi.MemberCred{}, apperr.Internal("").WithCause(gerr)
+	}
+	pw, derr := s.keyring.DecryptString(string(pwEnc))
+	if derr != nil {
+		return newapi.MemberCred{}, apperr.Internal("").WithCause(derr)
+	}
+	newAccess, rerr := s.upstream.RefreshAccessToken(ctx, newapi.BootstrapInput{
+		OrgID: orgID, MemberID: 0, Username: deriveOrgUsername(orgID), Password: pw,
+	})
+	if rerr != nil {
+		return newapi.MemberCred{}, mapUpstream(rerr)
+	}
+	encNew, eerr := s.keyring.EncryptString(newAccess)
+	if eerr != nil {
+		return newapi.MemberCred{}, apperr.Internal("").WithCause(eerr)
+	}
+	if uerr := s.store.UpdateOrgAccessToken(ctx, orgID, []byte(encNew)); uerr != nil {
+		return newapi.MemberCred{}, apperr.Internal("").WithCause(uerr)
+	}
+	return newapi.MemberCred{NewapiUserID: cred.NewapiUserID, AccessToken: newAccess}, nil
+}
+
+// withOrgCred 用 org 令牌凭证执行一次上游操作;若返 401(access_token 失效)→ EnsureFreshCred 刷新后**重试仅一次**;
+// 仍失败/刷新失败=放弃返原错(调用方 mapUpstream + 已报警)。有界不循环、幂等(401=未执行,重试安全)。
+func (s *Service) withOrgCred(ctx context.Context, orgID int64, fn func(cred newapi.MemberCred) error) error {
+	cred, err := s.orgCred(ctx, orgID)
+	if err != nil {
+		return err
+	}
+	opErr := fn(cred)
+	if opErr == nil {
+		return nil
+	}
+	var ue *newapi.UpstreamError
+	if !errors.As(opErr, &ue) || !ue.AuthExpired() {
+		return opErr // 非 401,原样返回
+	}
+	fresh, ferr := s.EnsureFreshCred(ctx, orgID)
+	if ferr != nil {
+		s.log.Error("🔴401 自愈:刷新 org 凭证失败,放弃(需人工/下轮重试)", "org_id", orgID, "err", ferr)
+		return opErr
+	}
+	return fn(fresh) // 重试仅一次
+}
+
 // CreateMemberToken 员工自助建/重建 API key,选一个本企业可用的模型分组(改动③·方案A 单 key)。
 // 方案A:平台只跟踪最近一枚——首次(无令牌)CreateToken;重建(已有令牌)RotateToken 替换上一枚(旧 key 失效)。
 // RBAC:仅本人(MVP)。校验所选分组 ∈ 本企业可用模型分组(隔离边界:不能选别家分组)。返回明文 key(仅回显一次)+ 脱敏。
@@ -493,11 +559,6 @@ func (s *Service) CreateMemberToken(ctx context.Context, c session.Claims, membe
 	if err != nil {
 		return "", "", apperr.Internal("").WithCause(err)
 	}
-	cred, derr := s.orgCred(ctx, c.OrgID)
-	if derr != nil {
-		return "", "", derr
-	}
-
 	// 隔离边界:所选分组必须在本企业可用模型分组内(default 天然可用)。
 	if group != "default" {
 		usable, gerr := s.upstream.GetOrgUsableGroups(ctx, s.orgUserGroup(ctx, c.OrgID))
@@ -521,22 +582,29 @@ func (s *Service) CreateMemberToken(ctx context.Context, c session.Claims, membe
 
 	var newID int
 	var newKey string
-	if m.NewapiTokenID == nil {
-		tid, berr := s.upstream.CreateToken(ctx, cred, spec) // 首次自助建
-		if berr != nil {
-			return "", "", mapUpstream(berr)
+	// 401 自愈:建/轮换 token 用 org 凭证,失效则刷新重试一次(整块重试安全:401 在首个 cred 调用即中止、无副作用;
+	// 确定性 token 名 adopt-existing 幂等,重试不重复建)。
+	if berr := s.withOrgCred(ctx, c.OrgID, func(cred newapi.MemberCred) error {
+		if m.NewapiTokenID == nil {
+			tid, e := s.upstream.CreateToken(ctx, cred, spec) // 首次自助建
+			if e != nil {
+				return e
+			}
+			k, e := s.upstream.RevealTokenKey(ctx, cred, tid)
+			if e != nil {
+				return e
+			}
+			newID, newKey = tid, k
+			return nil
 		}
-		k, berr := s.upstream.RevealTokenKey(ctx, cred, tid)
-		if berr != nil {
-			return "", "", mapUpstream(berr)
-		}
-		newID, newKey = tid, k
-	} else {
-		id, k, berr := s.upstream.RotateToken(ctx, cred, int(*m.NewapiTokenID), spec) // 重建:替换上一枚
-		if berr != nil {
-			return "", "", mapUpstream(berr)
+		id, k, e := s.upstream.RotateToken(ctx, cred, int(*m.NewapiTokenID), spec) // 重建:替换上一枚
+		if e != nil {
+			return e
 		}
 		newID, newKey = id, k
+		return nil
+	}); berr != nil {
+		return "", "", mapUpstream(berr)
 	}
 	masked = maskKey(newKey)
 	if err := s.store.UpdateMemberKey(ctx, c.OrgID, memberID, int64(newID), masked, spec.Name, nextRotation); err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/nexusapi-platform/enterprise/adapter/newapi"
 	"github.com/nexusapi-platform/enterprise/model"
 	"github.com/nexusapi-platform/enterprise/repo"
 )
@@ -71,11 +72,9 @@ func (s *Service) reverseGrant(ctx context.Context, g *model.Grant) error {
 	case model.GrantAccountTTL:
 		// 模型2:账号到期 = 停该成员令牌(member 无自己的 newapi user)。无令牌则只置 expired。
 		if m.NewapiTokenID != nil {
-			cred, cerr := s.orgCred(ctx, g.OrgID)
-			if cerr != nil {
-				return cerr
-			}
-			if derr := s.upstream.DeleteToken(ctx, cred, int(*m.NewapiTokenID)); derr != nil {
+			if derr := s.withOrgCred(ctx, g.OrgID, func(cred newapi.MemberCred) error {
+				return s.upstream.DeleteToken(ctx, cred, int(*m.NewapiTokenID))
+			}); derr != nil {
 				return mapUpstream(derr)
 			}
 			if cerr := s.store.ClearMemberToken(ctx, g.OrgID, g.MemberID); cerr != nil {

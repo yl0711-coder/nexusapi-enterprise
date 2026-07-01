@@ -18,16 +18,68 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/nexusapi-platform/enterprise/adapter/newapi"
 	"github.com/nexusapi-platform/enterprise/model"
+	"github.com/nexusapi-platform/enterprise/pkg/crypto"
 	"github.com/nexusapi-platform/enterprise/pkg/session"
 	"github.com/nexusapi-platform/enterprise/repo"
 	"github.com/nexusapi-platform/enterprise/service"
 )
 
+// 步骤5:401 自愈——破坏 org access_token → token 操作 401 → EnsureFreshCred 重登刷新 → 重试成功。
+func TestIntegration_CredSelfHeal401(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	svc, store, _, km := escrowSvc(t, ctx, "nexus_heal")
+	newapiSQLDSN := os.Getenv("NEXUS_IT_NEWAPI_SQL_DSN")
+	const orgID, memberID = int64(501), int64(1)
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'heal-org', 'heal-slug')`, orgID); err != nil {
+		t.Fatalf("建组织失败: %v", err)
+	}
+	if _, err := svc.EnsureOrgProvisioned(ctx, orgID, "heal-org"); err != nil {
+		t.Fatalf("开通失败: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO member (id, org_id, login_email, status, bootstrap_state) VALUES (?, ?, 'heal@t.local', 'active', 'done')`, memberID, orgID); err != nil {
+		t.Fatalf("建成员失败: %v", err)
+	}
+	tokenID := selfServeMemberToken(t, ctx, svc, store, orgID, memberID) // 有效凭证下建 token
+
+	// 破坏 org access_token:用**同一把 keyring**加密一个垃圾令牌落库(=失效 access_token)。
+	garbage, err := km.EncryptString("invalid-access-token-xyz")
+	if err != nil {
+		t.Fatalf("加密垃圾令牌失败: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE organization SET newapi_access_token_enc = ? WHERE id = ?`, []byte(garbage), orgID); err != nil {
+		t.Fatalf("破坏 access_token 失败: %v", err)
+	}
+
+	// token 操作(禁用)→ 垃圾令牌 401 → withOrgCred → EnsureFreshCred 用存的密码重登刷新 → 重试成功。
+	admin := session.Claims{Role: session.RoleOrgAdmin, OrgID: orgID, MemberID: 999}
+	if err := svc.SetMemberStatus(ctx, admin, orgID, memberID, false); err != nil {
+		t.Fatalf("🔴401 自愈失败:token 操作应经重登自愈成功,实错: %v", err)
+	}
+	// 落库 access_token 已刷新(不再是垃圾)。
+	var afterEnc []byte
+	if err := store.DB().QueryRowContext(ctx, `SELECT newapi_access_token_enc FROM organization WHERE id = ?`, orgID).Scan(&afterEnc); err != nil {
+		t.Fatalf("读刷新后凭证失败: %v", err)
+	}
+	if string(afterEnc) == garbage {
+		t.Fatalf("🔴401 自愈应刷新落库 access_token,实仍是垃圾值")
+	}
+	// 验禁用确实生效(自愈后重试成功,token status=2)。
+	ndb, _ := sql.Open("mysql", newapiSQLDSN)
+	defer ndb.Close()
+	var st int
+	_ = ndb.QueryRowContext(ctx, `SELECT status FROM tokens WHERE id = ?`, tokenID).Scan(&st)
+	if st != 2 {
+		t.Fatalf("🔴自愈后禁用应生效 status=2,实=%d", st)
+	}
+	t.Logf("步骤5 401自愈真账 ok: 破坏 org access_token→token 操作401→EnsureFreshCred 重登刷新落库→重试成功(禁用生效 status=2)")
+}
+
 // 步骤4:成员三态——禁用(token置禁用不删,key保留)/恢复(启用同key)/离职(删token+软删转离职列表)。
 func TestIntegration_MemberLifecycle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	svc, store, _ := escrowSvc(t, ctx, "nexus_life")
+	svc, store, _, _ := escrowSvc(t, ctx, "nexus_life")
 	newapiSQLDSN := os.Getenv("NEXUS_IT_NEWAPI_SQL_DSN")
 	const orgID, memberID = int64(401), int64(1)
 	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'life-org', 'life-slug')`, orgID); err != nil {
@@ -97,8 +149,8 @@ func TestIntegration_MemberLifecycle(t *testing.T) {
 	t.Logf("步骤4 成员三态真账 ok: 禁用→token status=2(不删/指针保留/近实时)、恢复→status=1(同 key)、离职→删 token+软删转离职列表(活跃列表消失,可恢复)")
 }
 
-// escrowSvc 起一套对真 MySQL(独立库 dbName)+ 真 newapi 的非 observe 服务(escrow 涉钱测试公共脚手架)。
-func escrowSvc(t *testing.T, ctx context.Context, dbName string) (*service.Service, *repo.Store, newapi.NewapiAdapter) {
+// escrowSvc 起一套对真 MySQL(独立库 dbName)+ 真 newapi 的非 observe 服务(escrow 涉钱测试公共脚手架)。返回同一把 keyring。
+func escrowSvc(t *testing.T, ctx context.Context, dbName string) (*service.Service, *repo.Store, newapi.NewapiAdapter, *crypto.Keyring) {
 	t.Helper()
 	dsn := os.Getenv("NEXUS_IT_DSN")
 	newapiURL := os.Getenv("NEXUS_IT_NEWAPI_URL")
@@ -128,14 +180,14 @@ func escrowSvc(t *testing.T, ctx context.Context, dbName string) (*service.Servi
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	upstream := newapi.New(newapi.Config{BaseURL: newapiURL, AdminToken: adminToken, AdminUserID: adminUID, Timeout: 15 * time.Second}, nil)
 	svc := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log})
-	return svc, store, upstream
+	return svc, store, upstream, keyring
 }
 
 // F1/F2:并发入账无丢失更新 + 守恒 + 无 seq 撞 uk/越 cap(R5 修复:per-org 锁 + 单事务 FOR UPDATE)。
 func TestIntegration_EscrowConcurrency(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	svc, store, upstream := escrowSvc(t, ctx, "nexus_escc")
+	svc, store, upstream, _ := escrowSvc(t, ctx, "nexus_escc")
 	const orgID = int64(101) // 各 escrow 测试用不同 orgID:共享同一 newapi,同 orgID→同 org username→adopt 撞密码
 	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'escc-org', 'escc-slug')`, orgID); err != nil {
 		t.Fatalf("建组织失败: %v", err)
@@ -180,7 +232,7 @@ func TestIntegration_EscrowConcurrency(t *testing.T) {
 func TestIntegration_EscrowRefundReconcile(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	svc, store, upstream := escrowSvc(t, ctx, "nexus_escrr")
+	svc, store, upstream, _ := escrowSvc(t, ctx, "nexus_escrr")
 	const orgID = int64(102) // 不同 orgID 隔离 newapi org user(见 EscrowConcurrency 注释)
 	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'escrr-org', 'escrr-slug')`, orgID); err != nil {
 		t.Fatalf("建组织失败: %v", err)
@@ -262,7 +314,7 @@ func TestIntegration_EscrowRefundReconcile(t *testing.T) {
 func TestIntegration_ProvisionConcurrency(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	svc, store, upstream := escrowSvc(t, ctx, "nexus_prov")
+	svc, store, upstream, _ := escrowSvc(t, ctx, "nexus_prov")
 	const orgID = int64(201)
 	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'prov-org', 'prov-slug')`, orgID); err != nil {
 		t.Fatalf("建组织失败: %v", err)
@@ -298,7 +350,7 @@ func TestIntegration_ProvisionConcurrency(t *testing.T) {
 func TestIntegration_AutoRefill(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	svc, store, upstream := escrowSvc(t, ctx, "nexus_arf")
+	svc, store, upstream, _ := escrowSvc(t, ctx, "nexus_arf")
 	const orgID = int64(301)
 	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'arf-org', 'arf-slug')`, orgID); err != nil {
 		t.Fatalf("建组织失败: %v", err)

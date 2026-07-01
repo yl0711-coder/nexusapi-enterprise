@@ -212,13 +212,17 @@ func (s *Service) RefillWindow(ctx context.Context, c session.Claims, orgID int6
 	return s.GetDerivedBalance(ctx, c, orgID)
 }
 
-// ReconcileEscrow 是 escrow 对账 worker(R5 修复 F4,leader 单写者周期跑;observe 下短路不碰 newapi 写)。
-// 对每个有桶的组织:① 窗口纠偏——已释放_意图=桶1.amount,已释放_实际=newapi(quota+used_quota),
-//   delta=意图−实际,!=0 则 add/subtract 补齐(自愈入账/续充/退款的 newapi 写失败残窗;消费不破此式因 quota+used 恒定);
-// ② 守恒断言——已释放+托管 == 影子(充值−退款),破则告警(F7 双账分叉探测,只读告警不自动改)。
+// ReconcileEscrow 是 escrow 对账 worker(R5 后裁定,leader 单写者周期跑)。observe 也跑:observe 只挡"给员工写
+// 停人额度",对账纠的是**池子窗口**(过多才减、绝不加、有地板),不停员工。涉钱终极安全口径(14 §15):
+//   目标窗口 = 已释放(桶1) − 已消费(**我方 usage_ledger,bigint,彻底不碰 new-api used_quota**,int32 会溢出+将被清零);
+//   ① 实际窗口 > 目标 = 超拨 → **自动 SUBTRACT** 到目标(地板≥0,安全方向,绝不减到客户合法拥有之下);
+//   ② 实际窗口 < 目标 = 欠拨 → **绝不自动 ADD**(正 delta 可能是日志滞后=瞬时超拨/垫钱方向)→ 只告警,
+//      由续充 worker(读真实窗口自愈)或人工按 SLA 补;
+//   ③ 守恒断言:已释放+托管 == 充值−退款(纯平台侧账,无消费项,不碰 used_quota)。
+// 开跑前先 drain 一次结算(把日志水位追平到 now),使"已消费"最新——防欠拨告警被结算滞后刷假(§15 前提②)。
 func (s *Service) ReconcileEscrow(ctx context.Context) error {
-	if s.observeMode {
-		return nil // 观测期 escrow 路由 404、不动钱;纵有桶也不在此处写 newapi
+	if _, err := s.RunSettlement(ctx); err != nil { // drain-to-boundary:落账不扣钱(observe/非observe 都只落 ledger)
+		s.log.Warn("escrow 对账前 drain 结算失败(用当前账本继续)", "err", err)
 	}
 	orgIDs, err := s.store.ListEscrowOrgIDs(ctx)
 	if err != nil {
@@ -253,24 +257,32 @@ func (s *Service) reconcileOrgEscrow(ctx context.Context, orgID int64) error {
 	} else if !errors.Is(agerr, repo.ErrNotFound) {
 		return agerr
 	}
-	// ① 窗口纠偏:delta = 已释放_意图(桶1) − 已释放_实际(quota+used)。
-	quota, used, qerr := s.upstream.GetUserQuotaUsed(ctx, int(uid))
+	// ① 窗口纠偏:目标窗口 = 已释放(桶1) − 已消费(我方账本 bigint)。地板 0。
+	consumed, cerr := s.store.SumOrgConsumed(ctx, orgID)
+	if cerr != nil {
+		return cerr
+	}
+	target := released - consumed
+	if target < 0 {
+		target = 0 // 地板:消费超已释放(异常)也不把窗口算成负
+	}
+	actual, qerr := s.upstream.GetUserQuota(ctx, int(uid))
 	if qerr != nil {
 		return mapUpstream(qerr)
 	}
-	if delta := released - (quota + used); delta != 0 {
-		mode := newapi.QuotaAdd
-		val := delta
-		if delta < 0 {
-			mode = newapi.QuotaSubtract
-			val = -delta
-		}
-		if err := s.upstream.ManageUserQuota(ctx, int(uid), mode, val); err != nil {
+	switch {
+	case actual > target:
+		// 超拨:实际窗口高于应有 → 自动 SUBTRACT 到目标(安全方向;地板 target≥0,绝不减到客户合法拥有之下)。
+		if err := s.upstream.ManageUserQuota(ctx, int(uid), newapi.QuotaSubtract, actual-target); err != nil {
 			return mapUpstream(err)
 		}
-		s.log.Warn("escrow 窗口纠偏(自愈入账/续充/退款的 newapi 写残窗)", "org_id", orgID, "delta", delta, "released", released, "applied", quota+used)
+		s.log.Warn("escrow 窗口超拨自动纠偏(减到目标)", "org_id", orgID, "actual", actual, "target", target, "subtract", actual-target)
+	case actual < target:
+		// 欠拨:实际窗口低于应有 → **绝不自动 ADD**(已 drain 仍低=真欠拨,非滞后)。续充 worker(读真实窗口自愈)
+		// 或人工按 SLA 补。只告警,不动 newapi(§15 终极安全:对账永不经自动加垫钱)。
+		s.log.Error("🔴escrow 窗口欠拨(不自动补,待续充 worker 自愈/人工按 SLA 修)", "org_id", orgID, "actual", actual, "target", target, "shortfall", target-actual)
 	}
-	// ② 守恒断言:已释放 + 托管 == 充值 − 退款(影子)。
+	// ③ 守恒断言:已释放 + 托管 == 充值 − 退款(纯平台侧,无消费项,不碰 used_quota)。
 	holding, herr := s.store.SumHoldingEscrow(ctx, orgID)
 	if herr != nil {
 		return herr

@@ -87,7 +87,6 @@ type NewapiAdapter interface {
 	// 额度/状态走 user_id(管理员身份,不冒充):
 	ManageUserQuota(ctx context.Context, userID int, mode QuotaMode, quota int64) error // override/add/subtract
 	GetUserQuota(ctx context.Context, userID int) (quota int64, err error)              // 读 org user 当前剩余额度(模型2 读穿余额=桶1)
-	GetUserQuotaUsed(ctx context.Context, userID int) (quota, used int64, err error)    // 读 quota+used_quota(escrow 对账:已释放_实际=quota+used)
 	SetUserStatus(ctx context.Context, userID int, enabled bool) error                  // enable/disable
 
 	// ProbeAccessToken 运行期探测 access_token 是否仍有效(10 §2.7)。

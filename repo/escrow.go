@@ -93,6 +93,17 @@ func (s *Store) MaxEscrowSeqTx(ctx context.Context, x dbtx, orgID int64) (int, e
 	return int(seq.Int64), nil
 }
 
+// SumOrgConsumed Σ 组织累计已消费(usage_ledger,bigint)。escrow 对账用**我方账本**算已消费——
+// 彻底不碰 new-api used_quota(int32 会溢出 + 将被定期清零)。目标窗口 = 已释放(桶1) − 本值。
+func (s *Store) SumOrgConsumed(ctx context.Context, orgID int64) (int64, error) {
+	var q sql.NullInt64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT SUM(consumed_quota) FROM usage_ledger WHERE org_id = ?`, orgID).Scan(&q); err != nil {
+		return 0, err
+	}
+	return q.Int64, nil
+}
+
 // ListEscrowOrgIDs 列所有有桶的组织 id(escrow 对账 worker 逐组织核窗口)。
 func (s *Store) ListEscrowOrgIDs(ctx context.Context) ([]int64, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT org_id FROM escrow_bucket`)

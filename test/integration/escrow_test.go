@@ -42,6 +42,10 @@ func escrowSvc(t *testing.T, ctx context.Context, dbName string) (*service.Servi
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatalf("迁移失败: %v", err)
 	}
+	// 预置结算水位到 now:reconcile 的 drain(RunSettlement)成 no-op(escrow 测试不测结算,避免拉共享 newapi 日志 backlog)。
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO settlement_cursor (org_id, last_settled_ts, last_settled_log_id) VALUES (0, UNIX_TIMESTAMP(), 0)`); err != nil {
+		t.Fatalf("置结算水位失败: %v", err)
+	}
 	adminToken, adminUID := setupRC4(t, newapiURL)
 	keyring := mustKeyring(t)
 	signer, _ := session.NewSigner([]byte("integration-test-session-key-32b!!"), time.Hour)
@@ -133,19 +137,36 @@ func TestIntegration_EscrowRefundReconcile(t *testing.T) {
 		t.Fatalf("🔴退款后守恒破:已释放%d+托管%d 应=充值−退款%d", released, bal.HoldingQuota, A-Z)
 	}
 
-	// F4:模拟入账/续充/退款的 newapi 写失败残窗(手工 subtract D 不动 DB 桶1)→ 对账纠回。
-	const D = int64(30_000_000)
-	if err := upstream.ManageUserQuota(ctx, cred.NewapiUserID, newapi.QuotaSubtract, D); err != nil {
-		t.Fatalf("模拟残窗失败: %v", err)
+	// F4 对账口径(R5 后裁定:只减不加)。此测无成员消费 → 目标窗口=已释放(桶1)=w2。
+	target := w2
+
+	// F4a 超拨→自动 SUBTRACT 到目标:手工 ADD E 使窗口高于应有 → 对账减回(安全方向)。
+	const E = int64(40_000_000)
+	if err := upstream.ManageUserQuota(ctx, cred.NewapiUserID, newapi.QuotaAdd, E); err != nil {
+		t.Fatalf("模拟超拨失败: %v", err)
 	}
 	if err := svc.ReconcileEscrow(ctx); err != nil {
 		t.Fatalf("对账失败: %v", err)
 	}
-	wHealed, _ := upstream.GetUserQuota(ctx, cred.NewapiUserID)
-	if wHealed != w2 {
-		t.Fatalf("🔴F4 对账未自愈残窗:漂移后应纠回 %d,实=%d", w2, wHealed)
+	wSub, _ := upstream.GetUserQuota(ctx, cred.NewapiUserID)
+	if wSub != target {
+		t.Fatalf("🔴F4 超拨未自动减回目标:应=%d(减掉超拨 E),实=%d", target, wSub)
 	}
-	t.Logf("F3/F4 真账 ok: 退款真减 newapi 窗口(−%d)+守恒;对账自愈漂移窗口(−%d 纠回 %d)", Z, D, w2)
+
+	// F4b 欠拨→**绝不自动 ADD**:手工 SUBTRACT D 使窗口低于应有 → 对账只告警不补,窗口保持不变(§15 终极安全:对账永不自动加)。
+	const D = int64(30_000_000)
+	if err := upstream.ManageUserQuota(ctx, cred.NewapiUserID, newapi.QuotaSubtract, D); err != nil {
+		t.Fatalf("模拟欠拨失败: %v", err)
+	}
+	wLow, _ := upstream.GetUserQuota(ctx, cred.NewapiUserID)
+	if err := svc.ReconcileEscrow(ctx); err != nil {
+		t.Fatalf("对账失败: %v", err)
+	}
+	wAfterUnder, _ := upstream.GetUserQuota(ctx, cred.NewapiUserID)
+	if wAfterUnder != wLow {
+		t.Fatalf("🔴F4 对账对欠拨自动加了(终极安全破,对账绝不自动 ADD):窗口应保持 %d,实=%d", wLow, wAfterUnder)
+	}
+	t.Logf("F3/F4 真账 ok: 退款真减 newapi 窗口(−%d)+守恒;对账超拨自动减回目标(+%d 减掉)、欠拨绝不自动加(−%d 保持不补,待续充worker/SLA)", Z, E, D)
 }
 
 // OBS-3 回归:并发首开同组织 → 单一 org user + 落库 access_token 有效(不落被旋转作废的失效 token)。

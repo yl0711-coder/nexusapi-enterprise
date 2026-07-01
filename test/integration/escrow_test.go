@@ -166,7 +166,20 @@ func TestIntegration_EscrowRefundReconcile(t *testing.T) {
 	if wAfterUnder != wLow {
 		t.Fatalf("🔴F4 对账对欠拨自动加了(终极安全破,对账绝不自动 ADD):窗口应保持 %d,实=%d", wLow, wAfterUnder)
 	}
-	t.Logf("F3/F4 真账 ok: 退款真减 newapi 窗口(−%d)+守恒;对账超拨自动减回目标(+%d 减掉)、欠拨绝不自动加(−%d 保持不补,待续充worker/SLA)", Z, E, D)
+	// step2 余额可见性裁定:org_admin(客户)看**诚实稳定余额**(GetBalance=充值−退款−消费),
+	// 但**看不到实时窗口/托管**(GetDerivedBalance 运营方专属,防余额闪烁 §15 L173/L174)。
+	adminC := session.Claims{Role: session.RoleOrgAdmin, OrgID: orgID, MemberID: 1}
+	if _, derr := svc.GetDerivedBalance(ctx, adminC, orgID); derr == nil {
+		t.Fatalf("🔴实时窗口/托管(escrow-balance)应仅运营方可见,org_admin 竟可读")
+	}
+	gb, berr := svc.GetBalance(ctx, adminC, orgID)
+	if berr != nil {
+		t.Fatalf("org_admin 应可看诚实稳定余额(GetBalance): %v", berr)
+	}
+	if gb.Balance != A-Z { // 无消费:balance=充值A−退款Z(与实时窗口的 F4 折腾无关,稳定)
+		t.Fatalf("🔴稳定余额应=充值−退款=%d,实=%d", A-Z, gb.Balance)
+	}
+	t.Logf("F3/F4 真账 ok: 退款真减 newapi 窗口(−%d)+守恒;对账超拨自动减回目标(+%d 减掉)、欠拨绝不自动加(−%d 保持不补,待续充worker/SLA);step2 org_admin 看稳定余额%d 不见实时窗口", Z, E, D, gb.Balance)
 }
 
 // OBS-3 回归:并发首开同组织 → 单一 org user + 落库 access_token 有效(不落被旋转作废的失效 token)。

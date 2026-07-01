@@ -32,17 +32,15 @@ type DerivedBalance struct {
 	AvailableQuota int64 `json:"available_quota"` // = 窗口 + 托管(组织当前可用总额)
 }
 
-// GetDerivedBalance 读穿组织余额(O/A)。窗口读 new-api(桶1 实际剩余,含已消费递减);托管读平台库。
-// 绝不持第二本权威余额——余额永远派生自 new-api 桶1 + 平台库托管。组织未开通池子 → 全 0。
+// GetDerivedBalance 读穿组织**实时**窗口/托管(R5 后裁定:**仅运营方**)。窗口读 new-api(桶1 实际剩余,含消费递减)、
+// 托管读平台库——这是运营方的内部实时视图(会因续充/对账搬钱瞬态波动)。客户看的"可用余额"是**派生稳定值**
+// (总充值−总退款−已消费,见 GetBalance),不读这里,防余额忽上忽下(§15 L174)。组织未开通池子 → 全 0。
 func (s *Service) GetDerivedBalance(ctx context.Context, c session.Claims, orgID int64) (*DerivedBalance, error) {
 	if err := assertOrgScope(c, orgID); err != nil {
 		return nil, err
 	}
-	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
-		return nil, err
-	}
-	if err := s.mvpHidePrice(c); err != nil { // R5 RBAC:与 GetBalance 一致,observe 下客户不可读余额(藏价一致性)
-		return nil, err
+	if err := assertRole(c, session.RoleOperator); err != nil {
+		return nil, err // 窗口/托管拆分仅运营方(客户走 GetBalance 的诚实稳定余额)
 	}
 	uid, _, ok, err := s.store.GetOrgNewapiCred(ctx, orgID)
 	if err != nil {

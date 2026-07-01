@@ -152,9 +152,7 @@ func (s *Service) GetBalance(ctx context.Context, c session.Claims, orgID int64)
 	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
 		return nil, err
 	}
-	if err := s.mvpHidePrice(c); err != nil { // MVP(观测)藏价:客户直连不可读余额;运营方/支持态正常
-		return nil, err
-	}
+	// R5后裁定:客户可看自己"可用余额"(诚实余额,balance=充值−消费−退款),观测期不藏(藏的是价:倍率/折扣/计费设置)。
 	b, err := s.store.GetOrCreateBalance(ctx, orgID)
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)
@@ -170,9 +168,7 @@ func (s *Service) ListRecharges(ctx context.Context, c session.Claims, orgID int
 	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
 		return nil, 0, err
 	}
-	if err := s.mvpHidePrice(c); err != nil { // MVP(观测)藏价:客户直连不可读入账记录;运营方/支持态正常
-		return nil, 0, err
-	}
+	// R5后裁定:客户可看自己的入账记录(其钱),观测期不藏。
 	recs, total, err := s.store.ListRecharges(ctx, orgID, limit, offset)
 	if err != nil {
 		return nil, 0, err
@@ -267,9 +263,7 @@ func (s *Service) ListRechargeRequests(ctx context.Context, c session.Claims, or
 	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
 		return nil, 0, err
 	}
-	if err := s.mvpHidePrice(c); err != nil { // MVP(观测)藏价:客户直连不可读充值申请;运营方/支持态正常
-		return nil, 0, err
-	}
+	// R5后裁定:客户可看自己发起的充值申请(其钱),观测期不藏。
 	return s.store.ListRechargeRequests(ctx, orgID, limit, offset)
 }
 

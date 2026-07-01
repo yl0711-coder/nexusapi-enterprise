@@ -14,7 +14,8 @@ const (
 // 成员状态(09 §14 + provisioning 中间态,08 US-01 失败分支)。
 const (
 	MemberStatusActive       = "active"
-	MemberStatusDisabled     = "disabled"
+	MemberStatusDisabled     = "disabled"   // 禁用(临时停,token 置禁用不删,key 保留,启用即通)
+	MemberStatusOffboarded   = "offboarded" // 离职(token 删除+软删 deleted_at,转离职列表可恢复,恢复需重建 key)
 	MemberStatusExpired      = "expired"
 	MemberStatusPending      = "pending"
 	MemberStatusProvisioning = "provisioning"

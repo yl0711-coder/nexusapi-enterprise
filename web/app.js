@@ -465,10 +465,14 @@ VIEWS.dash = async () => {
 };
 VIEWS.members = async () => {
   const id = S.orgId;
-  const [d, teams] = await Promise.all([
+  const showOff = !!S.membersShowOffboarded;
+  const reqs = [
     api("GET", "/organizations/" + id + "/members?page=1&page_size=50", null),
     api("GET", "/organizations/" + id + "/teams", null).catch(() => []),
-  ]);
+  ];
+  if (showOff) reqs.push(api("GET", "/organizations/" + id + "/members/offboarded?page=1&page_size=50", null).catch(() => ({ list: [] })));
+  const res = await Promise.all(reqs);
+  const d = res[0], teams = res[1], off = showOff ? (res[2] || { list: [] }) : { list: [] };
   S.teamsCache = teams || []; // 供调团队弹窗
   const tmap = {}; (teams || []).forEach(t => tmap[t.id] = t.name);
   // 管理类账号(运营方/组织管理员)不进"成员"列表(M7);只列 API 使用成员。
@@ -480,12 +484,22 @@ VIEWS.members = async () => {
     <td class="right">
       <span class="btn sm" onclick="openChangeTeam(${m.id},${m.team_id || 0})">调团队</span>
       ${S.mvp ? "" : `<span class="btn sm" onclick="openAdjust(${m.id})">调额</span>`}
-      <span class="btn sm" onclick="toggleMember(${m.id},${m.status !== "active"})">${m.status === "active" ? "停用" : "恢复"}</span>
+      <span class="btn sm" onclick="toggleMember(${m.id},${m.status !== "active"})">${m.status === "active" ? "禁用" : "启用"}</span>
+      <span class="btn sm danger" onclick="doOffboard(${m.id},'${jsstr(m.display_name || m.login_email)}')">离职</span>
     </td></tr>`).join("");
-  return head(S.role === "team_leader" ? "团队成员" : "成员", S.mvp ? "开通成员建账号+交付登录凭证(Key 由员工自助创建)" : "开通成员即代发 API key;调额走临时 grant、到期自动回退")
-    + `<div class="toolbar"><div class="search"></div>${S.mvp ? "" : `<button class="btn" onclick="openBulk()">批量导入</button>`}<button class="btn pri" onclick="openAddMember()">+ 开通成员</button></div>
+  const offRows = showOff ? (off.list || []).map(m => `<tr>
+    <td>${esc(m.display_name || m.login_email)}<div class="mini">${esc(m.login_email)}</div></td>
+    <td><span class="tag">已离职</span></td>
+    <td class="mini">key 已失效</td>
+    <td class="right"><span class="btn sm" onclick="doRestoreMember(${m.id},'${jsstr(m.display_name || m.login_email)}')">恢复入职</span></td>
+  </tr>`).join("") : "";
+  return head(S.role === "team_leader" ? "团队成员" : "成员", "禁用=暂停(同 key,启用即通);离职=离开(key 失效、转离职列表可恢复,恢复需重建 key)")
+    + `<div class="toolbar"><div class="search"></div>
+      <label class="mini" style="margin-left:12px;cursor:pointer"><input type="checkbox" ${showOff ? "checked" : ""} onclick="S.membersShowOffboarded=this.checked;renderView()"> 显示离职</label>
+      ${S.mvp ? "" : `<button class="btn" onclick="openBulk()">批量导入</button>`}<button class="btn pri" onclick="openAddMember()">+ 开通成员</button></div>
     <div class="panel"><table><thead><tr><th>成员</th><th>团队</th><th>状态</th><th>Key(脱敏)</th><th></th></tr></thead>
-    <tbody>${rows || '<tr><td colspan=5>' + emptyState("☷", "还没有成员", "开通第一位员工,系统会生成登录凭证交付给他", "+ 开通成员", "openAddMember()") + '</td></tr>'}</tbody></table></div>`;
+    <tbody>${rows || '<tr><td colspan=5>' + emptyState("☷", "还没有成员", "开通第一位员工,系统会生成登录凭证交付给他", "+ 开通成员", "openAddMember()") + '</td></tr>'}</tbody></table></div>`
+    + (showOff ? `<div class="panel"><div class="ph">离职成员(软删·可恢复)</div><div class="pb"><table><tbody>${offRows || '<tr><td class="empty">暂无离职成员</td></tr>'}</tbody></table></div></div>` : "");
 };
 function openChangeTeam(mid, curTid) {
   const topts = (S.teamsCache || []).filter(t => t.status !== "archived").map(t => `<option value="${t.id}" ${t.id === curTid ? "selected" : ""}>${esc(t.name)}</option>`).join("");
@@ -561,9 +575,20 @@ async function doAdjust(mid) {
   } catch (e) { toast(e.message); }
 }
 async function toggleMember(mid, enable) {
-  // 模型2:停用=删该员工令牌(key 立即失效);恢复后需员工自助重建 key(恢复 key 会变,待总监定终态语义)。
-  if (!enable && !confirm("停用将立即使该员工的 API key 失效(删除其令牌);恢复后需员工自助重建 key。确认停用?")) return;
-  try { await api("POST", "/members/" + mid + "/status", { enabled: enable }); toast(enable ? "已恢复(请提示员工重建 key)" : "已停用(key 已失效)"); renderView(); }
+  // 模型2 R5后:禁用=把 token 置禁用状态(**key 保留、启用即通、近实时生效**),不是删。删除走「离职」。
+  try { await api("POST", "/members/" + mid + "/status", { enabled: enable }); toast(enable ? "已启用(同 key,立即通)" : "已禁用(key 保留,启用即通)"); renderView(); }
+  catch (e) { toast(e.message); }
+}
+// 离职(危险):删 token + 软删转离职列表(与禁用区分清楚)。
+async function doOffboard(mid, name) {
+  if (!confirm("确认让「" + name + "」离职?\n\n将删除其 API key(立即失效)并转入离职列表。资料/历史保留、可恢复,但恢复入职需重建 key(旧 key 不可恢复)。\n\n若只是临时停用,请用「禁用」(同 key、启用即通)。")) return;
+  try { await api("POST", "/members/" + mid + "/offboard", null); toast("已离职(key 失效,转离职列表)"); renderView(); }
+  catch (e) { toast(e.message); }
+}
+// 恢复入职:清软删置 active(员工自助重建 key,新 key)。
+async function doRestoreMember(mid, name) {
+  if (!confirm("恢复「" + name + "」入职?\n转回成员列表,需员工登录后自助重建 key(新 key、旧不可恢复)。")) return;
+  try { await api("POST", "/members/" + mid + "/restore", null); toast("已恢复入职(请提示员工重建 key)"); renderView(); }
   catch (e) { toast(e.message); }
 }
 VIEWS.teams = async () => {

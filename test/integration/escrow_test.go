@@ -5,6 +5,7 @@ package integration
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,10 +17,85 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/nexusapi-platform/enterprise/adapter/newapi"
+	"github.com/nexusapi-platform/enterprise/model"
 	"github.com/nexusapi-platform/enterprise/pkg/session"
 	"github.com/nexusapi-platform/enterprise/repo"
 	"github.com/nexusapi-platform/enterprise/service"
 )
+
+// 步骤4:成员三态——禁用(token置禁用不删,key保留)/恢复(启用同key)/离职(删token+软删转离职列表)。
+func TestIntegration_MemberLifecycle(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	svc, store, _ := escrowSvc(t, ctx, "nexus_life")
+	newapiSQLDSN := os.Getenv("NEXUS_IT_NEWAPI_SQL_DSN")
+	const orgID, memberID = int64(401), int64(1)
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'life-org', 'life-slug')`, orgID); err != nil {
+		t.Fatalf("建组织失败: %v", err)
+	}
+	if _, err := svc.EnsureOrgProvisioned(ctx, orgID, "life-org"); err != nil {
+		t.Fatalf("开通失败: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO member (id, org_id, login_email, status, bootstrap_state) VALUES (?, ?, 'life@t.local', 'active', 'done')`, memberID, orgID); err != nil {
+		t.Fatalf("建成员失败: %v", err)
+	}
+	tokenID := selfServeMemberToken(t, ctx, svc, store, orgID, memberID) // 真 token
+
+	ndb, err := sql.Open("mysql", newapiSQLDSN)
+	if err != nil {
+		t.Fatalf("连 newapi 库失败: %v", err)
+	}
+	defer ndb.Close()
+	tokenStatus := func() int {
+		var s sql.NullInt64
+		_ = ndb.QueryRowContext(ctx, `SELECT status FROM tokens WHERE id = ?`, tokenID).Scan(&s)
+		return int(s.Int64)
+	}
+	if st := tokenStatus(); st != 1 {
+		t.Fatalf("初始 token 应 enabled=1,实=%d", st)
+	}
+	admin := session.Claims{Role: session.RoleOrgAdmin, OrgID: orgID, MemberID: 999}
+
+	// 禁用不删:token 置禁用(status=2),指针保留、成员 disabled。
+	if err := svc.SetMemberStatus(ctx, admin, orgID, memberID, false); err != nil {
+		t.Fatalf("禁用失败: %v", err)
+	}
+	if st := tokenStatus(); st != 2 {
+		t.Fatalf("🔴禁用应把 token 置禁用 status=2(不删),实=%d", st)
+	}
+	m, _ := store.GetMember(ctx, orgID, memberID)
+	if m.NewapiTokenID == nil || *m.NewapiTokenID != tokenID {
+		t.Fatalf("🔴禁用不应删 token 指针(禁用不删,key 保留)")
+	}
+	if m.Status != model.MemberStatusDisabled {
+		t.Fatalf("成员状态应 disabled,实=%s", m.Status)
+	}
+
+	// 恢复:启用同一 token(status=1,同 key)。
+	if err := svc.SetMemberStatus(ctx, admin, orgID, memberID, true); err != nil {
+		t.Fatalf("恢复失败: %v", err)
+	}
+	if st := tokenStatus(); st != 1 {
+		t.Fatalf("🔴恢复应把 token 置启用 status=1,实=%d", st)
+	}
+	m2, _ := store.GetMember(ctx, orgID, memberID)
+	if m2.NewapiTokenID == nil || *m2.NewapiTokenID != tokenID {
+		t.Fatalf("🔴恢复应是同一 key(token 不变)")
+	}
+
+	// 离职:删 token + 软删转离职列表(活跃列表消失)。
+	if err := svc.OffboardMember(ctx, admin, orgID, memberID); err != nil {
+		t.Fatalf("离职失败: %v", err)
+	}
+	if _, gerr := store.GetMember(ctx, orgID, memberID); gerr == nil {
+		t.Fatalf("🔴离职后成员应从活跃列表消失(软删)")
+	}
+	off, total, _ := store.ListOffboardedMembers(ctx, orgID, 10, 0)
+	if total != 1 || len(off) != 1 {
+		t.Fatalf("🔴离职成员应在离职列表,实 total=%d", total)
+	}
+	t.Logf("步骤4 成员三态真账 ok: 禁用→token status=2(不删/指针保留/近实时)、恢复→status=1(同 key)、离职→删 token+软删转离职列表(活跃列表消失,可恢复)")
+}
 
 // escrowSvc 起一套对真 MySQL(独立库 dbName)+ 真 newapi 的非 observe 服务(escrow 涉钱测试公共脚手架)。
 func escrowSvc(t *testing.T, ctx context.Context, dbName string) (*service.Service, *repo.Store, newapi.NewapiAdapter) {

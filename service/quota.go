@@ -362,19 +362,16 @@ func (s *Service) SetMemberStatus(ctx context.Context, c session.Claims, orgID, 
 	if err != nil {
 		return err
 	}
-	// 模型2:成员=org user 下的 token,停用作用在其令牌上(member 无自己的 newapi user)。
-	// 停用=删该成员当前令牌(key 立即失效)+清指针;恢复=仅置 active,员工自助重建 key(确定性名)。
-	// 注:恢复后 key 会变;token 级"禁用不删"待 adapter 增能力(交付说明已标,待总监定产品语义)。
-	if !enabled && m.NewapiTokenID != nil {
+	// 模型2 R5后裁定:**禁用不删**——禁用=把该成员令牌置**禁用状态**(status_only,key 保留、启用即通、近实时生效);
+	// 恢复=启用**同一** token。额度预留不回=R4(v1 成员 unlimited,无 per-member 分配可退)。
+	// 删除/离职是**单独危险操作**(OffboardMember:删 token + 软删转离职列表),不走这里。
+	if m.NewapiTokenID != nil {
 		cred, cerr := s.orgCred(ctx, orgID)
 		if cerr != nil {
 			return cerr
 		}
-		if derr := s.upstream.DeleteToken(ctx, cred, int(*m.NewapiTokenID)); derr != nil {
-			return mapUpstream(derr)
-		}
-		if cerr := s.store.ClearMemberToken(ctx, orgID, memberID); cerr != nil {
-			return apperr.Internal("").WithCause(cerr)
+		if serr := s.upstream.SetTokenStatus(ctx, cred, int(*m.NewapiTokenID), enabled); serr != nil {
+			return mapUpstream(serr)
 		}
 	}
 	status := model.MemberStatusDisabled
@@ -386,6 +383,55 @@ func (s *Service) SetMemberStatus(ctx context.Context, c session.Claims, orgID, 
 	}
 	s.audit(ctx, c, orgID, "set_member_status", "member", &memberID, map[string]any{"enabled": enabled})
 	return nil
+}
+
+// OffboardMember 离职(危险操作,org_admin/team_leader):删该成员令牌(key 失效)+ 软删转离职列表(资料/历史保留可恢复)。
+// 额度退回可分配=R4(v1 成员 unlimited,无 per-member 分配)。恢复入职需重建 key(新 key,旧不可恢复)。
+func (s *Service) OffboardMember(ctx context.Context, c session.Claims, orgID, memberID int64) error {
+	m, err := s.loadManageableMember(ctx, c, orgID, memberID)
+	if err != nil {
+		return err
+	}
+	if m.NewapiTokenID != nil {
+		cred, cerr := s.orgCred(ctx, orgID)
+		if cerr != nil {
+			return cerr
+		}
+		if derr := s.upstream.DeleteToken(ctx, cred, int(*m.NewapiTokenID)); derr != nil {
+			return mapUpstream(derr)
+		}
+	}
+	if err := s.store.OffboardMember(ctx, orgID, memberID); err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	s.audit(ctx, c, orgID, "offboard_member", "member", &memberID, nil)
+	return nil
+}
+
+// RestoreOffboardedMember 恢复入职(org_admin):清软删 + 置 active;无 token,员工登录后自助重建 key(新 key)。
+func (s *Service) RestoreOffboardedMember(ctx context.Context, c session.Claims, orgID, memberID int64) error {
+	if err := assertOrgScope(c, orgID); err != nil {
+		return err
+	}
+	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
+		return err
+	}
+	if err := s.store.RestoreOffboardedMember(ctx, orgID, memberID); err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	s.audit(ctx, c, orgID, "restore_member", "member", &memberID, nil)
+	return nil
+}
+
+// ListOffboardedMembers 列离职成员(org_admin/team_leader;离职列表可恢复)。
+func (s *Service) ListOffboardedMembers(ctx context.Context, c session.Claims, orgID int64, limit, offset int) ([]*model.Member, int, error) {
+	if err := assertOrgScope(c, orgID); err != nil {
+		return nil, 0, err
+	}
+	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin, session.RoleTeamLeader); err != nil {
+		return nil, 0, err
+	}
+	return s.store.ListOffboardedMembers(ctx, orgID, limit, offset)
 }
 
 // loadManageableMember 取成员并做"可管理"RBAC 校验:组织管理员(本 org)/ 团队负责人(本 team);

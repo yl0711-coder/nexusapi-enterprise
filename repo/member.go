@@ -127,6 +127,46 @@ func (s *Store) UpdateMemberStatus(ctx context.Context, orgID, memberID int64, s
 	return err
 }
 
+// OffboardMember 离职(软删):deleted_at=now + status=offboarded + 清 token 指针。ListMembers(deleted_at IS NULL)自动排除。
+func (s *Store) OffboardMember(ctx context.Context, orgID, memberID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE member SET deleted_at = CURRENT_TIMESTAMP(3), status = ?, newapi_token_id = NULL, key_masked = NULL
+		   WHERE id = ? AND org_id = ? AND deleted_at IS NULL`, model.MemberStatusOffboarded, memberID, orgID)
+	return err
+}
+
+// RestoreOffboardedMember 恢复入职:清软删 + 置 active(无 token,员工自助重建 key)。
+func (s *Store) RestoreOffboardedMember(ctx context.Context, orgID, memberID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE member SET deleted_at = NULL, status = ? WHERE id = ? AND org_id = ? AND deleted_at IS NOT NULL`,
+		model.MemberStatusActive, memberID, orgID)
+	return err
+}
+
+// ListOffboardedMembers 列离职成员(软删,资料/历史保留可恢复)。
+func (s *Store) ListOffboardedMembers(ctx context.Context, orgID int64, limit, offset int) ([]*model.Member, int, error) {
+	var total int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM member WHERE org_id = ? AND deleted_at IS NOT NULL`, orgID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.QueryContext(ctx,
+		memberSelect+` WHERE org_id = ? AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT ? OFFSET ?`, orgID, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []*model.Member
+	for rows.Next() {
+		m, serr := scanMember(rows)
+		if serr != nil {
+			return nil, 0, serr
+		}
+		out = append(out, m)
+	}
+	return out, total, rows.Err()
+}
+
 // UpdateMemberPassword 改成员平台登录密码哈希(个人设置·自助改密)。
 func (s *Store) UpdateMemberPassword(ctx context.Context, orgID, memberID int64, passwordHash string) error {
 	_, err := s.db.ExecContext(ctx,

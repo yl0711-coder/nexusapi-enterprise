@@ -38,7 +38,9 @@ var mvpWriteAllow = []string{
 	"POST /api/v1/members/*/key:rotate",
 	"POST /api/v1/members/*/key:ip-whitelist",
 	"POST /api/v1/members/*/tokens", // 改动③ 员工自助建 key
-	"POST /api/v1/members/*/status", // 停用/恢复
+	"POST /api/v1/members/*/status",   // 停用/恢复(禁用不删)
+	"POST /api/v1/members/*/offboard", // 离职(删token+软删)
+	"POST /api/v1/members/*/restore",  // 恢复入职
 	"POST /api/v1/notifications/*/read",
 	"POST /api/v1/organizations/*/support-sessions", // 运营方支持(写受 CheckSupportGuard 约束)
 	"POST /api/v1/support-sessions/*/close",

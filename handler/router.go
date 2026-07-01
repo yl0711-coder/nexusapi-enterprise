@@ -93,6 +93,9 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/members/{id}/grants", h.requireAuth(h.handleListGrants))
 	mux.HandleFunc("DELETE /api/v1/grants/{id}", h.requireAuth(h.handleRevokeGrant))
 	mux.HandleFunc("POST /api/v1/members/{id}/status", h.requireAuth(h.handleSetMemberStatus))
+	mux.HandleFunc("POST /api/v1/members/{id}/offboard", h.requireAuth(h.handleOffboardMember))                    // 离职(删token+软删)
+	mux.HandleFunc("POST /api/v1/members/{id}/restore", h.requireAuth(h.handleRestoreMember))                      // 恢复入职
+	mux.HandleFunc("GET /api/v1/organizations/{id}/members/offboarded", h.requireAuth(h.handleListOffboarded))     // 离职列表
 
 	// 计费(里程碑3a):余额 / 入账 / 申请充值(钱进 + 只读 + 告警;扣费 3b 下一轮)。
 	mux.HandleFunc("GET /api/v1/organizations/{id}/balance", h.requireAuth(h.handleGetBalance))

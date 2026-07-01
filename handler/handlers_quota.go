@@ -140,3 +140,54 @@ func (h *Handler) handleSetMemberStatus(w http.ResponseWriter, r *http.Request) 
 	}
 	writeOK(w, r, http.StatusOK, map[string]any{"member_id": memberID, "status": status})
 }
+
+// POST /members/{id}/offboard — 离职(危险):删 token + 软删转离职列表。
+func (h *Handler) handleOffboardMember(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	memberID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	if err := h.svc.OffboardMember(r.Context(), c, c.OrgID, memberID); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{"member_id": memberID, "status": "offboarded"})
+}
+
+// POST /members/{id}/restore — 恢复入职:清软删置 active(员工自助重建 key)。
+func (h *Handler) handleRestoreMember(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	memberID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	if err := h.svc.RestoreOffboardedMember(r.Context(), c, c.OrgID, memberID); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{"member_id": memberID, "status": "active"})
+}
+
+// GET /organizations/{id}/members/offboarded — 离职列表(可恢复)。
+func (h *Handler) handleListOffboarded(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	orgID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	page, size, offset := parsePaging(r, 20)
+	members, total, err := h.svc.ListOffboardedMembers(r.Context(), c, orgID, size, offset)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	views := make([]memberView, 0, len(members))
+	for _, m := range members {
+		views = append(views, toMemberView(m))
+	}
+	writeOK(w, r, http.StatusOK, listResp{List: views, Pagination: makePageMeta(page, size, total)})
+}

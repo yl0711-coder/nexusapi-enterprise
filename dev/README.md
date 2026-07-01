@@ -43,6 +43,13 @@ docker compose -f dev/docker-compose.dev.yml stop    # 不用时停掉(数据还
 bash dev/reset.sh
 ```
 
+> ⚠ **重置两库都要跑**:`reset.sh` 只还原 new-api 库;平台库(nexus)另跑 `bash dev/reset-platform.sh`。
+> 只跑前者 → new-api token id 从头重算、平台库旧 `member_key_token` 引用同 id → 撞 `uk_key_token_newapi` → 开成员 500(真站联调踩过)。
+
+> ⚠ **首次建组织的分组前置**:建组织必填 `newapi_user_group`,且该分组须已在 new-api 配为可用模型分组
+> (`group_special_usable_group`),否则 422(这是正确的防御)。当前 dev seed 只建了 default/vip/enterprise 的 `GroupRatio`,
+> 未预配可用模型分组映射——首次联调若撞 422,先在 new-api 后台把要用的分组配上可用模型(或后续在 `seed.sh` 补预配,待核 API 格式)。
+
 ## 端口 / 账号
 
 - new-api:http://localhost:13000 ,root / `RootPass123`(本地 mock,非线上)

@@ -23,3 +23,7 @@ $COMPOSE exec -T mysql mysql -uroot -pdevroot < "$BASE_SQL"
 echo "[reset] 重启 new-api"
 $COMPOSE start newapi >/dev/null
 echo "[reset] 完成,已还原到基准库状态。"
+echo ""
+echo "[reset] ⚠ 本脚本只重置 new-api 库。**平台库(nexus)未动**——若之前建过组织/成员,平台库仍有旧 member_key_token"
+echo "        引用旧 new-api token id;new-api 重置后 token id 从头重算 → 撞 uk_key_token_newapi → 开成员 500。"
+echo "        联调完整重置请**接着跑**:  bash dev/reset-platform.sh"

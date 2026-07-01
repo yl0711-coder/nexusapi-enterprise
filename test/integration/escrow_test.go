@@ -31,6 +31,135 @@ func isForbidden(err error) bool {
 	return errors.As(err, &e) && e.Code == apperr.CodeForbidden
 }
 
+// B档#1(结算扣款侧,P0·堵HIGH-1盲区):非 observe RunSettlement 真扣钱 → 守恒 + 水位去重防双扣。
+func TestIntegration_SettlementDeductDedup(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	svc, store, _, _ := escrowSvc(t, ctx, "nexus_sd") // 非 observe
+	newapiSQLDSN := os.Getenv("NEXUS_IT_NEWAPI_SQL_DSN")
+	const orgID, memberID = int64(801), int64(1)
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug, billing_enabled) VALUES (?, 'sd-org', 'sd-slug', 1)`, orgID); err != nil {
+		t.Fatalf("建组织失败: %v", err)
+	}
+	cred, perr := svc.EnsureOrgProvisioned(ctx, orgID, "sd-org")
+	if perr != nil {
+		t.Fatalf("开通失败: %v", perr)
+	}
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO member (id, org_id, login_email, status, bootstrap_state) VALUES (?, ?, 'sd@t.local', 'active', 'done')`, memberID, orgID); err != nil {
+		t.Fatalf("建成员失败: %v", err)
+	}
+	tokenID := selfServeMemberToken(t, ctx, svc, store, orgID, memberID)
+	opc := session.Claims{Role: session.RoleOperator, OrgID: orgID}
+	const A = int64(50_000_000)
+	if _, err := svc.Recharge(ctx, opc, orgID, service.RechargeInput{AmountQuota: A, TransferNo: "sd-1"}); err != nil {
+		t.Fatalf("入账失败: %v", err)
+	}
+	ndb, _ := sql.Open("mysql", newapiSQLDSN)
+	defer ndb.Close()
+	var maxLogID int64
+	_ = ndb.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM logs`).Scan(&maxLogID)
+	logTS := time.Now().Unix() - 300 // 安全早于结算滞后窗口
+	if _, err := store.DB().ExecContext(ctx, `UPDATE settlement_cursor SET last_settled_ts=?, last_settled_log_id=? WHERE org_id=0`, logTS-1, maxLogID); err != nil {
+		t.Fatalf("置结算水位失败: %v", err)
+	}
+	const C = int64(20_000_000)
+	seedConsumptionLogTok(t, newapiSQLDSN, int64(cred.NewapiUserID), tokenID, "gpt-sd", C, logTS)
+
+	readBal := func() (consumed, balance int64) {
+		_ = store.DB().QueryRowContext(ctx, `SELECT total_consumed, balance FROM company_balance WHERE org_id=?`, orgID).Scan(&consumed, &balance)
+		return
+	}
+	if _, err := svc.RunSettlement(ctx); err != nil {
+		t.Fatalf("首次结算失败: %v", err)
+	}
+	c1, b1 := readBal()
+	if c1 != C {
+		t.Fatalf("🔴首次结算应扣消费 C=%d,实 total_consumed=%d", C, c1)
+	}
+	if b1 != A-C {
+		t.Fatalf("🔴守恒破:balance 应=A−C=%d,实=%d", A-C, b1)
+	}
+	if _, err := svc.RunSettlement(ctx); err != nil { // 二次结算:水位去重,绝不双扣
+		t.Fatalf("二次结算失败: %v", err)
+	}
+	c2, b2 := readBal()
+	if c2 != C || b2 != A-C {
+		t.Fatalf("🔴重跑结算双扣了(去重失效):total_consumed %d→%d、balance %d→%d", c1, c2, b1, b2)
+	}
+	t.Logf("B档#1 结算真扣钱去重守恒 ok: 扣 C=%d、balance=A−C=%d、守恒成立;重跑水位去重不双扣", C, A-C)
+}
+
+// B档#1(结算扣款侧·堵HIGH-1盲区):非 observe 余额耗尽→硬停 converge 把成员 token override→0;充值回正→恢复档额。
+func TestIntegration_HardStopConvergeRecover(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	svc, store, _, _ := escrowSvc(t, ctx, "nexus_hstop") // 非 observe
+	newapiSQLDSN := os.Getenv("NEXUS_IT_NEWAPI_SQL_DSN")
+	const orgID, memberID = int64(802), int64(1)
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug, billing_enabled, hard_stop_enabled) VALUES (?, 'hstop-org', 'hstop-slug', 1, 1)`, orgID); err != nil {
+		t.Fatalf("建组织失败: %v", err)
+	}
+	cred, perr := svc.EnsureOrgProvisioned(ctx, orgID, "hstop-org")
+	if perr != nil {
+		t.Fatalf("开通失败: %v", perr)
+	}
+	ml := int64(25_000_000)
+	tierID, terr := store.CreateTier(ctx, &model.Tier{OrgID: orgID, Name: "hstop-tier", MonthlyLimit: &ml})
+	if terr != nil {
+		t.Fatalf("建档失败: %v", terr)
+	}
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO member (id, org_id, tier_id, login_email, status, bootstrap_state) VALUES (?, ?, ?, 'hstop@t.local', 'active', 'done')`, memberID, orgID, tierID); err != nil {
+		t.Fatalf("建成员失败: %v", err)
+	}
+	tokenID := selfServeMemberToken(t, ctx, svc, store, orgID, memberID) // 初始 unlimited
+	opc := session.Claims{Role: session.RoleOperator, OrgID: orgID}
+	const A = int64(10_000_000)
+	if _, err := svc.Recharge(ctx, opc, orgID, service.RechargeInput{AmountQuota: A, TransferNo: "hs-1"}); err != nil {
+		t.Fatalf("入账失败: %v", err)
+	}
+	ndb, _ := sql.Open("mysql", newapiSQLDSN)
+	defer ndb.Close()
+	var maxLogID int64
+	_ = ndb.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM logs`).Scan(&maxLogID)
+	logTS := time.Now().Unix() - 300
+	if _, err := store.DB().ExecContext(ctx, `UPDATE settlement_cursor SET last_settled_ts=?, last_settled_log_id=? WHERE org_id=0`, logTS-1, maxLogID); err != nil {
+		t.Fatalf("置结算水位失败: %v", err)
+	}
+	const consume = int64(15_000_000) // > A → 结算后 balance ≤0
+	seedConsumptionLogTok(t, newapiSQLDSN, int64(cred.NewapiUserID), tokenID, "gpt-hs", consume, logTS)
+
+	tokUnlimRemain := func() (unlim int, remain int64) {
+		_ = ndb.QueryRowContext(ctx, `SELECT unlimited_quota, remain_quota FROM tokens WHERE id=?`, tokenID).Scan(&unlim, &remain)
+		return
+	}
+	orgStatus := func() (s string) {
+		_ = store.DB().QueryRowContext(ctx, `SELECT status FROM organization WHERE id=?`, orgID).Scan(&s)
+		return
+	}
+	if _, err := svc.RunSettlement(ctx); err != nil {
+		t.Fatalf("结算失败: %v", err)
+	}
+	if s := orgStatus(); s != model.OrgStatusStopped {
+		t.Fatalf("🔴余额耗尽应 stopped,实=%s", s)
+	}
+	unlim, remain := tokUnlimRemain()
+	if unlim != 0 || remain != 0 {
+		t.Fatalf("🔴硬停应把成员 token override→0(unlimited=0/remain=0),实 unlimited=%d/remain=%d(HIGH-1类:硬停没停到人=漏钱)", unlim, remain)
+	}
+	// 恢复:充值回正 → active → converge → 成员 token 恢复到档月额(非 0)。
+	if _, err := svc.Recharge(ctx, opc, orgID, service.RechargeInput{AmountQuota: 30_000_000, TransferNo: "hs-2"}); err != nil {
+		t.Fatalf("恢复充值失败: %v", err)
+	}
+	if s := orgStatus(); s != model.OrgStatusActive {
+		t.Fatalf("🔴充值回正应 active,实=%s", s)
+	}
+	_, remain2 := tokUnlimRemain()
+	if remain2 != ml {
+		t.Fatalf("🔴恢复应下发档月额 %d,实 remain=%d", ml, remain2)
+	}
+	t.Logf("B档#1 硬停converge→0与恢复 ok: 余额耗尽→stopped+成员token override 0(硬停停到人);充值回正→active+恢复档额 %d", ml)
+}
+
 // HIGH-1(真站审查):非 observe 周期重置/硬停经 ListActiveOverridableMembers 真下发成员 token。原查询查 member 表不存在的
 // newapi_user_id 列 → ERROR 1054 → 该下发的成员一个都下发不了=漏钱;修后按 newapi_token_id 查。去修复本用例变红。
 func TestIntegration_ResetDownlinkNonObserve(t *testing.T) {

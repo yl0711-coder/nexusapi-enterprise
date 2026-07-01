@@ -63,11 +63,6 @@ func randEmailSuffix() string {
 	return strings.ToLower(base64.RawURLEncoding.EncodeToString(b))
 }
 
-// deriveUsername 派生 new-api 侧确定性 username(10 §2.5 幂等键),保证 <=20 字符。
-func deriveUsername(orgID, memberID int64) string {
-	return fmt.Sprintf("o%dm%d", orgID, memberID)
-}
-
 // deriveOrgUsername 模型2:组织 new-api user 的确定性 username(幂等键,adopt-existing 防重复建)。
 // 与成员名(o{}m{})不撞:org 名恒带 "org" 前缀、无 'm' 段。<=20。
 func deriveOrgUsername(orgID int64) string {

@@ -60,7 +60,6 @@ func checkLoginName(val string) error {
 // 字段长度上限(对齐 09 DDL 列宽,R2-M3:超长应 400 而非落库溢出 500)。
 const (
 	maxNameLen       = 128 // name / display_name VARCHAR(128)
-	maxSlugLen       = 64  // slug VARCHAR(64)
 	maxEmailLen      = 191 // login_email VARCHAR(191)
 	maxNoteLen       = 512 // note / reason VARCHAR(512)
 	maxTransferNoLen = 128 // transfer_no 入账幂等键,与 DB 列 VARCHAR(128) 一致(T3/T16:此前注释误写 190)

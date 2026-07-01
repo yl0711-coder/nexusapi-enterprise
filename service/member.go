@@ -314,6 +314,9 @@ func (s *Service) SetKeyIPWhitelist(ctx context.Context, c session.Claims, orgID
 	if err != nil {
 		return apperr.Internal("").WithCause(err)
 	}
+	if m.Status != model.MemberStatusActive {
+		return apperr.Forbidden("成员已停用,不可操作 key") // M1:防停用后用未过期会话 token 自助绕过禁用
+	}
 	if m.BootstrapState != model.BootstrapDone || m.NewapiTokenID == nil {
 		return apperr.New(apperr.CodeInvalidParam, 409, "该成员尚无可用 key")
 	}
@@ -347,6 +350,9 @@ func (s *Service) RotateKey(ctx context.Context, c session.Claims, orgID, member
 	}
 	if err != nil {
 		return "", "", apperr.Internal("").WithCause(err)
+	}
+	if m.Status != model.MemberStatusActive {
+		return "", "", apperr.Forbidden("成员已停用,不可轮换 key") // M1:防停用后自助绕过禁用
 	}
 	if m.BootstrapState != model.BootstrapDone || m.NewapiTokenID == nil {
 		return "", "", apperr.New(apperr.CodeInvalidParam, 409, "该成员尚无可用 key,无法轮换")
@@ -570,6 +576,9 @@ func (s *Service) CreateMemberToken(ctx context.Context, c session.Claims, membe
 	}
 	if err != nil {
 		return "", "", apperr.Internal("").WithCause(err)
+	}
+	if m.Status != model.MemberStatusActive {
+		return "", "", apperr.Forbidden("成员已停用,不可建 key") // M1:防停用后用未过期会话 token 自助绕过禁用
 	}
 	// 隔离边界:所选分组必须在本企业可用模型分组内(default 天然可用)。
 	if group != "default" {

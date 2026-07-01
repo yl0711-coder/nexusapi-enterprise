@@ -278,12 +278,6 @@ func (s *Store) ListOrgTotalConsumed(ctx context.Context) (map[int64]int64, erro
 	return out, rows.Err()
 }
 
-// GetMemberByNewapiUserID 按 new-api user_id 反查成员(结算把 log 映射到成员/组织)。无 org 谓词(leader 跨租户)。
-func (s *Store) GetMemberByNewapiUserID(ctx context.Context, newapiUserID int64) (*model.Member, error) {
-	row := s.db.QueryRowContext(ctx, memberSelect+` WHERE newapi_user_id = ? AND deleted_at IS NULL`, newapiUserID)
-	return scanMember(row)
-}
-
 // OrgBillingFlags 是逐组织灰度开关。
 type OrgBillingFlags struct {
 	BillingEnabled  bool
@@ -339,10 +333,12 @@ func (s *Store) ListBillingEnabledOrgs(ctx context.Context) ([]int64, error) {
 	return out, rows.Err()
 }
 
-// ListActiveOverridableMembers 列组织内已就绪成员(bootstrap done + 有 newapi_user_id),供硬停/恢复批量 override。
+// ListActiveOverridableMembers 列组织内已就绪成员(bootstrap done + **有员工令牌 newapi_token_id**),供硬停/恢复批量 override。
+// HIGH-1 修复(真站审查):模型2 member 表无 newapi_user_id 列(已归 organization),原 WHERE 查它会 ERROR 1054;
+// 判据与 reset.go:49 / applyMemberOverride(quota.go)的 NewapiTokenID != nil 一致——有 token 才有可 override 的额度。
 func (s *Store) ListActiveOverridableMembers(ctx context.Context, orgID int64) ([]*model.Member, error) {
 	rows, err := s.db.QueryContext(ctx,
-		memberSelect+` WHERE org_id = ? AND deleted_at IS NULL AND bootstrap_state = 'done' AND newapi_user_id IS NOT NULL`, orgID)
+		memberSelect+` WHERE org_id = ? AND deleted_at IS NULL AND bootstrap_state = 'done' AND newapi_token_id IS NOT NULL`, orgID)
 	if err != nil {
 		return nil, err
 	}

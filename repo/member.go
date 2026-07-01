@@ -66,14 +66,6 @@ func (s *Store) FinalizeBootstrap(ctx context.Context, m *model.Member, tokenNam
 	})
 }
 
-// MarkBootstrapFailed 把成员标记为 bootstrap 失败(补偿后:不展示半截账号,10 §2.3)。
-func (s *Store) MarkBootstrapFailed(ctx context.Context, orgID, memberID int64) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE member SET bootstrap_state = ?, status = ? WHERE id = ? AND org_id = ?`,
-		model.BootstrapFailed, model.MemberStatusProvisioning, memberID, orgID)
-	return err
-}
-
 // MarkBootstrapFailedAndRelease 标 bootstrap 失败,并把 login_email 墓碑改写(前缀 failed-{id}-,LEFT 截到列宽 191)
 // 以释放 uk_member_org_email 占用、允许同邮箱重开(GZ-03 缺陷3)。
 // 模型2:member 不映射 new-api 用户,开通失败=员工 token 未建成——**无孤儿用户**(org user 共享、不动;残留 token 靠
@@ -242,13 +234,6 @@ func (s *Store) GetMemberNameByID(ctx context.Context, id int64) (string, error)
 		return "", nil
 	}
 	return name, err
-}
-
-// SetMemberNewapiGroup 刷新成员令牌分组快照(切档时同步,T17-1/Q2)。
-func (s *Store) SetMemberNewapiGroup(ctx context.Context, orgID, memberID int64, group *string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE member SET newapi_group = ? WHERE id = ? AND org_id = ? AND deleted_at IS NULL`, group, memberID, orgID)
-	return err
 }
 
 // GetMember 取成员,强制 org_id 谓词(跨 org → ErrNotFound)。

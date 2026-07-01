@@ -93,6 +93,25 @@ func checkName(field, val string, max int) error {
 	return nil
 }
 
+// checkText 是 note/reason/comment 等**自由文本**落库字段的二道闸(LOW-2 纵深防御)。
+// 与 checkName 不同:自由文本允许引号/反斜杠(合法内容,如 客户说"要加额度";且前端 esc() 已转义),
+// 仅挡 HTML 标签字符 < > 与控制字符(保留 \n \t)——即挡住存储型 XSS 的实际向量(<script> 等),不误伤正常备注。
+// 如需更严(连引号也挡)可改走 checkName;当前按"挡住 XSS 向量 + 不伤自由文本"取舍。
+func checkText(field, val string, max int) error {
+	if err := checkLen(field, val, max); err != nil {
+		return err
+	}
+	if strings.ContainsAny(val, "<>") {
+		return apperr.InvalidParam(field + " 含非法字符(不允许 < >)")
+	}
+	for _, r := range val {
+		if (r < 0x20 && r != '\n' && r != '\t') || r == 0x7f {
+			return apperr.InvalidParam(field + " 含控制字符")
+		}
+	}
+	return nil
+}
+
 // firstErr 返回第一个非 nil 错误。
 func firstErr(errs ...error) error {
 	for _, e := range errs {

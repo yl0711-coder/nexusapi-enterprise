@@ -43,6 +43,10 @@ func (s *Service) SubmitApproval(ctx context.Context, c session.Claims, in Submi
 		return nil, apperr.Internal("").WithCause(err)
 	}
 
+	if err := checkText("申请原因", in.Reason, maxNoteLen); err != nil { // LOW-2 二道闸
+		return nil, err
+	}
+
 	// 判定是否开新模型(模型不在当前层级模型集 → 新模型)。
 	newModel := false
 	reqType := model.ReqQuotaRaise
@@ -107,6 +111,9 @@ func (s *Service) SubmitApproval(ctx context.Context, c session.Claims, in Submi
 
 // DecideApproval 审批裁决(US-06;有权审批者批准/驳回)。乐观锁防并发重复裁决(20902)。
 func (s *Service) DecideApproval(ctx context.Context, c session.Claims, approvalID int64, approved bool, comment string) (*model.Approval, error) {
+	if err := checkText("审批意见", comment, maxNoteLen); err != nil { // LOW-2 二道闸
+		return nil, err
+	}
 	a, err := s.store.GetApproval(ctx, c.OrgID, approvalID)
 	if errors.Is(err, repo.ErrNotFound) {
 		return nil, apperr.NotFound("申请不存在")

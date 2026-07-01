@@ -232,7 +232,7 @@ func (s *Service) AdjustQuota(ctx context.Context, c session.Claims, orgID, memb
 	if in.DeltaQuota > maxAdjustQuota || in.DeltaQuota < -maxAdjustQuota {
 		return nil, apperr.InvalidParam("单次调整量超出上限")
 	}
-	if err := checkLen("原因", in.Reason, maxNoteLen); err != nil {
+	if err := checkText("原因", in.Reason, maxNoteLen); err != nil {
 		return nil, err
 	}
 	m, err := s.loadManageableMember(ctx, c, orgID, memberID)

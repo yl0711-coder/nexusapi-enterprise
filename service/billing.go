@@ -35,7 +35,7 @@ func (s *Service) Recharge(ctx context.Context, c session.Claims, orgID int64, i
 	if in.TransferNo == "" {
 		return nil, apperr.InvalidParam("缺少转账唯一号(入账幂等键)")
 	}
-	if err := firstErr(checkLen("转账唯一号", in.TransferNo, maxTransferNoLen), checkLen("备注", in.Note, maxNoteLen)); err != nil {
+	if err := firstErr(checkLen("转账唯一号", in.TransferNo, maxTransferNoLen), checkText("备注", in.Note, maxNoteLen)); err != nil {
 		return nil, err // T3:超长返 422,不落库不 500
 	}
 	if _, err := s.store.GetOrganization(ctx, orgID); errors.Is(err, repo.ErrNotFound) {
@@ -91,6 +91,9 @@ func (s *Service) DebitBalance(ctx context.Context, c session.Claims, orgID int6
 	}
 	if in.Reason == "" {
 		return nil, apperr.InvalidParam("冲正须填原因(留痕)")
+	}
+	if err := checkText("原因", in.Reason, maxNoteLen); err != nil { // LOW-2 二道闸
+		return nil, err
 	}
 	uid, _, ok, err := s.store.GetOrgNewapiCred(ctx, orgID)
 	if err != nil {
@@ -231,6 +234,9 @@ func (s *Service) RequestRecharge(ctx context.Context, c session.Claims, orgID i
 		if in.Amount > b.Balance {
 			return nil, apperr.InvalidParam("退款金额不得超过当前余额")
 		}
+	}
+	if err := checkText("备注", in.Note, maxNoteLen); err != nil { // LOW-2 二道闸
+		return nil, err
 	}
 	var note *string
 	if in.Note != "" {

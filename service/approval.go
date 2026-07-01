@@ -82,14 +82,21 @@ func (s *Service) SubmitApproval(ctx context.Context, c session.Claims, in Submi
 	}
 	a.ID = id
 
+	dispatched := false
 	if a.State == model.ApprovalAutoApprove {
 		if err := s.dispatchApproval(ctx, a, applicant); err != nil {
-			s.log.Error("自动通过下发失败(已记 auto_approved,进重试/告警)", "approval_id", id, "err", err)
+			s.log.Error("自动通过下发失败(已记 auto_approved,待重推/人工)", "approval_id", id, "err", err)
+		} else {
+			dispatched = true
 		}
-		s.notify(ctx, c.OrgID, c.MemberID, "approval_result", "申请已自动通过", fmt.Sprintf("增额 %d 已即时下发", in.Amount))
+		body := fmt.Sprintf("增额 %d 已即时下发", in.Amount)
+		if !dispatched {
+			body = fmt.Sprintf("增额 %d 下发处理中", in.Amount) // 不谎报已下发(MEDIUM-2)
+		}
+		s.notify(ctx, c.OrgID, c.MemberID, "approval_result", "申请已自动通过", body)
 	}
 	s.audit(ctx, c, c.OrgID, "submit_approval", "approval", &id, map[string]any{
-		"state": a.State, "amount": in.Amount, "model": in.Model, "level2": a.IsLevel2,
+		"state": a.State, "amount": in.Amount, "model": in.Model, "level2": a.IsLevel2, "dispatched": dispatched,
 	})
 	// 重读取真实 created_at 等(R2-M5:避免返回内存对象的 0001 脏值时间)。
 	if full, ferr := s.store.GetApproval(ctx, c.OrgID, id); ferr == nil {
@@ -167,14 +174,26 @@ func (s *Service) DecideApproval(ctx context.Context, c session.Claims, approval
 	} else if !ok {
 		return nil, apperr.New(apperr.CodeApprovalHandled, 409, "该申请已被处理")
 	}
-	applicant, err := s.store.GetMember(ctx, a.OrgID, a.ApplicantID)
-	if err == nil {
+	// MEDIUM-2(代码审查):GetMember 失败原来静默跳过 dispatch 却无条件谎报"已通过并下发"——用户以为拿到额度实际没有。
+	// 改:如实按下发结果播报 + 失败记错(状态保持 approved,待重推/人工);下发结果进审计供排障。
+	applicant, gerr := s.store.GetMember(ctx, a.OrgID, a.ApplicantID)
+	dispatched := false
+	switch {
+	case gerr != nil:
+		s.log.Error("审批通过但取申请人失败,额度未下发(状态 approved,待重推/人工)", "approval_id", approvalID, "err", gerr)
+	default:
 		if derr := s.dispatchApproval(ctx, a, applicant); derr != nil {
-			s.log.Error("审批通过下发失败(状态保持 approved,进重试/告警)", "approval_id", approvalID, "err", derr)
+			s.log.Error("审批通过下发失败(状态保持 approved,待重推/人工)", "approval_id", approvalID, "err", derr)
+		} else {
+			dispatched = true
 		}
 	}
-	s.notify(ctx, a.OrgID, a.ApplicantID, "approval_result", "申请已通过并下发", "")
-	s.audit(ctx, c, a.OrgID, "decide_approval", "approval", &approvalID, map[string]any{"approved": true, "stage": "final"})
+	msg := "申请已通过并下发"
+	if !dispatched {
+		msg = "申请已通过,额度下发处理中" // 不谎报已下发(MEDIUM-2)
+	}
+	s.notify(ctx, a.OrgID, a.ApplicantID, "approval_result", msg, "")
+	s.audit(ctx, c, a.OrgID, "decide_approval", "approval", &approvalID, map[string]any{"approved": true, "stage": "final", "dispatched": dispatched})
 	return s.store.GetApproval(ctx, c.OrgID, approvalID)
 }
 

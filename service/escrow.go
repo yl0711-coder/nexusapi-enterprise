@@ -235,22 +235,33 @@ func (s *Service) recomputeThresholdAuto(ctx context.Context, orgID int64) error
 	if err != nil {
 		return err
 	}
-	auto := escrowDefaultNew
-	if earliest.Valid && !earliest.Time.After(windowStart) { // 有 ≥7 天历史
-		raw := int64(float64(peakHourly)*escrowLead*escrowMargin) + maxSingle
-		if raw > escrowCeil {
-			s.log.Warn("escrow 超重度组织:补货点超上限被 clamp,满窗口可能撑不过一续充周期(建议缩短 worker 间隔/升级容量)",
-				"org_id", orgID, "raw", raw, "ceil", escrowCeil, "peak_hourly", peakHourly, "max_single", maxSingle)
-		}
-		auto = raw
-		if auto < escrowFloor {
-			auto = escrowFloor
-		}
-		if auto > escrowCeil {
-			auto = escrowCeil
-		}
+	hasHistory := earliest.Valid && !earliest.Time.After(windowStart) // 有 ≥7 天历史
+	auto, overCeil := computeAutoThreshold(peakHourly, maxSingle, hasHistory)
+	if overCeil {
+		s.log.Warn("escrow 超重度组织:补货点超上限被 clamp,满窗口可能撑不过一续充周期(建议缩短 worker 间隔/升级容量)",
+			"org_id", orgID, "raw", int64(float64(peakHourly)*escrowLead*escrowMargin)+maxSingle, "ceil", escrowCeil,
+			"peak_hourly", peakHourly, "max_single", maxSingle)
 	}
 	return s.store.UpsertThresholdAuto(ctx, orgID, auto)
+}
+
+// computeAutoThreshold 纯函数(涉钱·补货点,抽出供单测):由近7天用量算自动补货点。
+// hasHistory=false(历史<7天)→ DEFAULT_NEW;否则 auto = clamp(peakHourly×LEAD×MARGIN + maxSingle, FLOOR, CEIL),
+// overCeil=raw 超上限(超重度组织,调用方告警但仍 clamp 到 CEIL)。
+func computeAutoThreshold(peakHourly, maxSingle int64, hasHistory bool) (auto int64, overCeil bool) {
+	if !hasHistory {
+		return escrowDefaultNew, false
+	}
+	raw := int64(float64(peakHourly)*escrowLead*escrowMargin) + maxSingle
+	overCeil = raw > escrowCeil
+	auto = raw
+	if auto < escrowFloor {
+		auto = escrowFloor
+	}
+	if auto > escrowCeil {
+		auto = escrowCeil
+	}
+	return auto, overCeil
 }
 
 // AutoRefill 自动续充 worker tick(leader 单写者;observe 也跑——续充是池子 funding,不停员工)。

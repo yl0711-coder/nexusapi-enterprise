@@ -58,4 +58,5 @@ services:
       NEXUS_IT_NEWAPI_URL: "http://newapi:3000"
       # new-api 的库连接:测试用它建 nexus 库 + 向 newapi.logs 造 type=2 消费日志(验扣费)。
       NEXUS_IT_NEWAPI_SQL_DSN: "root:rootpw@tcp(mysql:3306)/newapi?parseTime=true&loc=UTC&charset=utf8mb4&tls=skip-verify"
-    command: ["go", "test", "./test/integration/", "-run", "Integration", "-v", "-count=1", "-timeout", "300s"]
+    # ./service/ 跑纯函数单测(TestUnit_*,无 DB/网络);./test/integration/ 跑真账集成(TestIntegration_*)。同容器一趟出。
+    command: ["go", "test", "./service/", "./test/integration/", "-run", "Integration|Unit", "-v", "-count=1", "-timeout", "300s"]

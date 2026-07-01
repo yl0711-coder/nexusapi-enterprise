@@ -184,8 +184,20 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 		final.KeyMasked = &keyMasked
 		final.KeyRotation = 1
 	}
-	if err := s.store.FinalizeBootstrap(ctx, final, finalTokenName); err != nil {
-		return nil, apperr.Internal("").WithCause(err)
+	if ferr := s.store.FinalizeBootstrap(ctx, final, finalTokenName); ferr != nil {
+		// F-A(真站联调发现):finalize 失败补偿(与 :167 CreateToken / :176 RevealTokenKey 分支对齐,原来唯独这里漏了)——
+		// 否则成员永久卡 provisioning + 刚建的 new-api 员工 token 成孤儿。补:①补偿删除孤儿 token(cred+tid 在手,回到无孤儿
+		// 干净态,option a);②MarkBootstrapFailedAndRelease(标失败+释放邮箱,允许同邮箱重开);③审计。
+		if final.NewapiTokenID != nil {
+			if derr := s.upstream.DeleteToken(ctx, cred, int(*final.NewapiTokenID)); derr != nil {
+				s.log.Error("finalize 失败补偿删除孤儿 token 失败(待对账/人工清)", "member_id", memberID, "token_id", *final.NewapiTokenID, "err", derr)
+			}
+		}
+		if merr := s.store.MarkBootstrapFailedAndRelease(ctx, orgID, memberID); merr != nil {
+			s.log.Error("finalize 失败:标记 bootstrap 失败/释放邮箱失败", "member_id", memberID, "err", merr)
+		}
+		s.audit(ctx, c, orgID, "open_member", "member", &memberID, map[string]any{"name": in.Name, "result": "finalize_failed"})
+		return nil, apperr.Internal("").WithCause(ferr)
 	}
 
 	s.audit(ctx, c, orgID, "open_member", "member", &memberID, map[string]any{

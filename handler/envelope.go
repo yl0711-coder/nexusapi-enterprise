@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/nexusapi-platform/enterprise/pkg/apperr"
@@ -61,6 +62,10 @@ func writeOK(w http.ResponseWriter, r *http.Request, status int, data any) {
 // 业务可预期失败走 200+code,只有协议/鉴权/系统级异常才用 4xx/5xx(10 §1.2)。
 func writeErr(w http.ResponseWriter, r *http.Request, err error) {
 	e := apperr.Coerce(err)
+	// OBS(真站联调):5xx 记 underlying cause + request_id,排障不必反查库(apperr 链是 DB/上游错误,不含密内容)。
+	if e.HTTPStatus >= 500 {
+		slog.Error("http 5xx", "code", e.Code, "cause", err, "request_id", requestIDFrom(r.Context()), "path", r.URL.Path)
+	}
 	writeEnvelope(w, e.HTTPStatus, Envelope{
 		Code:      e.Code,
 		Message:   e.Message,

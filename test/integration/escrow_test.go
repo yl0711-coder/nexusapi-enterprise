@@ -24,6 +24,72 @@ import (
 	"github.com/nexusapi-platform/enterprise/service"
 )
 
+// F-A/F-C(真站联调发现):OpenMember 的 FinalizeBootstrap 失败必须补偿——删孤儿 token + 标 failed + 释放邮箱,不卡 provisioning。
+// 注入:令下一个 new-api token id=nn + 预置平台 stale member_key_token 占用 uk_key_token_newapi=nn(复现真站 reset 脏库),
+// OpenMember 建 token 得 nn → finalize 插 member_key_token(nn) 撞 uk 真报错(insertKeyTokenTx 是普通 INSERT 非 IGNORE)。
+// 去掉 F-A 补偿则本用例变红(member 卡 provisioning + 孤儿 token active)。
+func TestIntegration_OpenMemberFinalizeCompensation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	svc, store, _, _ := escrowSvc(t, ctx, "nexus_fin")
+	newapiSQLDSN := os.Getenv("NEXUS_IT_NEWAPI_SQL_DSN")
+	const orgID = int64(601)
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'fin-org', 'fin-slug')`, orgID); err != nil {
+		t.Fatalf("建组织失败: %v", err)
+	}
+	if _, err := svc.EnsureOrgProvisioned(ctx, orgID, "fin-org"); err != nil {
+		t.Fatalf("开通失败: %v", err)
+	}
+	tierID, terr := store.CreateTier(ctx, &model.Tier{OrgID: orgID, Name: "fin-tier"})
+	if terr != nil {
+		t.Fatalf("建档失败: %v", terr)
+	}
+
+	ndb, err := sql.Open("mysql", newapiSQLDSN)
+	if err != nil {
+		t.Fatalf("连 newapi 库失败: %v", err)
+	}
+	defer ndb.Close()
+	var maxTok int64
+	_ = ndb.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM tokens`).Scan(&maxTok)
+	nn := maxTok + 100
+	if _, err := ndb.ExecContext(ctx, fmt.Sprintf("ALTER TABLE tokens AUTO_INCREMENT = %d", nn)); err != nil {
+		t.Fatalf("置 tokens auto_increment 失败: %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx,
+		`INSERT INTO member_key_token (key_id, org_id, member_id, newapi_token_id, token_name, is_current, rotation, status)
+		 VALUES (999, ?, 999, ?, 'stale', 1, 0, 'active')`, orgID, nn); err != nil {
+		t.Fatalf("预置 stale key_token 失败: %v", err)
+	}
+
+	admin := session.Claims{Role: session.RoleOrgAdmin, OrgID: orgID, MemberID: 999}
+	if _, oerr := svc.OpenMember(ctx, admin, orgID, service.OpenMemberInput{Name: "钱一", Email: "fin@t.local", TierID: &tierID}); oerr == nil {
+		t.Fatalf("🔴注入 finalize 失败(uk 撞 %d)应报错,实成功——注入未生效", nn)
+	}
+	// ① 成员不卡 provisioning:bootstrap_state=failed + 邮箱释放(failed- 前缀)。
+	var bs, email string
+	if err := store.DB().QueryRowContext(ctx, `SELECT bootstrap_state, login_email FROM member WHERE org_id=? ORDER BY id DESC LIMIT 1`, orgID).Scan(&bs, &email); err != nil {
+		t.Fatalf("查成员失败: %v", err)
+	}
+	if bs != model.BootstrapFailed {
+		t.Fatalf("🔴finalize 失败后 bootstrap_state 应=failed(不卡 provisioning),实=%s", bs)
+	}
+	if !strings.HasPrefix(email, "failed-") {
+		t.Fatalf("🔴finalize 失败应释放邮箱(failed- 前缀),实=%s", email)
+	}
+	// ② 无孤儿:补偿删除 new-api token nn(不再 active)。
+	var live int
+	_ = ndb.QueryRowContext(ctx, `SELECT COUNT(*) FROM tokens WHERE id=? AND deleted_at IS NULL`, nn).Scan(&live)
+	if live != 0 {
+		t.Fatalf("🔴finalize 失败应补偿删除孤儿 token,实 new-api 仍有 active token id=%d", nn)
+	}
+	// ③ 同邮箱可重开成功(邮箱已释放;新 token 得 nn+1 不撞)。
+	if _, rerr := svc.OpenMember(ctx, admin, orgID, service.OpenMemberInput{Name: "钱一", Email: "fin@t.local", TierID: &tierID}); rerr != nil {
+		t.Fatalf("🔴释放邮箱后同邮箱应可重开,实错: %v", rerr)
+	}
+	t.Logf("F-A/F-C 真账 ok: finalize 失败(uk 撞 nn=%d)→补偿删孤儿 token(不再active)+标 bootstrap_state=failed+释放邮箱→同邮箱重开成功", nn)
+}
+
 // 步骤5:401 自愈——破坏 org access_token → token 操作 401 → EnsureFreshCred 重登刷新 → 重试成功。
 func TestIntegration_CredSelfHeal401(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

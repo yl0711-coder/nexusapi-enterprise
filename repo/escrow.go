@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	"github.com/nexusapi-platform/enterprise/model"
 )
@@ -91,6 +92,102 @@ func (s *Store) MaxEscrowSeqTx(ctx context.Context, x dbtx, orgID int64) (int, e
 		return 0, err
 	}
 	return int(seq.Int64), nil
+}
+
+// GetEscrowConfig 读组织续充阈值配置(0021);无行 → ErrNotFound(调用方用 DEFAULT_NEW 兜底)。
+func (s *Store) GetEscrowConfig(ctx context.Context, orgID int64) (*model.OrgEscrowConfig, error) {
+	var c model.OrgEscrowConfig
+	err := s.db.QueryRowContext(ctx,
+		`SELECT org_id, threshold_auto, threshold_manual_override, updated_at FROM org_escrow_config WHERE org_id = ?`, orgID).
+		Scan(&c.OrgID, &c.ThresholdAuto, &c.ThresholdManualOverride, &c.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// UpsertThresholdAuto 写每天重算的自动阈值(不动手动覆盖)。
+func (s *Store) UpsertThresholdAuto(ctx context.Context, orgID, auto int64) error {
+	// 强制 bump updated_at(即使 threshold_auto 值不变),供"每天重算"的陈旧判定;否则值不变时 updated_at 不动→每 tick 重算。
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO org_escrow_config (org_id, threshold_auto) VALUES (?, ?)
+		 ON DUPLICATE KEY UPDATE threshold_auto = VALUES(threshold_auto), updated_at = CURRENT_TIMESTAMP(3)`, orgID, auto)
+	return err
+}
+
+// SetThresholdOverride 运维手动覆盖阈值(nil=清除覆盖回落自动值)。
+func (s *Store) SetThresholdOverride(ctx context.Context, orgID int64, override *int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO org_escrow_config (org_id, threshold_manual_override) VALUES (?, ?)
+		 ON DUPLICATE KEY UPDATE threshold_manual_override = VALUES(threshold_manual_override)`, orgID, override)
+	return err
+}
+
+// EscrowUsageStats 近 windowStart 起的补货点输入:peakHourly=某小时最大 Σconsumed_quota、maxSingle=单笔最大;
+// earliest=组织全期最早日志时刻(判"历史<7天"用)。无数据 → earliest 无效。
+func (s *Store) EscrowUsageStats(ctx context.Context, orgID int64, windowStart time.Time) (peakHourly, maxSingle int64, earliest sql.NullTime, err error) {
+	var ph, ms sql.NullInt64
+	if e := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(h),0), COALESCE(MAX(m),0) FROM (
+		    SELECT SUM(consumed_quota) AS h, MAX(consumed_quota) AS m
+		    FROM usage_detail WHERE org_id = ? AND log_ts >= ?
+		    GROUP BY FLOOR(UNIX_TIMESTAMP(log_ts)/3600)
+		 ) t`, orgID, windowStart).Scan(&ph, &ms); e != nil {
+		return 0, 0, sql.NullTime{}, e
+	}
+	if e := s.db.QueryRowContext(ctx,
+		`SELECT MIN(log_ts) FROM usage_detail WHERE org_id = ?`, orgID).Scan(&earliest); e != nil {
+		return 0, 0, sql.NullTime{}, e
+	}
+	return ph.Int64, ms.Int64, earliest, nil
+}
+
+// MergeHoldingIntoActiveTx 在调用方事务上把托管桶 FIFO 并入桶1,合计最多 maxMerge;返回实并入额。
+// 自动/手工续充共用:补窗口到上限(maxMerge=上限−窗口)。无 active 桶或无托管 → 0。
+func (s *Store) MergeHoldingIntoActiveTx(ctx context.Context, x dbtx, orgID, maxMerge int64) (int64, error) {
+	if maxMerge <= 0 {
+		return 0, nil
+	}
+	active, aerr := s.GetActiveEscrowBucketTx(ctx, x, orgID)
+	if errors.Is(aerr, ErrNotFound) {
+		return 0, nil // 无窗口桶可并入
+	}
+	if aerr != nil {
+		return 0, aerr
+	}
+	remaining := maxMerge
+	var merged int64
+	for remaining > 0 {
+		h, herr := s.NextHoldingBucketTx(ctx, x, orgID)
+		if errors.Is(herr, ErrNotFound) {
+			break
+		}
+		if herr != nil {
+			return 0, herr
+		}
+		take := h.Amount
+		if take > remaining {
+			take = remaining
+		}
+		if take >= h.Amount {
+			if e := s.UpdateEscrowBucketTx(ctx, x, h.ID, 0, model.EscrowMerged); e != nil {
+				return 0, e
+			}
+		} else if e := s.UpdateEscrowBucketTx(ctx, x, h.ID, h.Amount-take, model.EscrowHolding); e != nil {
+			return 0, e
+		}
+		merged += take
+		remaining -= take
+	}
+	if merged > 0 {
+		if e := s.UpdateEscrowBucketTx(ctx, x, active.ID, active.Amount+merged, model.EscrowActive); e != nil {
+			return 0, e
+		}
+	}
+	return merged, nil
 }
 
 // SumOrgConsumed Σ 组织累计已消费(usage_ledger,bigint)。escrow 对账用**我方账本**算已消费——

@@ -93,6 +93,22 @@ type OrgUnit struct {
 	DeletedAt *time.Time
 }
 
+// OrgEscrowConfig 对应 org_escrow_config 表(0021)。生效阈值=COALESCE(ThresholdManualOverride, ThresholdAuto)。
+type OrgEscrowConfig struct {
+	OrgID                 int64
+	ThresholdAuto         int64  // 每天按近7天补货点重算
+	ThresholdManualOverride *int64 // 运维手动定(优先);nil=用 auto
+	UpdatedAt             time.Time
+}
+
+// EffectiveThreshold 生效续充阈值:手动覆盖优先,否则自动值。
+func (c *OrgEscrowConfig) EffectiveThreshold() int64 {
+	if c.ThresholdManualOverride != nil {
+		return *c.ThresholdManualOverride
+	}
+	return c.ThresholdAuto
+}
+
 // EscrowBucket 对应 escrow_bucket 表(模型2,0020)。Seq=1/Active=镜像进 user.quota 的可花窗口,其余托管。
 type EscrowBucket struct {
 	ID        int64

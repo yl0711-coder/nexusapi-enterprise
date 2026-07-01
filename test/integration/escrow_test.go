@@ -218,6 +218,57 @@ func TestIntegration_ProvisionConcurrency(t *testing.T) {
 	t.Logf("OBS-3 并发首开真账 ok: %d 并发 → 单一 org user(#%d)+ 落库 access_token 有效(建 token 成功)", N, uid0)
 }
 
+// 步骤3:自动续充 worker——窗口 < 阈值触发,从托管补窗口到上限(与手工同锁同原子路径)。
+func TestIntegration_AutoRefill(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	svc, store, upstream := escrowSvc(t, ctx, "nexus_arf")
+	const orgID = int64(301)
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'arf-org', 'arf-slug')`, orgID); err != nil {
+		t.Fatalf("建组织失败: %v", err)
+	}
+	opc := session.Claims{Role: session.RoleOperator, OrgID: orgID}
+	cred, err := svc.EnsureOrgProvisioned(ctx, orgID, "arf-org")
+	if err != nil {
+		t.Fatalf("开通失败: %v", err)
+	}
+	// 入账 3e9:窗口填到上限 2e9,余 1e9 入托管。
+	const R = int64(3_000_000_000)
+	if _, err := svc.Recharge(ctx, opc, orgID, service.RechargeInput{AmountQuota: R, TransferNo: "ar-1"}); err != nil {
+		t.Fatalf("入账失败: %v", err)
+	}
+	w0, _ := upstream.GetUserQuota(ctx, cred.NewapiUserID)
+	balBefore, _ := svc.GetDerivedBalance(ctx, opc, orgID)
+	if balBefore.HoldingQuota <= 0 {
+		t.Fatalf("入账溢出应有托管,实 holding=%d(窗口 %d)", balBefore.HoldingQuota, w0)
+	}
+	// 模拟消费把窗口降到阈值(DEFAULT_NEW 5e7)以下 → 触发自动续充。
+	consume := w0 - int64(10_000_000)
+	if err := upstream.ManageUserQuota(ctx, cred.NewapiUserID, newapi.QuotaSubtract, consume); err != nil {
+		t.Fatalf("模拟消费失败: %v", err)
+	}
+	wLow, _ := upstream.GetUserQuota(ctx, cred.NewapiUserID)
+
+	if err := svc.AutoRefill(ctx); err != nil { // worker 一 tick(内部重算阈值+触发续充)
+		t.Fatalf("自动续充失败: %v", err)
+	}
+	wAfter, _ := upstream.GetUserQuota(ctx, cred.NewapiUserID)
+	balAfter, _ := svc.GetDerivedBalance(ctx, opc, orgID)
+	merged := wAfter - wLow
+	if merged <= 0 {
+		t.Fatalf("🔴自动续充未补窗口:窗口 %d→%d(阈值 5e7,窗口低于阈值应触发)", wLow, wAfter)
+	}
+	if balBefore.HoldingQuota-balAfter.HoldingQuota != merged { // 补入额==托管减少额(守恒)
+		t.Fatalf("🔴自动续充守恒破:托管减 %d 应=窗口补入 %d", balBefore.HoldingQuota-balAfter.HoldingQuota, merged)
+	}
+	if wAfter > escrowWindowCapTest {
+		t.Fatalf("🔴自动续充后窗口超上限:%d", wAfter)
+	}
+	t.Logf("步骤3 自动续充真账 ok: 窗口降到 %d<阈值 → 从托管并入 %d 补窗口到 %d(托管 %d→%d),补入额==托管减少额", wLow, merged, wAfter, balBefore.HoldingQuota, balAfter.HoldingQuota)
+}
+
+const escrowWindowCapTest = int64(2_000_000_000)
+
 func TestIntegration_EscrowRecharge(t *testing.T) {
 	dsn := os.Getenv("NEXUS_IT_DSN")
 	newapiURL := os.Getenv("NEXUS_IT_NEWAPI_URL")

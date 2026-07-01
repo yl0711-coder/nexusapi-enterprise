@@ -64,5 +64,10 @@ func (w *QuotaWorker) tick(ctx context.Context) {
 	} else if rn > 0 {
 		w.log.Info("quota-worker 周期重置", "members", rn)
 	}
+	// 模型2 R5后:自动续充(托管→窗口,补货点触发)。leader 单写者;observe 也跑(池子 funding 不停员工)。
+	// 阈值每天懒重算,窗口<阈值即补满;手工 RefillWindow 走同锁同原子路径(应急 override)。
+	if aerr := w.svc.AutoRefill(c); aerr != nil {
+		w.log.Error("quota-worker 自动续充失败", "err", aerr)
+	}
 	// 模型2:已移除 orphan 用户扫描(member 不映射 newapi user,无孤儿用户;残留 token 靠确定性名重开自愈)。
 }

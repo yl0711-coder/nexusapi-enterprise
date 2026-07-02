@@ -11,6 +11,37 @@ import (
 	"github.com/nexusapi-platform/enterprise/model"
 )
 
+// A4(五路复测):门B 导入令牌名清洗——剥危险字符 + rune 安全截断(不切碎多字节)。
+func TestUnit_SanitizeExternalName(t *testing.T) {
+	if got := sanitizeExternalName(`<img onerror=x>张三`); got != "img onerror=x张三" {
+		t.Fatalf("应剥 <>,得 %q", got)
+	}
+	if got := sanitizeExternalName("'; DROP TABLE users;--"); strings.ContainsAny(got, "<>\"'`\\") {
+		t.Fatalf("应剥引号/反斜杠,得 %q", got)
+	}
+	if got := sanitizeExternalName("a\x00b`c"); got != "abc" {
+		t.Fatalf("应剥控制字符与反引号,得 %q", got)
+	}
+	// rune 安全截断:全中文名超上限,截后仍是合法 UTF-8(不出现半个字符)。
+	long := strings.Repeat("超", maxNameLen+5)
+	got := sanitizeExternalName(long)
+	if r := []rune(got); len(r) != maxNameLen {
+		t.Fatalf("应按 rune 截到 %d 字符,得 %d", maxNameLen, len(r))
+	}
+	if !utf8ValidString(got) {
+		t.Fatalf("截断后应仍是合法 UTF-8(不切碎 rune),得 %q", got)
+	}
+}
+
+func utf8ValidString(s string) bool {
+	for _, r := range s {
+		if r == 0xFFFD { // RuneError:出现即说明有非法字节序列
+			return false
+		}
+	}
+	return true
+}
+
 func TestUnit_ComputeAutoThreshold(t *testing.T) {
 	// 历史<7天 → DEFAULT_NEW,不 overCeil。
 	if got, over := computeAutoThreshold(999, 999, false); got != escrowDefaultNew || over {

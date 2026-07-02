@@ -124,8 +124,10 @@ func sanitizeExternalName(val string) string {
 		b.WriteRune(r)
 	}
 	out := strings.TrimSpace(b.String())
-	if len(out) > maxNameLen {
-		out = out[:maxNameLen]
+	// 按 rune 安全截断(五路复测 A4-LOW):maxNameLen 是字符/列宽口径,直接 out[:maxNameLen] 会在多字节 rune
+	// 中间切断产生半个乱码字符。改按 rune 数截,不切碎(截断本身在黑盒真实流程够不到,纯纵深)。
+	if r := []rune(out); len(r) > maxNameLen {
+		out = string(r[:maxNameLen])
 	}
 	return out
 }

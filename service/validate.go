@@ -112,6 +112,24 @@ func checkText(field, val string, max int) error {
 	return nil
 }
 
+// sanitizeExternalName 清洗**外部数据**名(A4:门B 导入的 new-api 令牌名)——与 checkName 黑名单等价,
+// 但对不合法字符**剔除**而非硬拒(外部数据不该因命名让导入失败):去掉 < > " ' ` \ 与控制字符,再截断到列宽。
+// 全被剔光/本就为空 → 返 ""(调用方回落随机名)。
+func sanitizeExternalName(val string) string {
+	var b strings.Builder
+	for _, r := range val {
+		if strings.ContainsRune("<>\"'`\\", r) || r < 0x20 || r == 0x7f {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	out := strings.TrimSpace(b.String())
+	if len(out) > maxNameLen {
+		out = out[:maxNameLen]
+	}
+	return out
+}
+
 // firstErr 返回第一个非 nil 错误。
 func firstErr(errs ...error) error {
 	for _, e := range errs {

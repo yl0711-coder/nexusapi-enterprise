@@ -358,7 +358,6 @@ async function enterOrg(id, name) {
         ? `<button class="btn pri" onclick="doHardStop(${id},false)">解除硬停</button>`
         : `<button class="btn danger" onclick="confirmHardStop(${id})">硬停(风控)</button>`}
       ${org.newapi_created_by_platform === false ? `<button class="btn" onclick="doReimport(${id})">重新导入令牌</button>` : ""}
-      <button class="btn" onclick="openDiscount(${id})">配置折扣</button>
       <button class="btn" onclick="openSupport(${id})">支持会话</button>
     </div>
     <div class="panel"><div class="ph">成员</div><div class="pb"><table><tbody>${rows || '<tr><td class="empty">暂无成员</td></tr>'}</tbody></table></div></div>`;

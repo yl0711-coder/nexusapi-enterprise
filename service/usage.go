@@ -300,10 +300,25 @@ func (s *Service) aggregateUsage(ctx context.Context, sinceHours int, orgFilter 
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)
 	}
+	// A1(五路验收):调用次数 = usage_detail 底层请求数(每请求一行),绝非 ledger 桶行数(N 次会报成 1)。
+	// team/member 视图按已聚合出的成员集限定 count(与 quota 口径一致);usage_detail 90 天保留,更早窗口 count 缺省 0。
+	var cntMemberIDs []int64
+	if teamFilter != nil || memberFilter != nil {
+		for mid := range byMemberQ {
+			cntMemberIDs = append(cntMemberIDs, mid)
+		}
+		if memberFilter != nil {
+			cntMemberIDs = append(cntMemberIDs, *memberFilter)
+		}
+	}
+	cntModel, cntMember, cerr := s.store.CountUsageDetailByDim(ctx, *orgFilter, since, cntMemberIDs)
+	if cerr != nil {
+		return nil, apperr.Internal("").WithCause(cerr)
+	}
 	byModel := map[string]*UsageBucket{}
 	var total int64
 	for m, q := range byModelQ {
-		byModel[m] = &UsageBucket{Key: m, ConsumedQuota: q, Count: 1}
+		byModel[m] = &UsageBucket{Key: m, ConsumedQuota: q, Count: int(cntModel[m])}
 		total += q
 	}
 	rep.TotalQuota = total
@@ -314,7 +329,7 @@ func (s *Service) aggregateUsage(ctx context.Context, sinceHours int, orgFilter 
 		byMember := map[string]*UsageBucket{}
 		byTeam := map[int64]int64{}
 		for mid, q := range byMemberQ {
-			b := &UsageBucket{Key: itoa(mid), ConsumedQuota: q, Count: 1, MemberID: mid}
+			b := &UsageBucket{Key: itoa(mid), ConsumedQuota: q, Count: int(cntMember[mid]), MemberID: mid}
 			teamKey := int64(0) // 0=未分组,保证 Σby_team == Σby_member
 			if m, merr := s.store.GetMember(ctx, *orgFilter, mid); merr == nil {
 				if m.DisplayName != nil && *m.DisplayName != "" {

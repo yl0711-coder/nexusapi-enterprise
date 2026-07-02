@@ -104,6 +104,43 @@ func (s *Store) InsertUsageDetailTx(ctx context.Context, x dbtx, rows []DetailRo
 	return nil
 }
 
+// CountUsageDetailByDim A1(五路验收):报表"调用次数"按**底层请求数**聚合(usage_detail 每请求一行),
+// 绝不用 ledger 小时桶行数当次数(那会把 N 次调用报成 1)。返回 model→count 与 member→count。
+// memberIDs 非空 = 限定成员集(团队/单成员视图);nil = 全组织。窗口超 90 天保留期的部分 count 缺省 0(detail 已清)。
+func (s *Store) CountUsageDetailByDim(ctx context.Context, orgID int64, since time.Time, memberIDs []int64) (map[string]int64, map[int64]int64, error) {
+	var sb strings.Builder
+	sb.WriteString(`SELECT model_name, member_id, COUNT(*) FROM usage_detail WHERE org_id = ? AND log_ts >= ?`)
+	args := []any{orgID, since}
+	if len(memberIDs) > 0 {
+		sb.WriteString(` AND member_id IN (`)
+		for i, id := range memberIDs {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString("?")
+			args = append(args, id)
+		}
+		sb.WriteString(`)`)
+	}
+	sb.WriteString(` GROUP BY model_name, member_id`)
+	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	byModel, byMember := map[string]int64{}, map[int64]int64{}
+	for rows.Next() {
+		var model string
+		var mid, n int64
+		if err := rows.Scan(&model, &mid, &n); err != nil {
+			return nil, nil, err
+		}
+		byModel[model] += n
+		byMember[mid] += n
+	}
+	return byModel, byMember, rows.Err()
+}
+
 // FilterExistingDetailLogIDs M3 补漏扫描(20-§6):批量查哪些 newapi_log_id 已入 usage_detail。
 // 重扫 overlap 区间时,已落过明细的行跳过(ledger 桶是累加、非按行幂等,靠这个查重防重复计入)。
 func (s *Store) FilterExistingDetailLogIDs(ctx context.Context, logIDs []int64) (map[int64]bool, error) {

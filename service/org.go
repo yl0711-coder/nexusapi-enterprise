@@ -219,7 +219,9 @@ func (s *Service) importOrgTokens(ctx context.Context, orgID int64, cred newapi.
 		} else if found {
 			continue // 已导入(幂等重跑)
 		}
-		name := t.Name
+		// A4(五路验收 WB-1):导入的 new-api 令牌名是**外部数据**,须过与 checkName 等价的清洗(挡 <>"'`\+控制字符+截断),
+		// 防存储型 XSS(其它命名路径都走 checkName,唯独导入直存);对外部数据用清洗而非硬拒(不因企业令牌名带特殊字符就导入失败)。
+		name := sanitizeExternalName(t.Name)
 		if namePolicy == "random" || name == "" {
 			name = "成员-" + randEmailSuffix()
 		}

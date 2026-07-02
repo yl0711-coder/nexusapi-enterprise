@@ -130,16 +130,33 @@ func TestIntegration_ReportAllOrgs(t *testing.T) {
 	if _, err := store.DB().ExecContext(ctx, `UPDATE settlement_cursor SET last_settled_ts=?, last_settled_log_id=? WHERE org_id=0`, logTS-1, maxLogID); err != nil {
 		t.Fatalf("置结算水位失败: %v", err)
 	}
-	seedConsumptionLogTok(t, newapiSQLDSN, int64(cred.NewapiUserID), tokenID, "gpt-rpt", 5_000_000, logTS)
+	// A1(五路验收):成员令牌造**3 条**同小时桶日志(合 1 个 ledger 桶)——验"调用次数=底层请求数 3"非"ledger 行数 1"。
+	seedConsumptionLogTok(t, newapiSQLDSN, int64(cred.NewapiUserID), tokenID, "gpt-rpt", 2_000_000, logTS)
+	seedConsumptionLogTok(t, newapiSQLDSN, int64(cred.NewapiUserID), tokenID, "gpt-rpt", 2_000_000, logTS+1)
+	seedConsumptionLogTok(t, newapiSQLDSN, int64(cred.NewapiUserID), tokenID, "gpt-rpt", 1_000_000, logTS+2)
 	seedConsumptionLogTok(t, newapiSQLDSN, int64(cred.NewapiUserID), int64(extTokID), "gpt-rpt", 3_000_000, logTS)
 
 	if _, err := svc.RunSettlement(ctx); err != nil {
 		t.Fatalf("同步失败: %v", err)
 	}
+	// A1 断言:报表按成员的"调用次数"= usage_detail 底层请求数(3),不是 ledger 桶行数(1)。
+	rep, uerr := svc.OrgUsage(ctx, session.Claims{Role: session.RoleOrgAdmin, OrgID: orgID, MemberID: 999}, orgID, 24)
+	if uerr != nil {
+		t.Fatalf("读用量报表失败: %v", uerr)
+	}
+	var memCount int
+	for _, b := range rep.ByMember {
+		if b.MemberID == memberID {
+			memCount = b.Count
+		}
+	}
+	if memCount != 3 {
+		t.Fatalf("🔴A1:成员调用次数应=底层请求数 3(3 条同桶日志),实=%d(1=错用 ledger 行数)", memCount)
+	}
 	var memberQ, unknownQ int64
 	_ = store.DB().QueryRowContext(ctx, `SELECT COALESCE(SUM(consumed_quota),0) FROM usage_ledger WHERE org_id=? AND member_id=?`, orgID, memberID).Scan(&memberQ)
 	_ = store.DB().QueryRowContext(ctx, `SELECT COALESCE(SUM(consumed_quota),0) FROM usage_ledger WHERE org_id=? AND member_id=0`, orgID).Scan(&unknownQ)
-	if memberQ != 5_000_000 {
+	if memberQ != 5_000_000 { // 2M+2M+1M 合桶
 		t.Fatalf("🔴裁定B:billing 关的组织报表应有数据(成员 5000000),实=%d", memberQ)
 	}
 	if unknownQ != 3_000_000 {
@@ -149,7 +166,7 @@ func TestIntegration_ReportAllOrgs(t *testing.T) {
 	if memberQ+unknownQ != 8_000_000 {
 		t.Fatalf("🔴报表总额应==消费日志求和 8000000,实=%d", memberQ+unknownQ)
 	}
-	t.Logf("裁定B+M4 真账 ok: billing 关组织照落账(5000000)+企业自建令牌归未知桶(3000000)不丢行,总额==日志求和")
+	t.Logf("裁定B+M4+A1 真账 ok: billing 关组织照落账(成员5000000/3次调用)+企业自建令牌归未知桶(3000000)不丢行;调用次数=底层请求数非桶行数")
 }
 
 // 门B(20-§8):role 闸拒 admin;user_id 不符拒;关联成功导入令牌;重复关联拒;

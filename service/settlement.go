@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/nexusapi-platform/enterprise/adapter/newapi"
 	"github.com/nexusapi-platform/enterprise/model"
 	"github.com/nexusapi-platform/enterprise/pkg/apperr"
 	"github.com/nexusapi-platform/enterprise/repo"
@@ -21,6 +22,11 @@ const settlementLagSec int64 = 5
 
 // settlementMaxPages 单次结算最多读多少页(每页 100),界住窗口、绝不全表(05 §1.1)。
 const settlementMaxPages = 20
+
+// M3 补漏扫描(20-§6):lag 只挡"提交延迟 < lag"的行;超 lag 的迟提交行(DB 顿一下/长事务)id 高水位当轮没看见、
+// 时间窗又推过去了 → 不补扫即永久漏。每轮重扫 since 前 overlap 秒,已入 usage_detail 的查重跳过(幂等)。
+const settlementRescanOverlapSec int64 = 600 // 补扫回看窗口:提交延迟 >10min 视为病态(告警级),不再追
+const settlementRescanMaxPages = 5           // 补扫页上限(区间正常几乎空;超限=部分补扫+告警,下轮随 since 滑动续扫)
 
 // bucketAgg 是一个 (org,user,key,model,小时桶) 的聚合累加。
 // keyID(v2 M0-S2):日志 token_id 映射回的平台稳定 key_id(0=未归因)。
@@ -41,6 +47,90 @@ type tokenAttr struct {
 	keyID  int64
 }
 
+// settleSink 结算聚合槽:补漏(1a)与主窗口(1b)两阶段共用的聚合结果与查询缓存。
+type settleSink struct {
+	aggs          map[string]*bucketAgg
+	details       []repo.DetailRow // 逐条明细(幂等键=newapi_log_id),与 ledger 同事务落
+	flagCache     map[int64]bool   // orgID -> billing_enabled(只闸扣余额一步,裁定B)
+	attrCache     map[int64]tokenAttr
+	orgByUser     map[int64]int64 // newapi user_id -> 平台 org id(0=非平台组织;共用实例,主站客户日志按此跳过)
+	orphanAlerted map[int64]bool  // token_id -> 已告警(每个孤儿令牌每轮只告警一次)
+}
+
+// ingestEntry 归因并聚合一条消费日志(M4 时点归因,20-§6):
+//   - 平台成员 token → 归原持有成员(member_key_token append-only + member 不过滤软删 → 轮换/离职后历史不串不丢);
+//   - 非成员 token 但 user 属平台组织 → **未知桶**(member_id=0,不丢行——门B 企业在 new-api 侧自建的令牌也在
+//     花组织的钱,报表总额必须与消费日志对得上,19-F5);
+//   - user 非平台组织(共用生产实例,主站普通客户的日志同在 logs 表)→ 跳过。
+func (s *Service) ingestEntry(ctx context.Context, sk *settleSink, e newapi.LogEntry) error {
+	att, cached := sk.attrCache[e.TokenID]
+	if !cached {
+		mm, kid, found, aerr := s.store.GetMemberByNewapiTokenID(ctx, e.TokenID)
+		if aerr != nil {
+			return apperr.Internal("").WithCause(aerr) // DB 错,非上游故障(P1-3:勿误走 mapUpstream)
+		}
+		att = tokenAttr{found: found, member: mm, keyID: kid}
+		sk.attrCache[e.TokenID] = att
+	}
+	var m *model.Member
+	var keyID int64
+	if att.found {
+		m, keyID = att.member, att.keyID
+		// GZ-03:开通失败的成员令牌仍在消费 = 孤儿消费。告警使漏扣"可发现",仍正常聚合(money 不漏)。
+		if m.BootstrapState == model.BootstrapFailed && !sk.orphanAlerted[e.TokenID] {
+			sk.orphanAlerted[e.TokenID] = true
+			s.log.Error("孤儿消费告警:开通失败的成员令牌仍在产生消费(需核 new-api)",
+				"member_id", m.ID, "org_id", m.OrgID, "token_id", e.TokenID, "model", e.ModelName)
+			s.auditSystem(ctx, m.OrgID, "orphan_consumption", "member", &m.ID, map[string]any{
+				"token_id": e.TokenID, "model": e.ModelName,
+			}, "alert")
+		}
+	} else {
+		orgID, ok := sk.orgByUser[int64(e.UserID)]
+		if !ok {
+			id, found, oerr := s.store.GetOrgIDByNewapiUserID(ctx, int64(e.UserID))
+			if oerr != nil {
+				return apperr.Internal("").WithCause(oerr)
+			}
+			if !found {
+				id = 0
+			}
+			orgID = id
+			sk.orgByUser[int64(e.UserID)] = id
+		}
+		if orgID == 0 {
+			return nil // 非平台组织(主站客户),跳过
+		}
+		m, keyID = &model.Member{ID: 0, OrgID: orgID}, 0 // M4 未知桶:member_id=0(前端显示"未归因")
+	}
+	// v1 裁定B(20-§2.1):落账与 billing_enabled 解耦(全组织落账);flag 只闸事务内扣余额一步。
+	if _, ok := sk.flagCache[m.OrgID]; !ok {
+		f, ferr := s.store.GetOrgBillingFlags(ctx, m.OrgID)
+		if ferr != nil {
+			return ferr
+		}
+		sk.flagCache[m.OrgID] = f.BillingEnabled
+	}
+	bkt := hourBucket(e.CreatedAt)
+	key := fmt.Sprintf("%d|%d|%d|%s|%d", m.OrgID, e.UserID, keyID, e.ModelName, bkt.Unix())
+	a := sk.aggs[key]
+	if a == nil {
+		a = &bucketAgg{orgID: m.OrgID, memberID: m.ID, newapiUserID: int64(e.UserID), keyID: keyID, teamID: m.TeamID, model: e.ModelName, bucket: bkt}
+		sk.aggs[key] = a
+	}
+	a.consumed += e.Quota
+	if e.CreatedAt > a.maxTS {
+		a.maxTS = e.CreatedAt
+	}
+	sk.details = append(sk.details, repo.DetailRow{
+		OrgID: m.OrgID, MemberID: m.ID, NewapiUserID: int64(e.UserID), KeyID: keyID, TeamID: m.TeamID,
+		ModelName: e.ModelName, NewapiLogID: e.ID,
+		PromptTokens: e.PromptTokens, CompletionTokens: e.CompletionTokens, ConsumedQuota: e.Quota,
+		LogTS: time.Unix(e.CreatedAt, 0).UTC(),
+	})
+	return nil
+}
+
 // RunSettlement 是计费结算的单次扫描(leader 单写者,03 §3.1 / GZ-01 原子化版):
 // 选一个不超限的时间子窗口(路径B,永不截断少收)→ 读 new-api 消费 logs 按 (org,user,model,小时桶) 聚合 →
 // 在一个事务里原子提交:usage_ledger 落账 + 扣对应组织 company_balance(乐观锁,FOR UPDATE)+ 推进水位;
@@ -52,6 +142,22 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 	cur, err := s.store.GetOrCreateCursor(ctx, 0) // org_id=0 全局 leader 水位
 	if err != nil {
 		return 0, err
+	}
+	// M3 首跑基线(20-§6/19-F5):v1 从接入时点起观测、不回填历史——共用生产实例,历史日志绝大多数是主站
+	// 普通客户的,全量回扫又慢又无用(还会经 API 翻几个月的页)。首跑(ts=0)只把水位推到 now−lag,下轮起增量。
+	if cur.LastSettledTS == 0 {
+		base := s.now().Unix() - settlementLagSec
+		return 0, s.store.WithTx(ctx, func(tx *sql.Tx) error {
+			ok, aerr := s.store.AdvanceCursorTx(ctx, tx, 0, base, 0, cur.Version)
+			if aerr != nil {
+				return aerr
+			}
+			if !ok {
+				return errConcurrentSettlement
+			}
+			s.log.Info("结算首跑基线:水位置为接入时点,不回填历史", "base_ts", base)
+			return nil
+		})
 	}
 	since := cur.LastSettledTS
 	until := s.now().Unix() - settlementLagSec
@@ -79,14 +185,63 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 		untilSub = since + (untilSub-since)/2 // 二分缩小子窗口
 	}
 
-	// 1) 完整读 [since, untilSub] 并按桶聚合(只收 billing_enabled 组织的成员)。
-	//    log-id 级去重:只处理 id > 水位的日志,每条只扣一次;边界同 ts 重读靠此跳过。
-	aggs := map[string]*bucketAgg{}
-	var details []repo.DetailRow // v2 M2-2:逐条明细(下钻读本库),与 ledger 同事务落,observe 下也写
+	// 1) 聚合槽(1a 补漏 + 1b 主窗口两阶段共用;归因/聚合逻辑收口在 ingestEntry)。
+	sk := &settleSink{
+		aggs:      map[string]*bucketAgg{},
+		flagCache: map[int64]bool{}, attrCache: map[int64]tokenAttr{},
+		orgByUser: map[int64]int64{}, orphanAlerted: map[int64]bool{},
+	}
 	maxLogID := cur.LastSettledLogID
-	flagCache := map[int64]bool{}      // orgID -> billing_enabled
-	attrCache := map[int64]tokenAttr{} // 模型2:token_id -> 归因(member+key_id);成员共享 org user,只能按 token 归因
-	orphanAlerted := map[int64]bool{}  // token_id -> 已告警(每个孤儿令牌每轮只告警一次)
+
+	// 1a) M3 补漏扫描(20-§6):lag 只挡"提交延迟<lag"的行;超 lag 迟提交的行(DB 顿一下/长事务)当轮 id 水位
+	// 没看见、时间窗又推过去 → 不补扫即永久漏。重扫 [since−overlap, since),已入 usage_detail 的查重跳过。
+	// **绝不在此推进 maxLogID**:该区间靠查重幂等;高水位只能在"完全可见"的主窗口内推进,否则时钟偏斜的
+	// 大 id 会把主窗口外未读的行永久挡在水位下。
+	rescanSince := since - settlementRescanOverlapSec
+	if rescanSince < 0 {
+		rescanSince = 0
+	}
+	var rescan []newapi.LogEntry
+	for page := 1; page <= settlementRescanMaxPages; page++ {
+		entries, total, rerr := s.upstream.ReadConsumptionLogs(ctx, rescanSince, since, page, 100)
+		if rerr != nil {
+			return 0, mapUpstream(rerr)
+		}
+		for _, e := range entries {
+			if e.Quota > 0 {
+				rescan = append(rescan, e)
+			}
+		}
+		if page*100 >= total {
+			break
+		}
+		if page == settlementRescanMaxPages {
+			// 区间行数超页上限(正常流量不会):部分补扫,区间随 since 推进滑动、下轮续扫;告警观察。
+			s.log.Warn("补漏扫描区间行数超页上限,本轮部分补扫", "total", total, "pages", settlementRescanMaxPages)
+		}
+	}
+	if len(rescan) > 0 {
+		ids := make([]int64, len(rescan))
+		for i, e := range rescan {
+			ids[i] = e.ID
+		}
+		existing, ferr := s.store.FilterExistingDetailLogIDs(ctx, ids)
+		if ferr != nil {
+			return 0, apperr.Internal("").WithCause(ferr)
+		}
+		for _, e := range rescan {
+			if existing[e.ID] {
+				continue // 已落过明细(绝大多数)——ledger 桶是累加非按行幂等,靠此查重防重复计入
+			}
+			if err := s.ingestEntry(ctx, sk, e); err != nil {
+				return 0, err
+			}
+			s.log.Warn("补漏:发现迟提交漏行,已补入本轮落账", "log_id", e.ID, "log_ts", e.CreatedAt)
+		}
+	}
+
+	// 1b) 主窗口:完整读 [since, untilSub] 并聚合。log-id 级去重:只处理 id > 水位的日志,每条只计一次;
+	// untilSub 已按提交可见性滞后(settlementLagSec)收边 → 该区间在读取时已完全可见,推进 id 高水位安全。
 	for page := 1; page <= settlementMaxPages; page++ {
 		entries, total, rerr := s.upstream.ReadConsumptionLogs(ctx, since, untilSub, page, 100)
 		if rerr != nil {
@@ -102,64 +257,15 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 			if e.Quota <= 0 {
 				continue
 			}
-			// 模型2 归因:按 token_id 反查平台成员 + 稳定 key_id(成员共享 org user,绝不能按 user_id 归因)。
-			// 缓存避免逐条查库;非平台成员的 token / 无 token 的日志 → 跳过(无法归因)。
-			att, cached := attrCache[e.TokenID]
-			if !cached {
-				mm, kid, found, aerr := s.store.GetMemberByNewapiTokenID(ctx, e.TokenID)
-				if aerr != nil {
-					return 0, apperr.Internal("").WithCause(aerr) // DB 错,非上游故障(P1-3:勿误走 mapUpstream)
-				}
-				att = tokenAttr{found: found, member: mm, keyID: kid}
-				attrCache[e.TokenID] = att
+			if err := s.ingestEntry(ctx, sk, e); err != nil {
+				return 0, err
 			}
-			if !att.found {
-				continue // 非平台成员的 token(或无 token 日志),无法归因
-			}
-			m := att.member
-			keyID := att.keyID
-			// GZ-03:开通失败的成员令牌仍在消费 = 孤儿消费。告警使漏扣"可发现",仍正常聚合(money 不漏)。
-			if m.BootstrapState == model.BootstrapFailed && !orphanAlerted[e.TokenID] {
-				orphanAlerted[e.TokenID] = true
-				s.log.Error("孤儿消费告警:开通失败的成员令牌仍在产生消费(需核 new-api)",
-					"member_id", m.ID, "org_id", m.OrgID, "token_id", e.TokenID, "model", e.ModelName)
-				s.auditSystem(ctx, m.OrgID, "orphan_consumption", "member", &m.ID, map[string]any{
-					"token_id": e.TokenID, "model": e.ModelName,
-				}, "alert")
-			}
-			// v1 裁定B(20-§2.1):落账(ledger/detail)与 billing_enabled 解耦——**全组织一律落账供报表**,
-			// 聚合层不再按 billing 过滤(否则 v1 全员 billing 关 → 报表全空)。billing_enabled 回归
-			// "是否平台执行扣费"本义:只在下面事务的扣余额一步生效(flagCache 传到那)。
-			if _, ok := flagCache[m.OrgID]; !ok {
-				f, ferr := s.store.GetOrgBillingFlags(ctx, m.OrgID)
-				if ferr != nil {
-					return 0, ferr
-				}
-				flagCache[m.OrgID] = f.BillingEnabled
-			}
-			bkt := hourBucket(e.CreatedAt)
-			key := fmt.Sprintf("%d|%d|%d|%s|%d", m.OrgID, e.UserID, keyID, e.ModelName, bkt.Unix())
-			a := aggs[key]
-			if a == nil {
-				a = &bucketAgg{orgID: m.OrgID, memberID: m.ID, newapiUserID: int64(e.UserID), keyID: keyID, teamID: m.TeamID, model: e.ModelName, bucket: bkt}
-				aggs[key] = a
-			}
-			a.consumed += e.Quota
-			if e.CreatedAt > a.maxTS {
-				a.maxTS = e.CreatedAt
-			}
-			// v2 M2-2:同步收一条逐条明细(幂等键=newapi_log_id);带 token 指标供报表请求数/token 数。
-			details = append(details, repo.DetailRow{
-				OrgID: m.OrgID, MemberID: m.ID, NewapiUserID: int64(e.UserID), KeyID: keyID, TeamID: m.TeamID,
-				ModelName: e.ModelName, NewapiLogID: e.ID,
-				PromptTokens: e.PromptTokens, CompletionTokens: e.CompletionTokens, ConsumedQuota: e.Quota,
-				LogTS: time.Unix(e.CreatedAt, 0).UTC(),
-			})
 		}
 		if page*100 >= total {
 			break
 		}
 	}
+	aggs, details, flagCache := sk.aggs, sk.details, sk.flagCache
 
 	// 聚合每组织新增消耗 + 留存桶(软限额用)。本轮都是 id>水位 的新日志,每条只扣一次 → 全额计扣。
 	perOrg := map[int64]int64{}

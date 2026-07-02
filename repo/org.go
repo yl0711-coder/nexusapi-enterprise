@@ -44,6 +44,21 @@ func (s *Store) CreateOrganization(ctx context.Context, o *model.Organization) (
 	return res.LastInsertId()
 }
 
+// GetOrgIDByNewapiUserID M4(20-§6):按 new-api user id 反查组织(未知令牌归"未知桶"前先确认属平台组织——
+// 共用生产实例,主站普通客户的日志也在同一张 logs 表,非平台组织的日志必须跳过)。ok=false 即非平台组织。
+func (s *Store) GetOrgIDByNewapiUserID(ctx context.Context, newapiUserID int64) (int64, bool, error) {
+	var id int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id FROM organization WHERE newapi_user_id = ? AND deleted_at IS NULL`, newapiUserID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return id, true, nil
+}
+
 // orgCols 组织查询列清单(与 scanOrg 一一对应,唯一来源防三处漂移)。
 const orgCols = `id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, default_token_group, archived_at,
 	funding_mode, newapi_user_created_by_platform, member_cap_mode, billing_kind, created_at, updated_at`

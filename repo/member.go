@@ -244,7 +244,8 @@ func (s *Store) GetMember(ctx context.Context, orgID, id int64) (*model.Member, 
 
 // GetMemberByNewapiTokenID 模型2 结算归因:按 new-api token id 反查平台成员 + 稳定 key_id。
 // 成员共享 org user,归因只能走 token→member_key_token→member(绝不能按 user_id)。无 org 谓词(leader 跨租户);
-// 命不中(非平台 token/无对应行/成员已删)返 found=false。轮换后旧 token_id 仍命中(member_key_token append-only)。
+// 命不中(非平台 token/无对应行)返 found=false。轮换后旧 token_id 仍命中(member_key_token append-only)。
+// M4 时点归因(20-§6):member 读取**不过滤 deleted_at**——离职(软删)成员的迟同步/历史消费仍归原成员,不丢行不串人。
 func (s *Store) GetMemberByNewapiTokenID(ctx context.Context, newapiTokenID int64) (*model.Member, int64, bool, error) {
 	var orgID, memberID, keyID int64
 	err := s.db.QueryRowContext(ctx,
@@ -255,7 +256,8 @@ func (s *Store) GetMemberByNewapiTokenID(ctx context.Context, newapiTokenID int6
 	if err != nil {
 		return nil, 0, false, err
 	}
-	m, merr := s.GetMember(ctx, orgID, memberID)
+	row := s.db.QueryRowContext(ctx, memberSelect+` WHERE id = ? AND org_id = ?`, memberID, orgID)
+	m, merr := scanMember(row)
 	if errors.Is(merr, ErrNotFound) {
 		return nil, 0, false, nil
 	}

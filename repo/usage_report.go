@@ -104,6 +104,49 @@ func (s *Store) InsertUsageDetailTx(ctx context.Context, x dbtx, rows []DetailRo
 	return nil
 }
 
+// FilterExistingDetailLogIDs M3 补漏扫描(20-§6):批量查哪些 newapi_log_id 已入 usage_detail。
+// 重扫 overlap 区间时,已落过明细的行跳过(ledger 桶是累加、非按行幂等,靠这个查重防重复计入)。
+func (s *Store) FilterExistingDetailLogIDs(ctx context.Context, logIDs []int64) (map[int64]bool, error) {
+	out := map[int64]bool{}
+	const batch = 500
+	for start := 0; start < len(logIDs); start += batch {
+		end := start + batch
+		if end > len(logIDs) {
+			end = len(logIDs)
+		}
+		chunk := logIDs[start:end]
+		var sb strings.Builder
+		sb.WriteString("SELECT newapi_log_id FROM usage_detail WHERE newapi_log_id IN (")
+		args := make([]any, 0, len(chunk))
+		for i, id := range chunk {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString("?")
+			args = append(args, id)
+		}
+		sb.WriteString(")")
+		rows, err := s.db.QueryContext(ctx, sb.String(), args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[id] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
+}
+
 // DetailRecord 是读出的一条明细(下钻列表用)。
 type DetailRecord struct {
 	LogTS            time.Time

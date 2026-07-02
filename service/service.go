@@ -29,8 +29,14 @@ type Service struct {
 	// quota-worker 两 goroutine 在 gateByOrgStatus"读状态→决策→下发"上的 TOCTOU。进程内锁,多节点需换分布式锁。
 	quotaLocker lock.KeyedLocker
 
-	// observeMode = MVP 观测模式(改动⑤/⑥):落账不扣钱、不停服。
+	// observeMode = MVP 观测模式(改动⑤/⑥):落账不扣钱、不停服。v1 裁定A(20-§2.1):唯一职责=额度执行机器休眠
+	// (reset/tier/override 不下发);建令牌已从它剥离(OpenMember 一律真建)。
 	observeMode bool
+
+	// fundingEnabled v1 escrow 休眠总闸(20-§9,NEXUS_PLATFORM_FUNDING_ENABLED,默认 false):
+	// 平台经手钱(入账/退款/续充/充值申请/escrow 对账/计费对账)全部禁用——v1 钱在 new-api,平台只看不碰。
+	// v2 开 flag 即恢复,代码/表保留不删(§17 接缝)。
+	fundingEnabled bool
 
 	// memberRole 是开通成员时给 new-api 用户的角色(普通用户)。
 	memberRole string
@@ -46,6 +52,8 @@ type Deps struct {
 	// ObserveMode = MVP 观测模式(改动⑤/⑥):结算照常落账供看板,但跳过扣 company_balance / 硬停 / 守恒断言;
 	// 对账只跑 ReconcileBilling(logs↔ledger),跳过 ReconcileBalanceLedger / ReconcileDiscounts。本期不碰钱。
 	ObserveMode bool
+	// FundingEnabled 平台经手钱总闸(v1 恒 false=escrow 休眠;v2 开)。
+	FundingEnabled bool
 }
 
 // New 构造 Service。
@@ -61,7 +69,8 @@ func New(d Deps) *Service {
 		signer:      d.Signer,
 		log:         log,
 		quotaLocker: lock.NewInProcessLocker(),
-		observeMode: d.ObserveMode,
+		observeMode:    d.ObserveMode,
+		fundingEnabled: d.FundingEnabled,
 		memberRole:  "", // new-api 普通用户角色,空 = 默认普通用户
 	}
 }

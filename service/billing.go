@@ -25,6 +25,9 @@ type RechargeInput struct {
 // Recharge 运营方人工入账(US-08,E02,动钱红线:仅运营方)。
 // transfer_no 幂等 + 乐观锁;入账后若组织原 low/stopped 且余额回正 → 恢复 active。写审计。
 func (s *Service) Recharge(ctx context.Context, c session.Claims, orgID int64, in RechargeInput) (*model.Balance, error) {
+	if !s.fundingEnabled {
+		return nil, apperr.NotFound("") // v1 escrow 休眠(20-§9):平台不经手钱,端点下线(v2 开 NEXUS_PLATFORM_FUNDING_ENABLED 恢复)
+	}
 	// 动钱红线:仅运营方可入账(E02);组织管理员/团队负责人/成员一律 403。
 	if err := assertRole(c, session.RoleOperator); err != nil {
 		return nil, err
@@ -83,6 +86,9 @@ type DebitInput struct {
 // (先减托管后减桶1,ReduceEscrowTx)}+ 桶1 减的部分对应 newapi 窗口 subtract。绝不只减死账(那样退款后客户照花=双付)。
 // 金额≤可用(影子 balance==escrow available,二者守恒一致);乐观锁;newapi subtract 失败由 reconcile 自愈。
 func (s *Service) DebitBalance(ctx context.Context, c session.Claims, orgID int64, in DebitInput) (*model.Balance, error) {
+	if !s.fundingEnabled {
+		return nil, apperr.NotFound("") // v1 escrow 休眠(20-§9):平台不经手钱,端点下线(v2 开 NEXUS_PLATFORM_FUNDING_ENABLED 恢复)
+	}
 	if err := assertRole(c, session.RoleOperator); err != nil {
 		return nil, err
 	}
@@ -248,6 +254,9 @@ type RequestRechargeInput struct {
 // RequestRecharge 组织管理员发起申请充值(US-09)或退款申请(US-12),**只记录、绝不改余额**。
 // 计费子集:仅组织管理员。退款金额不得超过当前余额。
 func (s *Service) RequestRecharge(ctx context.Context, c session.Claims, orgID int64, in RequestRechargeInput) (*model.RechargeRequest, error) {
+	if !s.fundingEnabled {
+		return nil, apperr.NotFound("") // v1 escrow 休眠(20-§9):平台不经手钱,端点下线(v2 开 NEXUS_PLATFORM_FUNDING_ENABLED 恢复)
+	}
 	if err := assertOrgScope(c, orgID); err != nil {
 		return nil, err
 	}

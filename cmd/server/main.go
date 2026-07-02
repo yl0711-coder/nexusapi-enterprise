@@ -105,14 +105,22 @@ func run(log *slog.Logger) error {
 	}, nil)
 
 	// MVP 灰度模式(改动⑥):NEXUS_MVP_MODE=true → 观测模式(结算只落账不扣钱/不停服)+ 路由白名单封锁。
+	// v1 裁定A(20-§2.1):observe 唯一职责=额度执行机器休眠;建令牌已剥离(开通一律真建)。
 	mvpMode := os.Getenv("NEXUS_MVP_MODE") == "true"
 	if mvpMode {
-		log.Info("MVP 灰度模式已开启:观测模式(落账不扣钱) + 路由白名单封锁(非白名单写操作 404)")
+		log.Info("MVP 灰度模式已开启:观测模式(额度执行机器休眠) + 路由白名单封锁(非白名单写操作 404)")
+	}
+	// v1 escrow 休眠总闸(20-§9):默认 false=平台不经手钱(充值/退款/续充/escrow对账/计费对账全禁);v2 才开。
+	fundingEnabled := os.Getenv("NEXUS_PLATFORM_FUNDING_ENABLED") == "true"
+	if fundingEnabled {
+		log.Info("平台经手钱已开启(v2 escrow):入账/续充/退款/对账生效")
+	} else {
+		log.Info("v1 观测管理版:escrow 休眠(钱在 new-api,平台只看不碰)")
 	}
 
 	svc := service.New(service.Deps{
 		Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log,
-		ObserveMode: mvpMode,
+		ObserveMode: mvpMode, FundingEnabled: fundingEnabled,
 	})
 
 	// 运营方引导账号(首启种子,幂等)。

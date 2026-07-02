@@ -200,6 +200,9 @@ func (s *Service) refillToWindow(ctx context.Context, orgID, trigger int64) (int
 
 // RefillWindow 手工应急续充(运营方):把托管补进窗口到上限(窗口 < 上限即补)。与自动 worker 同锁同原子路径。
 func (s *Service) RefillWindow(ctx context.Context, c session.Claims, orgID int64) (*DerivedBalance, error) {
+	if !s.fundingEnabled {
+		return nil, apperr.NotFound("") // v1 escrow 休眠(20-§9):平台不经手钱,端点下线(v2 开 NEXUS_PLATFORM_FUNDING_ENABLED 恢复)
+	}
 	if err := assertOrgScope(c, orgID); err != nil {
 		return nil, err
 	}
@@ -268,6 +271,9 @@ func computeAutoThreshold(peakHourly, maxSingle int64, hasHistory bool) (auto in
 // AutoRefill 自动续充 worker tick(leader 单写者;observe 也跑——续充是池子 funding,不停员工)。
 // 逐有桶组织:懒重算阈值(配置陈旧>20h/无行)→ 窗口<阈值则补满。失败逐组织隔离、下轮重试。
 func (s *Service) AutoRefill(ctx context.Context) error {
+	if !s.fundingEnabled {
+		return nil // v1 escrow 休眠(20-§9):worker 静默短路(v2 开 flag 恢复)
+	}
 	orgIDs, err := s.store.ListEscrowOrgIDs(ctx)
 	if err != nil {
 		return err
@@ -314,6 +320,9 @@ func (s *Service) autoRefillOrg(ctx context.Context, orgID int64) error {
 //   ③ 守恒断言:已释放+托管 == 充值−退款(纯平台侧账,无消费项,不碰 used_quota)。
 // 开跑前先 drain 一次结算(把日志水位追平到 now),使"已消费"最新——防欠拨告警被结算滞后刷假(§15 前提②)。
 func (s *Service) ReconcileEscrow(ctx context.Context) error {
+	if !s.fundingEnabled {
+		return nil // v1 escrow 休眠(20-§9):worker 静默短路(v2 开 flag 恢复)
+	}
 	if _, err := s.RunSettlement(ctx); err != nil { // drain-to-boundary:落账不扣钱(observe/非observe 都只落 ledger)
 		s.log.Warn("escrow 对账前 drain 结算失败(用当前账本继续)", "err", err)
 	}

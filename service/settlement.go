@@ -422,6 +422,9 @@ const billingReconcileTolerance int64 = 0
 // 不一致(尤其平台 < 真账 = 少收)即告警(日志 + 审计 + 通知运营)。只读、不补扣,人工核对。
 // 整点对齐使比对精确;只读一小时窗口(绝不全表)。
 func (s *Service) ReconcileBilling(ctx context.Context) error {
+	if !s.fundingEnabled {
+		return nil // v1 escrow 休眠(20-§9):worker 静默短路(v2 开 flag 恢复)
+	}
 	now := s.now()
 	hourEnd := hourBucket(now.Unix())    // 当前小时开始
 	hourStart := hourEnd.Add(-time.Hour) // 上一个完整小时开始
@@ -507,6 +510,9 @@ func (s *Service) ReconcileBilling(ctx context.Context) error {
 // 这类 ReconcileBilling 发现不了,因为它比的是 logs↔ledger)。只读、不补扣,不一致即告警人工核对。
 // 注:比的是累计值,若灰度前历史数据已有分歧会一并报出(可后续设基线;本期作信息性告警)。
 func (s *Service) ReconcileBalanceLedger(ctx context.Context) error {
+	if !s.fundingEnabled {
+		return nil // v1 escrow 休眠(20-§9):worker 静默短路(v2 开 flag 恢复)
+	}
 	// MVP 观测模式防御(改动⑥-3,2026-06-24 拍板):observe 下 ledger 照写但 total_consumed 不动(没扣)→
 	// 二者必然背离 → 本对账每轮误报。故 observe 下整段跳过。即便有人为看真账把整个 reconcile worker 跑起来也不误报。
 	if s.observeMode {

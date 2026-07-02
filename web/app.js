@@ -108,11 +108,13 @@ async function boot() {
   renderShell(); renderSide(); renderView();
 }
 
+// v1 观测管理版(20-§2.1 裁定A):额度申请/审批/tier 限额属 v2 配额功能,前端隐藏(approvals/myreq 不在菜单);
+// billing 改纯"余额"(充值在 new-api,平台无充值入口,19-F6)。
 const NAV = {
   operator: [{ grp: "运营" }, { v: "orgs", ic: "▦", t: "客户组织" }],
-  org_admin: [{ grp: "管理" }, { v: "dash", ic: "◧", t: "概览" }, { v: "members", ic: "☷", t: "成员" }, { v: "teams", ic: "▣", t: "团队" }, { v: "tiers", ic: "◆", t: "可用模型档位" }, { v: "approvals", ic: "✓", t: "审批" }, { v: "billing", ic: "¥", t: "余额与计费" }, { v: "mynotif", ic: "✉", t: "通知" }],
-  team_leader: [{ grp: "团队" }, { v: "members", ic: "☷", t: "团队成员" }, { v: "approvals", ic: "✓", t: "审批" }],
-  member: [{ grp: "我的" }, { v: "myusage", ic: "▦", t: "我的用量" }, { v: "mykey", ic: "⚿", t: "我的 API Key" }, { v: "myreq", ic: "✚", t: "申请增额" }, { v: "mynotif", ic: "✉", t: "通知" }],
+  org_admin: [{ grp: "管理" }, { v: "dash", ic: "◧", t: "概览" }, { v: "members", ic: "☷", t: "成员" }, { v: "teams", ic: "▣", t: "团队" }, { v: "tiers", ic: "◆", t: "可用模型档位" }, { v: "billing", ic: "¥", t: "余额" }, { v: "mynotif", ic: "✉", t: "通知" }],
+  team_leader: [{ grp: "团队" }, { v: "members", ic: "☷", t: "团队成员" }],
+  member: [{ grp: "我的" }, { v: "myusage", ic: "▦", t: "我的用量" }, { v: "mykey", ic: "⚿", t: "我的 API Key" }, { v: "mynotif", ic: "✉", t: "通知" }],
 };
 
 function renderShell() {
@@ -142,9 +144,8 @@ function openHelp() {
 }
 function renderSide() {
   let h = "";
-  // 改动⑥-2:MVP 下藏掉钱/控菜单(审批/余额计费/申请增额);其端点已被后端 mvpGate 404。
-  const mvpHide = ["approvals", "billing", "myreq"];
-  (NAV[S.role] || []).filter(n => !(S.mvp && mvpHide.includes(n.v))).forEach(n => {
+  // v1:审批/申请增额已直接从 NAV 移除(裁定A);余额页对全角色可见(读求和,19-F3)。
+  (NAV[S.role] || []).forEach(n => {
     if (n.grp) { h += `<div class="grp">${esc(n.grp)}</div>`; return; }
     h += `<div class="nav ${S.view === n.v ? "on" : ""}" id="nav-${n.v}" onclick="go('${n.v}')"><span class="ic">${n.ic}</span>${esc(n.t)}</div>`;
   });
@@ -153,10 +154,6 @@ function renderSide() {
 }
 async function updateBadges() {
   try {
-    if (S.role === "org_admin" || S.role === "team_leader") {
-      const d = await api("GET", "/organizations/" + S.orgId + "/approvals?state=pending&page=1&page_size=1", null);
-      setBadge("approvals", (d.pagination || {}).total || 0);
-    }
     if (S.role === "member" || S.role === "org_admin") {
       const n = await api("GET", "/notifications?page=1&page_size=1", null);
       setBadge("mynotif", n.unread || 0);

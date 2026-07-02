@@ -415,6 +415,10 @@ func (s *Service) loadOrgCred(ctx context.Context, orgID int64) (newapi.MemberCr
 // R5 OBS-3:持 per-org 开通锁 + 锁内 double-check 串行化首开——消除并发首开时"第二次 adopt 旋转作废前者
 // access_token、写序与锁解耦致落库失效 token"的竞态;SetOrgNewapiUser 再加 IS NULL 守卫(多节点兜底)。
 func (s *Service) EnsureOrgProvisioned(ctx context.Context, orgID int64, orgName string) (newapi.MemberCred, error) {
+	// v1 硬停闸(20-§4):硬停期屏蔽开通类管理写(OpenMember 走这)。
+	if org, gerr := s.store.GetOrganization(ctx, orgID); gerr == nil && org.Status == model.OrgStatusHardStopped {
+		return newapi.MemberCred{}, apperr.New(apperr.CodeForbidden, 403, "组织已被运维硬停,管理操作暂不可用(解除后恢复)")
+	}
 	if cred, ok, err := s.loadOrgCred(ctx, orgID); err != nil {
 		return newapi.MemberCred{}, err
 	} else if ok {
@@ -573,6 +577,11 @@ func (s *Service) EnsureFreshCred(ctx context.Context, orgID int64) (newapi.Memb
 // withOrgCred 用 org 令牌凭证执行一次上游操作;若返 401(access_token 失效)→ EnsureFreshCred 刷新后**重试仅一次**;
 // 仍失败/刷新失败=放弃返原错(调用方 mapUpstream + 已报警)。有界不循环、幂等(401=未执行,重试安全)。
 func (s *Service) withOrgCred(ctx context.Context, orgID int64, fn func(cred newapi.MemberCred) error) error {
+	// v1 硬停连带效应(20-§4):org 用户被 disable 后其 access token 也 403——硬停期屏蔽全部管理写操作
+	// (预期,组织已停)+ 不进 401 自愈(重登失败只会刷告警噪音)。解除硬停后恢复。
+	if org, gerr := s.store.GetOrganization(ctx, orgID); gerr == nil && org.Status == model.OrgStatusHardStopped {
+		return apperr.New(apperr.CodeForbidden, 403, "组织已被运维硬停,管理操作暂不可用(解除后恢复)")
+	}
 	cred, err := s.orgCred(ctx, orgID)
 	if err != nil {
 		return err

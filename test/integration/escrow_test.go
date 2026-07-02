@@ -479,7 +479,7 @@ func escrowSvc(t *testing.T, ctx context.Context, dbName string) (*service.Servi
 	signer, _ := session.NewSigner([]byte("integration-test-session-key-32b!!"), time.Hour)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	upstream := newapi.New(newapi.Config{BaseURL: newapiURL, AdminToken: adminToken, AdminUserID: adminUID, Timeout: 15 * time.Second}, nil)
-	svc := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log})
+	svc := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log, FundingEnabled: true}) // escrow 涉钱测试:开 v2 funding 闸
 	return svc, store, upstream, keyring
 }
 
@@ -733,7 +733,7 @@ func TestIntegration_EscrowRecharge(t *testing.T) {
 	signer, _ := session.NewSigner([]byte("integration-test-session-key-32b!!"), time.Hour)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	upstream := newapi.New(newapi.Config{BaseURL: newapiURL, AdminToken: adminToken, AdminUserID: adminUID, Timeout: 15 * time.Second}, nil)
-	svc := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log})
+	svc := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log, FundingEnabled: true}) // escrow 涉钱测试:开 v2 funding 闸
 
 	const orgID = int64(103) // 不同 orgID 隔离 newapi org user(见 EscrowConcurrency 注释)
 	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'escrow-org', 'escrow-org-slug')`, orgID); err != nil {

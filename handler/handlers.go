@@ -171,6 +171,23 @@ func (h *Handler) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleHardStop 运维硬停/解除(20-§4,运营方风控):禁用/启用该组织的 new-api 用户,近实时 403 全部令牌。
+func (h *Handler) handleHardStop(stop bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		c, _ := claimsFrom(r.Context())
+		orgID, err := pathInt64(r, "id")
+		if err != nil {
+			writeErr(w, r, err)
+			return
+		}
+		if err := h.svc.HardStopOrg(r.Context(), c, orgID, stop); err != nil {
+			writeErr(w, r, err)
+			return
+		}
+		writeOK(w, r, http.StatusOK, map[string]any{"hard_stopped": stop})
+	}
+}
+
 // handleReimportTokens 门B"重新导入"(运营方,幂等):补齐导入失败/后来新增的令牌成员。
 func (h *Handler) handleReimportTokens(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())

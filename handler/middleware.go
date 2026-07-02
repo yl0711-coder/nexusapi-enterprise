@@ -23,12 +23,15 @@ var mvpWriteAllow = []string{
 	"POST /api/v1/organizations/*/archive",
 	"POST /api/v1/organizations/*/unarchive",
 	"POST /api/v1/organizations/*/import-tokens", // 门B 重新导入(运营方,幂等,只补建平台侧成员映射不动 new-api)
+	"POST /api/v1/organizations/*/hard-stop",         // 运维硬停(风控;禁用 org 用户,非钱)
+	"POST /api/v1/organizations/*/hard-stop-release", // 解除硬停
 	"POST /api/v1/organizations/*/teams",
 	"PATCH /api/v1/organizations/*/teams/*",          // F1 团队改名(按段匹配,不误命中 /teams)
 	"POST /api/v1/organizations/*/teams/*/archive",   // F1 团队归档
 	"POST /api/v1/organizations/*/teams/*/unarchive", // F1 撤归档
-	"POST /api/v1/organizations/*/recharges",    // R5后:池子 funding 不被 observe 闸挡(observe 只挡给员工写停人额度);运营方入账,members 才能消费=被观测
-	"POST /api/v1/organizations/*/escrow/refill", // 手工续充(运营方应急;自动续充 worker 亦不受 observe 闸)
+	// v1 下线(20-§9-#3):充值/续充/退款/申请充值已移出白名单——service 层 fundingEnabled 闸双保险 404,
+	// v2 开 NEXUS_PLATFORM_FUNDING_ENABLED 时再加回:
+	//   POST /organizations/*/recharges | /escrow/refill | 退款 | recharge-requests
 	"POST /api/v1/organizations/*/tiers",
 	"PUT /api/v1/tiers/*",
 	"DELETE /api/v1/tiers/*",

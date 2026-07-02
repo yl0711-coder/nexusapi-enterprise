@@ -256,6 +256,53 @@ func (s *Service) importOrgTokens(ctx context.Context, orgID int64, cred newapi.
 	return imported, failed
 }
 
+// HardStopOrg v1 运维硬停/解除(20-§4/19-F4,运营方风控):硬停 = **禁用该组织的 new-api 用户**
+// (ManageUser disable,双缓存失效、下个请求近实时 403 全部令牌,new-api controller/user.go:977-984);解除 = enable。
+// 与余额驱动的停服正交(有钱也能停:欠费纠纷/风控)。硬停期间该 org 的 access token 同样 403 →
+// 平台管理写操作被 withOrgCred/EnsureOrgProvisioned 闸屏蔽、不进 401 自愈(防重登失败刷告警)。
+// v1 弃 convergeOrgQuotas(按 company_balance 判零逐成员下发 0——审计 F3/H2:会误杀直充组织)。
+func (s *Service) HardStopOrg(ctx context.Context, c session.Claims, orgID int64, stop bool) error {
+	if err := assertRole(c, session.RoleOperator); err != nil {
+		return err
+	}
+	org, err := s.store.GetOrganization(ctx, orgID)
+	if errors.Is(err, repo.ErrNotFound) {
+		return apperr.NotFound("组织不存在")
+	}
+	if err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	if stop && org.Status == model.OrgStatusHardStopped {
+		return nil // 幂等
+	}
+	if !stop && org.Status != model.OrgStatusHardStopped {
+		return apperr.InvalidParam("组织不在硬停状态")
+	}
+	uid, _, ok, err := s.store.GetOrgNewapiCred(ctx, orgID)
+	if err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	if !ok {
+		return apperr.New(apperr.CodeInvalidParam, 409, "组织尚未开通 new-api 池子")
+	}
+	if uerr := s.upstream.SetUserStatus(ctx, int(uid), !stop); uerr != nil {
+		return mapUpstream(uerr)
+	}
+	newStatus := model.OrgStatusActive
+	action := "hard_stop_release"
+	if stop {
+		newStatus = model.OrgStatusHardStopped
+		action = "hard_stop"
+	}
+	if serr := s.store.UpdateOrgStatus(ctx, orgID, newStatus); serr != nil {
+		// new-api 侧已生效(那是真动作),平台状态没跟上:告警,运维重试补状态。
+		s.log.Error("硬停:new-api 已生效但组织状态落库失败(重试补)", "org_id", orgID, "stop", stop, "err", serr)
+		return apperr.Internal("").WithCause(serr)
+	}
+	s.audit(ctx, c, orgID, action, "organization", &orgID, map[string]any{"newapi_user_id": uid})
+	return nil
+}
+
 // ReimportOrgTokens 门B"重新导入"(运营方,幂等):导入中途失败/后续补齐用。只补建缺的,已导入的跳过。
 func (s *Service) ReimportOrgTokens(ctx context.Context, c session.Claims, orgID int64) (imported, failed int, err error) {
 	if err := assertRole(c, session.RoleOperator); err != nil {

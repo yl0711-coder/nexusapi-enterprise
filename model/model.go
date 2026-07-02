@@ -9,6 +9,10 @@ const (
 	OrgStatusActive  = "active"
 	OrgStatusLow     = "low"
 	OrgStatusStopped = "stopped"
+	// OrgStatusHardStopped v1 运维硬停(20-§4):禁用该组织的 new-api 用户(近实时 403 全令牌,欠费/风控用),
+	// 与余额驱动的 stopped 正交。硬停期间平台对该 org 的管理写操作同被屏蔽(org access token 也 403)。
+	// v2 注意:recomputeOrgStatus(billing 开后)不得覆盖此状态——解除只走 ReleaseHardStop。
+	OrgStatusHardStopped = "hard_stopped"
 )
 
 // 成员状态(09 §14 + provisioning 中间态,08 US-01 失败分支)。

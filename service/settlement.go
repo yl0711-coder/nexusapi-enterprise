@@ -45,7 +45,8 @@ type tokenAttr struct {
 // 选一个不超限的时间子窗口(路径B,永不截断少收)→ 读 new-api 消费 logs 按 (org,user,model,小时桶) 聚合 →
 // 在一个事务里原子提交:usage_ledger 落账 + 扣对应组织 company_balance(乐观锁,FOR UPDATE)+ 推进水位;
 // 任一步失败或水位推进未命中即整批回滚、本轮不推水位、下轮干净重做(无双计无双扣)。
-// 提交后再做守恒断言 / 状态-硬停 / 软限额 / 审计(绝不在持事务时调 new-api)。**只结算开了 billing_enabled 的组织。**
+// 提交后再做守恒断言 / 状态-硬停 / 软限额 / 审计(绝不在持事务时调 new-api)。
+// v1 裁定B(20-§2.1):**落账全组织无条件(报表是 v1 核心交付);billing_enabled 只闸"扣余额"一步**(平台执行扣费=v2)。
 // 返回本次新落账的总消耗(quota)。
 func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 	cur, err := s.store.GetOrCreateCursor(ctx, 0) // org_id=0 全局 leader 水位
@@ -126,19 +127,16 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 					"token_id": e.TokenID, "model": e.ModelName,
 				}, "alert")
 			}
-			billing, ok := flagCache[m.OrgID]
-			if !ok {
+			// v1 裁定B(20-§2.1):落账(ledger/detail)与 billing_enabled 解耦——**全组织一律落账供报表**,
+			// 聚合层不再按 billing 过滤(否则 v1 全员 billing 关 → 报表全空)。billing_enabled 回归
+			// "是否平台执行扣费"本义:只在下面事务的扣余额一步生效(flagCache 传到那)。
+			if _, ok := flagCache[m.OrgID]; !ok {
 				f, ferr := s.store.GetOrgBillingFlags(ctx, m.OrgID)
 				if ferr != nil {
 					return 0, ferr
 				}
-				billing = f.BillingEnabled
-				flagCache[m.OrgID] = billing
+				flagCache[m.OrgID] = f.BillingEnabled
 			}
-			if !billing && !s.observeMode {
-				continue // 该组织未开计费,读到但不扣
-			}
-			// 改动⑤(MVP 观测):observe 下不在此跳过未开计费组织 → 全组织一律落账供看板;扣余额在事务里整体跳过。
 			bkt := hourBucket(e.CreatedAt)
 			key := fmt.Sprintf("%d|%d|%d|%s|%d", m.OrgID, e.UserID, keyID, e.ModelName, bkt.Unix())
 			a := aggs[key]
@@ -194,6 +192,9 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 		if !s.observeMode {
 			for orgID, amount := range perOrg {
 				if amount <= 0 {
+					continue
+				}
+				if !flagCache[orgID] { // v1 裁定B:billing_enabled 只管"平台执行扣费"——未开计费组织已落账但不扣余额
 					continue
 				}
 				bal, err := s.store.DeductBalanceTx(ctx, tx, orgID, amount)

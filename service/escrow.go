@@ -43,9 +43,10 @@ type DerivedBalance struct {
 	AvailableQuota int64 `json:"available_quota"` // = 窗口 + 托管(组织当前可用总额)
 }
 
-// GetDerivedBalance 读穿组织**实时**窗口/托管(R5 后裁定:**仅运营方**)。窗口读 new-api(桶1 实际剩余,含消费递减)、
-// 托管读平台库——这是运营方的内部实时视图(会因续充/对账搬钱瞬态波动)。客户看的"可用余额"是**派生稳定值**
-// (总充值−总退款−已消费,见 GetBalance),不读这里,防余额忽上忽下(§15 L174)。组织未开通池子 → 全 0。
+// GetDerivedBalance 读穿组织**实时**窗口/托管拆分(**仅运营方**——window/holding 是内部概念不漏给客户)。
+// 窗口读 new-api(桶1 实际剩余,含消费递减)、托管读平台库。客户余额走 GetBalance(v1 M5:同为读求和,
+// 但只回合计 available + billing_kind,20-§3;旧"派生稳定值"口径已被 v1 裁定取代——对门B 关联组织恒 0 失真)。
+// 组织未开通池子 → 全 0。
 func (s *Service) GetDerivedBalance(ctx context.Context, c session.Claims, orgID int64) (*DerivedBalance, error) {
 	if err := assertOrgScope(c, orgID); err != nil {
 		return nil, err

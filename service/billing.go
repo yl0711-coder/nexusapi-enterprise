@@ -147,20 +147,54 @@ func (s *Service) DebitBalance(ctx context.Context, c session.Claims, orgID int6
 	return bal, nil
 }
 
-// GetBalance 查公司余额(O/A)。
-func (s *Service) GetBalance(ctx context.Context, c session.Claims, orgID int64) (*model.Balance, error) {
+// CustomerBalance v1 客户余额视图(M5,20-§3):只给合计 available(不漏 window/holding 内部拆分)+ billing_kind。
+type CustomerBalance struct {
+	AvailableQuota int64  `json:"available_quota"` // 读求和合计(v1=实时 user.quota;订阅组织恒 0,前端按 kind 显示"订阅计费")
+	BillingKind    string `json:"billing_kind"`    // wallet / subscription
+}
+
+// GetBalance v1 M5(20-§3):客户余额唯一口径 = **读求和**(实时读 new-api user.quota + Σ托管;v1 托管恒 0)。
+// 取代旧 company_balance 派生值——那本"从日志算扣"的账对门B 关联组织恒 0(平台没它的充值流水),已降级不参与余额。
+// 订阅计费组织(billing_kind=subscription)池子不反映消费,不回数字(前端显示"订阅计费(无钱包余额)")。
+// overdraft(C2 new-api 固有):并发可短暂扣成负,显示下限截 0。
+func (s *Service) GetBalance(ctx context.Context, c session.Claims, orgID int64) (*CustomerBalance, error) {
 	if err := assertOrgScope(c, orgID); err != nil {
 		return nil, err
 	}
 	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
 		return nil, err
 	}
-	// R5后裁定:客户可看自己"可用余额"(诚实余额,balance=充值−消费−退款),观测期不藏(藏的是价:倍率/折扣/计费设置)。
-	b, err := s.store.GetOrCreateBalance(ctx, orgID)
+	org, err := s.store.GetOrganization(ctx, orgID)
+	if errors.Is(err, repo.ErrNotFound) {
+		return nil, apperr.NotFound("组织不存在")
+	}
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)
 	}
-	return b, nil
+	if org.BillingKind == model.BillingKindSub {
+		return &CustomerBalance{BillingKind: model.BillingKindSub}, nil
+	}
+	uid, _, ok, err := s.store.GetOrgNewapiCred(ctx, orgID)
+	if err != nil {
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	var window int64
+	if ok {
+		w, gerr := s.upstream.GetUserQuota(ctx, int(uid))
+		if gerr != nil {
+			return nil, mapUpstream(gerr)
+		}
+		window = w
+	}
+	holding, err := s.store.SumHoldingEscrow(ctx, orgID)
+	if err != nil {
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	avail := window + holding
+	if avail < 0 {
+		avail = 0
+	}
+	return &CustomerBalance{AvailableQuota: avail, BillingKind: model.BillingKindWallet}, nil
 }
 
 // ListRecharges 列入账记录(O/A)。

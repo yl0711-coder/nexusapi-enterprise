@@ -7,6 +7,7 @@ import (
 
 	"github.com/nexusapi-platform/enterprise/model"
 	"github.com/nexusapi-platform/enterprise/pkg/apperr"
+	"github.com/nexusapi-platform/enterprise/service"
 )
 
 // 视图层 DTO:只暴露可对外字段,绝不含密文凭证 / 哈希 / 明文 key(10 §3.4)。
@@ -125,27 +126,20 @@ const quotaPerUnit = 500000.0
 
 func toDisplay(quota int64) float64 { return float64(quota) / quotaPerUnit }
 
+// balanceView v1 M5(20-§3):客户余额=读求和合计+billing_kind;只回 available,不漏 window/holding 内部拆分。
 type balanceView struct {
-	OrgID            int64   `json:"org_id"`
-	TotalRecharged   int64   `json:"total_recharged_quota"`
-	TotalConsumed    int64   `json:"total_consumed_quota"`
-	TotalRefunded    int64   `json:"total_refunded_quota"`
-	Balance          int64   `json:"balance_quota"`
-	LowWatermark     int64   `json:"low_watermark_quota"`
-	Currency         string  `json:"currency"`        // 对外币种(口径固化在后端,M2)
-	BalanceDisplay   float64 `json:"balance_display"` // 按币种换算的金额(quota/QuotaPerUnit)
-	RechargedDisplay float64 `json:"total_recharged_display"`
-	ConsumedDisplay  float64 `json:"total_consumed_display"`
-	RefundedDisplay  float64 `json:"total_refunded_display"`
+	AvailableQuota   int64   `json:"available_quota"`
+	AvailableDisplay float64 `json:"available_display"` // 按币种换算(quota/QuotaPerUnit)
+	BillingKind      string  `json:"billing_kind"`      // wallet / subscription(订阅组织前端显示"订阅计费")
+	Currency         string  `json:"currency"`
 }
 
-func toBalanceView(b *model.Balance) balanceView {
+func toBalanceView(b *service.CustomerBalance) balanceView {
 	return balanceView{
-		OrgID: b.OrgID, TotalRecharged: b.TotalRecharged, TotalConsumed: b.TotalConsumed, TotalRefunded: b.TotalRefunded,
-		Balance: b.Balance, LowWatermark: b.LowWatermark,
-		Currency:       displayCurrency,
-		BalanceDisplay: toDisplay(b.Balance), RechargedDisplay: toDisplay(b.TotalRecharged),
-		ConsumedDisplay: toDisplay(b.TotalConsumed), RefundedDisplay: toDisplay(b.TotalRefunded),
+		AvailableQuota:   b.AvailableQuota,
+		AvailableDisplay: toDisplay(b.AvailableQuota),
+		BillingKind:      b.BillingKind,
+		Currency:         displayCurrency,
 	}
 }
 

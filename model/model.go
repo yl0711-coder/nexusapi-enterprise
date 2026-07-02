@@ -49,9 +49,24 @@ type Organization struct {
 	NewapiUserID      *int64     // 模型2(0020):组织=一个 new-api user,此为池子锚(user.quota=预付池子);nil=尚未开通
 	AccessTokenEnc    []byte     // 模型2(0020):该组织 new-api user 的 access_token,应用层加密存(建员工 token 用);列 newapi_access_token_enc
 	PasswordEnc       []byte     // 模型2(0020):该组织 new-api user 的密码,加密存(access_token 失效时重登录自愈);列 newapi_password_enc
+	// v1 正交属性(0022,20-§2):一种组织按属性工作,不按场景分支;场景(门A/门B)仅决定初值。
+	FundingMode       string // self_funded(v1 恒定,钱在 new-api)/platform_funded(v2 托管)
+	CreatedByPlatform bool   // provenance:门A=true(可清资产/可自愈)/门B=false(绝不删企业资产/运维重粘);列 newapi_user_created_by_platform
+	MemberCapMode     string // shared(v1 恒定,全员共享池子)/quota(v2 按人硬分)
+	BillingKind       string // wallet(读求和余额)/subscription(订阅计费,余额页显示"订阅计费")
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 }
+
+// v1 组织正交属性取值(0022,20-§2)。
+const (
+	FundingSelfFunded     = "self_funded"     // 钱在 new-api,平台不经手(v1 全部)
+	FundingPlatformFunded = "platform_funded" // 平台经手钱/托管桶(v2)
+	CapModeShared         = "shared"          // 全员 unlimited 共享池子(v1 全部)
+	CapModeQuota          = "quota"           // 按人硬分 remain_quota(v2)
+	BillingKindWallet     = "wallet"          // 钱包计费:余额=读求和
+	BillingKindSub        = "subscription"    // 订阅计费:池子不反映消费,余额页显示"订阅计费"
+)
 
 // Team 对应 team 表(09 §2)。
 type Team struct {

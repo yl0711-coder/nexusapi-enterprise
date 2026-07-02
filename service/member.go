@@ -153,37 +153,37 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 	}
 	s.ensureTotalDiscountCoversGroup(ctx, orgID, grp)
 
-	// 建员工 token(挂 org user 下,用 org 凭证)。观测期 SkipToken:只开账号,令牌由员工自助建(改动③)。
+	// 建员工 token(挂 org user 下,用 org 凭证)。
+	// v1 裁定A(20-§2.1):建令牌从 observeMode 剥离——开通成员一律真建令牌(对齐 19-F2),不再受 observe 影响;
+	// observeMode 只保留"额度执行机器休眠"(reset/tier/override 不下发)一个职责。
 	final := &model.Member{ID: memberID, OrgID: orgID, TierID: prov.TierID, TeamID: in.TeamID}
-	keyMasked, apiKey, finalTokenName := "", "", ""
-	if !s.observeMode {
-		spec := newapi.TokenSpec{Name: deriveTokenName(memberID, 1), UnlimitedQuota: true, ExpiredTime: -1, Group: grp}
-		if tier != nil {
-			spec.ModelLimits = tier.ModelSet // B2:网关数据面限模型(真拦截)
-		}
-		tokenID, berr := s.upstream.CreateToken(ctx, cred, spec)
-		if berr != nil {
-			// 建 token 失败:残留 token(若有)靠确定性名在重开时 adopt 自愈,无需禁用;标失败 + 释放邮箱。
-			if merr := s.store.MarkBootstrapFailedAndRelease(ctx, orgID, memberID); merr != nil {
-				s.log.Error("标记 bootstrap 失败/释放邮箱失败", "member_id", memberID, "err", merr)
-			}
-			s.audit(ctx, c, orgID, "open_member", "member", &memberID, map[string]any{"name": in.Name, "result": "create_token_failed"})
-			return nil, mapUpstream(berr)
-		}
-		key, kerr := s.upstream.RevealTokenKey(ctx, cred, tokenID)
-		if kerr != nil {
-			// token 已建、取 key 失败:不回滚(确定性名重开可补取);标失败留重试。
-			if merr := s.store.MarkBootstrapFailedAndRelease(ctx, orgID, memberID); merr != nil {
-				s.log.Error("标记 bootstrap 失败失败", "member_id", memberID, "err", merr)
-			}
-			return nil, mapUpstream(kerr)
-		}
-		tid := int64(tokenID)
-		keyMasked, apiKey, finalTokenName = maskKey(key), key, deriveTokenName(memberID, 1)
-		final.NewapiTokenID = &tid
-		final.KeyMasked = &keyMasked
-		final.KeyRotation = 1
+	spec := newapi.TokenSpec{Name: deriveTokenName(memberID, 1), UnlimitedQuota: true, ExpiredTime: -1, Group: grp}
+	if tier != nil {
+		spec.ModelLimits = tier.ModelSet // B2:网关数据面限模型(真拦截)
 	}
+	tokenID, berr := s.upstream.CreateToken(ctx, cred, spec)
+	if berr != nil {
+		// 建 token 失败:残留 token(若有)靠确定性名在重开时 adopt 自愈,无需禁用;标失败 + 释放邮箱。
+		if merr := s.store.MarkBootstrapFailedAndRelease(ctx, orgID, memberID); merr != nil {
+			s.log.Error("标记 bootstrap 失败/释放邮箱失败", "member_id", memberID, "err", merr)
+		}
+		s.audit(ctx, c, orgID, "open_member", "member", &memberID, map[string]any{"name": in.Name, "result": "create_token_failed"})
+		return nil, mapUpstream(berr)
+	}
+	key, kerr := s.upstream.RevealTokenKey(ctx, cred, tokenID)
+	if kerr != nil {
+		// token 已建、取 key 失败:不回滚(确定性名重开可补取);标失败留重试。
+		if merr := s.store.MarkBootstrapFailedAndRelease(ctx, orgID, memberID); merr != nil {
+			s.log.Error("标记 bootstrap 失败失败", "member_id", memberID, "err", merr)
+		}
+		return nil, mapUpstream(kerr)
+	}
+	tid := int64(tokenID)
+	keyMasked, apiKey := maskKey(key), key
+	finalTokenName := deriveTokenName(memberID, 1)
+	final.NewapiTokenID = &tid
+	final.KeyMasked = &keyMasked
+	final.KeyRotation = 1
 	if ferr := s.store.FinalizeBootstrap(ctx, final, finalTokenName); ferr != nil {
 		// F-A(真站联调发现):finalize 失败补偿(与 :167 CreateToken / :176 RevealTokenKey 分支对齐,原来唯独这里漏了)——
 		// 否则成员永久卡 provisioning + 刚建的 new-api 员工 token 成孤儿。补:①补偿删除孤儿 token(cred+tid 在手,回到无孤儿

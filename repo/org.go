@@ -19,10 +19,22 @@ func (s *Store) CreateOrganization(ctx context.Context, o *model.Organization) (
 	if o.BillingMode == "" {
 		o.BillingMode = "prepaid"
 	}
+	// v1 正交属性初值(0022):零值回落默认(self_funded/shared/wallet;CreatedByPlatform 由调用方按门显式设)。
+	if o.FundingMode == "" {
+		o.FundingMode = model.FundingSelfFunded
+	}
+	if o.MemberCapMode == "" {
+		o.MemberCapMode = model.CapModeShared
+	}
+	if o.BillingKind == "" {
+		o.BillingKind = model.BillingKindWallet
+	}
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO organization (name, slug, status, timezone, newapi_group, default_tier_id, billing_mode)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		o.Name, o.Slug, o.Status, o.Timezone, o.NewapiUserGroup, o.DefaultTierID, o.BillingMode)
+		`INSERT INTO organization (name, slug, status, timezone, newapi_group, default_tier_id, billing_mode,
+		                           funding_mode, newapi_user_created_by_platform, member_cap_mode, billing_kind)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		o.Name, o.Slug, o.Status, o.Timezone, o.NewapiUserGroup, o.DefaultTierID, o.BillingMode,
+		o.FundingMode, o.CreatedByPlatform, o.MemberCapMode, o.BillingKind)
 	if err != nil {
 		if isDupKey(err) {
 			return 0, ErrConflict
@@ -32,19 +44,21 @@ func (s *Store) CreateOrganization(ctx context.Context, o *model.Organization) (
 	return res.LastInsertId()
 }
 
+// orgCols 组织查询列清单(与 scanOrg 一一对应,唯一来源防三处漂移)。
+const orgCols = `id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, default_token_group, archived_at,
+	funding_mode, newapi_user_created_by_platform, member_cap_mode, billing_kind, created_at, updated_at`
+
 // GetOrganization 按 id 取组织(未删)。不存在 → ErrNotFound。
 func (s *Store) GetOrganization(ctx context.Context, id int64) (*model.Organization, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, default_token_group, archived_at, created_at, updated_at
-		 FROM organization WHERE id = ? AND deleted_at IS NULL`, id)
+		`SELECT `+orgCols+` FROM organization WHERE id = ? AND deleted_at IS NULL`, id)
 	return scanOrg(row)
 }
 
 // GetOrganizationBySlug 按 slug 取组织(运营方组织引导用)。
 func (s *Store) GetOrganizationBySlug(ctx context.Context, slug string) (*model.Organization, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, default_token_group, archived_at, created_at, updated_at
-		 FROM organization WHERE slug = ? AND deleted_at IS NULL`, slug)
+		`SELECT `+orgCols+` FROM organization WHERE slug = ? AND deleted_at IS NULL`, slug)
 	return scanOrg(row)
 }
 
@@ -113,8 +127,7 @@ func (s *Store) ListOrganizations(ctx context.Context, limit, offset int, includ
 		return nil, 0, err
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, default_token_group, archived_at, created_at, updated_at
-		 FROM organization WHERE `+cond+` ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
+		`SELECT `+orgCols+` FROM organization WHERE `+cond+` ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -282,7 +295,8 @@ type rowScanner interface {
 func scanOrg(r rowScanner) (*model.Organization, error) {
 	var o model.Organization
 	err := r.Scan(&o.ID, &o.Name, &o.Slug, &o.Status, &o.Timezone, &o.NewapiUserGroup,
-		&o.DefaultTierID, &o.BillingMode, &o.DefaultTokenGroup, &o.ArchivedAt, &o.CreatedAt, &o.UpdatedAt)
+		&o.DefaultTierID, &o.BillingMode, &o.DefaultTokenGroup, &o.ArchivedAt,
+		&o.FundingMode, &o.CreatedByPlatform, &o.MemberCapMode, &o.BillingKind, &o.CreatedAt, &o.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

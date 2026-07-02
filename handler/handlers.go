@@ -131,6 +131,12 @@ type createOrgReq struct {
 	AdminEmail      string `json:"admin_email"`
 	AdminPassword   string `json:"admin_password"`
 	NewapiUserGroup string `json:"newapi_user_group"` // 改动①:运营手填 new-api 用户分组(必填)
+	// 门B 关联现有 new-api 用户(v1,19-F1;缺省=门A 新建)。
+	Associate *struct {
+		NewapiUserID int64  `json:"newapi_user_id"`
+		AccessToken  string `json:"access_token"`
+		NamePolicy   string `json:"name_policy"` // inherit(默认)/random
+	} `json:"associate"`
 }
 
 func (h *Handler) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
@@ -140,10 +146,16 @@ func (h *Handler) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, err)
 		return
 	}
-	res, err := h.svc.CreateOrg(r.Context(), c, service.CreateOrgInput{
+	svcIn := service.CreateOrgInput{
 		Name: in.Name, Slug: in.Slug, AdminEmail: in.AdminEmail, AdminPassword: in.AdminPassword,
 		NewapiUserGroup: in.NewapiUserGroup,
-	})
+	}
+	if in.Associate != nil {
+		svcIn.Associate = &service.AssociateOrgInput{
+			NewapiUserID: in.Associate.NewapiUserID, AccessToken: in.Associate.AccessToken, NamePolicy: in.Associate.NamePolicy,
+		}
+	}
+	res, err := h.svc.CreateOrg(r.Context(), c, svcIn)
 	if err != nil {
 		writeErr(w, r, err)
 		return
@@ -154,7 +166,25 @@ func (h *Handler) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		"admin_email":     res.AdminEmail,
 		// 初始密码仅本次回显一次,供运营方交付客户管理员。
 		"admin_initial_password": res.AdminInitialPassword,
+		"imported_members":       res.ImportedMembers,
+		"import_failed":          res.ImportFailed,
 	})
+}
+
+// handleReimportTokens 门B"重新导入"(运营方,幂等):补齐导入失败/后来新增的令牌成员。
+func (h *Handler) handleReimportTokens(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	orgID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	imported, failed, err := h.svc.ReimportOrgTokens(r.Context(), c, orgID)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{"imported": imported, "failed": failed})
 }
 
 func (h *Handler) handleGetOrg(w http.ResponseWriter, r *http.Request) {

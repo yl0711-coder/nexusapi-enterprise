@@ -22,6 +22,7 @@ var mvpWriteAllow = []string{
 	"PATCH /api/v1/organizations/*",
 	"POST /api/v1/organizations/*/archive",
 	"POST /api/v1/organizations/*/unarchive",
+	"POST /api/v1/organizations/*/import-tokens", // 门B 重新导入(运营方,幂等,只补建平台侧成员映射不动 new-api)
 	"POST /api/v1/organizations/*/teams",
 	"PATCH /api/v1/organizations/*/teams/*",          // F1 团队改名(按段匹配,不误命中 /teams)
 	"POST /api/v1/organizations/*/teams/*/archive",   // F1 团队归档

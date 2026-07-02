@@ -50,8 +50,9 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/organizations", h.requireAuth(h.handleCreateOrg))
 	mux.HandleFunc("GET /api/v1/organizations/{id}", h.requireAuth(h.handleGetOrg))
 	mux.HandleFunc("PATCH /api/v1/organizations/{id}", h.requireAuth(h.handleUpdateOrg))
-	mux.HandleFunc("POST /api/v1/organizations/{id}/archive", h.requireAuth(h.handleArchiveOrg))     // T12 归档
-	mux.HandleFunc("POST /api/v1/organizations/{id}/unarchive", h.requireAuth(h.handleUnarchiveOrg)) // T12 取消归档
+	mux.HandleFunc("POST /api/v1/organizations/{id}/archive", h.requireAuth(h.handleArchiveOrg))           // T12 归档
+	mux.HandleFunc("POST /api/v1/organizations/{id}/unarchive", h.requireAuth(h.handleUnarchiveOrg))       // T12 取消归档
+	mux.HandleFunc("POST /api/v1/organizations/{id}/import-tokens", h.requireAuth(h.handleReimportTokens)) // 门B 重新导入(运营方,幂等)
 	mux.HandleFunc("GET /api/v1/organizations/{id}/approval-rules", h.requireAuth(h.handleGetApprovalRules))
 	mux.HandleFunc("PUT /api/v1/organizations/{id}/approval-rules", h.requireAuth(h.handleSetApprovalRules))
 	mux.HandleFunc("GET /api/v1/organizations/{id}/quota-policies", h.requireAuth(h.handleListPolicies))

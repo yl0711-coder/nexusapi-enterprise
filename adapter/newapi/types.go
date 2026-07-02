@@ -95,6 +95,14 @@ type NewapiAdapter interface {
 	// RefreshAccessToken 用 username+password 重登派生新 access_token(401 自愈:失效才重登)。
 	RefreshAccessToken(ctx context.Context, in BootstrapInput) (accessToken string, err error)
 
+	// 订阅口径(v1 H1,20-§7):检测 active 订阅/当前偏好 + 设 wallet_only 堵订阅旁路(自助端点,零改 new-api)。
+	GetSelfSubscription(ctx context.Context, cred MemberCred) (*SelfSubscription, error)
+	SetBillingPreference(ctx context.Context, cred MemberCred, pref string) error
+
+	// 门B 关联(v1,20-§8):身份/role 校验 + 导入现有令牌(翻页拉全)。
+	GetSelfInfo(ctx context.Context, cred MemberCred) (*SelfInfo, error)
+	ListUserTokens(ctx context.Context, cred MemberCred) ([]UserToken, error)
+
 	// ReadConsumptionLogs 读消费日志窗口(type=2,小窗口分页,绝不全表),供计费结算(03 §3.1)。
 	ReadConsumptionLogs(ctx context.Context, sinceUnix, untilUnix int64, page, pageSize int) ([]LogEntry, int, error)
 

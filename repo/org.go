@@ -87,6 +87,9 @@ func (s *Store) SetOrgNewapiUser(ctx context.Context, orgID, newapiUserID int64,
 		   WHERE id = ? AND deleted_at IS NULL AND newapi_user_id IS NULL`,
 		newapiUserID, accessTokenEnc, passwordEnc, orgID)
 	if err != nil {
+		if isDupKey(err) { // uk_org_newapi_user(0022):该 new-api 用户已被别的组织关联(并发竞态兜底)
+			return false, ErrConflict
+		}
 		return false, err
 	}
 	n, _ := res.RowsAffected()

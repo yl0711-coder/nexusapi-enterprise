@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/nexusapi-platform/enterprise/adapter/newapi"
 	"github.com/nexusapi-platform/enterprise/model"
 	"github.com/nexusapi-platform/enterprise/pkg/apperr"
 	"github.com/nexusapi-platform/enterprise/pkg/session"
@@ -20,6 +21,15 @@ type CreateOrgInput struct {
 	AdminEmail      string
 	AdminPassword   string // 留空则平台生成,初始密码在响应里回显一次
 	NewapiUserGroup string // 改动①:运营手填的 new-api 用户分组(必填;隔离边界;须已在 new-api 配好可用模型分组)
+	// Associate 非 nil = 门B 关联现有 new-api 用户(v1,20-§8);nil = 门A 新建。进来后同一种组织(19-§3)。
+	Associate *AssociateOrgInput
+}
+
+// AssociateOrgInput 门B 关联录入(19-F1):企业该 new-api 用户 + 其 access token(企业在 new-api 生成一次粘入)。
+type AssociateOrgInput struct {
+	NewapiUserID int64  // 必须与 access token 解出的 user 一致(防串号/粘错)
+	AccessToken  string // 加密落库(同场景1 存法);平台此后用它全托管令牌
+	NamePolicy   string // 导入成员显示名:inherit(默认,继承令牌名)/ random(随机串);管理员可随时改名(19-F2)
 }
 
 // CreateOrgResult 建组织产物。AdminInitialPassword 仅本次回显一次(供运营方交付客户管理员)。
@@ -28,6 +38,8 @@ type CreateOrgResult struct {
 	AdminMemberID        int64
 	AdminEmail           string
 	AdminInitialPassword string
+	ImportedMembers      int // 门B:本次导入成员数
+	ImportFailed         int // 门B:导入失败数(可经"重新导入"幂等重跑补齐)
 }
 
 // CreateOrg 新建客户组织 + 首个组织管理员平台账号(E01)。仅运营方可调。
@@ -56,7 +68,56 @@ func (s *Service) CreateOrg(ctx context.Context, c session.Claims, in CreateOrgI
 		return nil, apperr.InvalidParam("该 new-api 用户分组尚未配可用模型分组(group_special_usable_group),请先在 new-api 配好再建组织")
 	}
 
-	orgID, err := s.store.CreateOrganization(ctx, &model.Organization{Name: in.Name, Slug: in.Slug, NewapiUserGroup: &in.NewapiUserGroup})
+	// 门B 关联校验闸(20-§8,**全绿才建组织**,任一不过明确报错不留半截)。
+	var assocCred newapi.MemberCred
+	billingKind := model.BillingKindWallet
+	if a := in.Associate; a != nil {
+		if a.NewapiUserID <= 0 || a.AccessToken == "" {
+			return nil, apperr.InvalidParam("关联模式须提供 new-api 用户 id 与 access token")
+		}
+		assocCred = newapi.MemberCred{NewapiUserID: int(a.NewapiUserID), AccessToken: a.AccessToken}
+		// ① token 有效 + 解出的 user 恰好==录入的(防串号/粘错)。
+		info, ierr := s.upstream.GetSelfInfo(ctx, assocCred)
+		if ierr != nil {
+			return nil, apperr.InvalidParam("access token 无效或已过期,请企业在 new-api 重新生成后再录入")
+		}
+		if int64(info.ID) != a.NewapiUserID {
+			return nil, apperr.InvalidParam(fmt.Sprintf("access token 属于用户 %d,与录入的 %d 不符(防串号,拒绝)", info.ID, a.NewapiUserID))
+		}
+		// ② role 闸:必须普通用户(拒 admin/超管——最小权限,防越权凭证放大爆炸半径;新-7)。
+		if info.Role != newapi.RoleCommonUser {
+			return nil, apperr.InvalidParam("该 new-api 用户是管理员/超级管理员,拒绝关联;请企业为组织专门建一个普通用户再生成 token")
+		}
+		// ③ 录入分组须与该用户在 new-api 的真实分组一致(防呆:分组是折扣/可用模型的归属边界)。
+		if info.Group != in.NewapiUserGroup {
+			return nil, apperr.InvalidParam(fmt.Sprintf("该用户在 new-api 的分组是 %q,与录入的 %q 不符", info.Group, in.NewapiUserGroup))
+		}
+		// ④ 未被其它组织关联(一个 new-api 用户只属一个组织;残余并发竞态由 uk_org_newapi_user 兜)。
+		if _, taken, derr := s.store.GetOrgIDByNewapiUserID(ctx, a.NewapiUserID); derr != nil {
+			return nil, apperr.Internal("").WithCause(derr)
+		} else if taken {
+			return nil, apperr.Conflict("该 new-api 用户已被其它组织关联")
+		}
+		// ⑤ 订阅口径(19-§8-①):有 active 订阅 → billing_kind=subscription(不强改企业计费,余额页显示"订阅计费");
+		//    无订阅 → wallet + 设 wallet_only(堵订阅旁路 H1;失败由 provision 幂等补设兜底)。
+		sub, serr := s.upstream.GetSelfSubscription(ctx, assocCred)
+		if serr != nil {
+			return nil, mapUpstream(serr)
+		}
+		if sub.HasActive {
+			billingKind = model.BillingKindSub
+		} else if sub.BillingPreference != "wallet_only" {
+			if perr := s.upstream.SetBillingPreference(ctx, assocCred, "wallet_only"); perr != nil {
+				s.log.Warn("关联组织设 wallet_only 失败(provision 幂等补设兜底)", "err", perr)
+			}
+		}
+	}
+
+	orgID, err := s.store.CreateOrganization(ctx, &model.Organization{
+		Name: in.Name, Slug: in.Slug, NewapiUserGroup: &in.NewapiUserGroup,
+		CreatedByPlatform: in.Associate == nil, // 0022 正交属性:门A=true(可清资产/可自愈)/门B=false(企业资产永不删)
+		BillingKind:       billingKind,
+	})
 	if errors.Is(err, repo.ErrConflict) {
 		return nil, apperr.Conflict("组织 slug 或 new-api 用户分组已被占用(一个用户分组只绑一个组织)")
 	}
@@ -102,13 +163,121 @@ func (s *Service) CreateOrg(ctx context.Context, c session.Claims, in CreateOrgI
 		s.log.Error("建组织默认档失败", "org_id", orgID, "err", terr)
 	}
 
+	// 门B:绑定企业 user 凭证(password 留空——无密码不能自愈,失效运维重粘,19-§7)+ 导入现有令牌为成员。
+	imported, importFailed := 0, 0
+	if a := in.Associate; a != nil {
+		encTok, eerr := s.keyring.EncryptString(a.AccessToken)
+		if eerr != nil {
+			return nil, apperr.Internal("").WithCause(eerr)
+		}
+		wrote, werr := s.store.SetOrgNewapiUser(ctx, orgID, a.NewapiUserID, []byte(encTok), nil)
+		if werr != nil || !wrote {
+			// uk_org_newapi_user 并发撞车(两运营方同时关联同一企业 user):补偿归档半截组织,明确报错(F2 不留半截)。
+			_ = s.store.SetOrgArchived(ctx, orgID, true)
+			if errors.Is(werr, repo.ErrConflict) || werr == nil {
+				return nil, apperr.Conflict("该 new-api 用户刚被并发关联(本组织已回收),请核实后重试")
+			}
+			return nil, apperr.Internal("").WithCause(werr)
+		}
+		imported, importFailed = s.importOrgTokens(ctx, orgID, assocCred, a.NamePolicy)
+	}
+
 	org, err := s.store.GetOrganization(ctx, orgID)
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)
 	}
-	s.audit(ctx, c, orgID, "create_org", "organization", &orgID, map[string]any{"name": in.Name, "slug": in.Slug, "admin_email": in.AdminEmail})
+	s.audit(ctx, c, orgID, "create_org", "organization", &orgID, map[string]any{
+		"name": in.Name, "slug": in.Slug, "admin_email": in.AdminEmail,
+		"mode": map[bool]string{true: "associated", false: "created"}[in.Associate != nil],
+		"imported": imported, "import_failed": importFailed,
+	})
 
-	return &CreateOrgResult{Org: org, AdminMemberID: adminID, AdminEmail: in.AdminEmail, AdminInitialPassword: pw}, nil
+	return &CreateOrgResult{Org: org, AdminMemberID: adminID, AdminEmail: in.AdminEmail, AdminInitialPassword: pw,
+		ImportedMembers: imported, ImportFailed: importFailed}, nil
+}
+
+// importOrgTokens 门B 导入:把关联用户名下**全部**现有令牌逐个导入为平台成员(19-F2/20-§5)。
+// 幂等:SELECT-then-skip(uk_key_token_newapi 已有行=已导入,跳过)——**绝不裸 INSERT 撞唯一键**(insertKeyTokenTx
+// 是普通 INSERT,F-C 教训);重跑安全,失败的下次"重新导入"补齐。只读导入:分组/模型限制/状态带过来**不改动**、
+// 明文 key 拿不到只存脱敏(员工继续用旧 key);失败复用 F-A 补偿纪律(标失败+释放邮箱),**绝不删企业令牌**(企业资产)。
+func (s *Service) importOrgTokens(ctx context.Context, orgID int64, cred newapi.MemberCred, namePolicy string) (imported, failed int) {
+	org, oerr := s.store.GetOrganization(ctx, orgID)
+	if oerr != nil {
+		s.log.Error("导入:读组织失败", "org_id", orgID, "err", oerr)
+		return 0, 0
+	}
+	tokens, lerr := s.upstream.ListUserTokens(ctx, cred)
+	if lerr != nil {
+		s.log.Error("导入:拉取令牌列表失败(可重新导入)", "org_id", orgID, "err", lerr)
+		return 0, 0
+	}
+	for _, t := range tokens {
+		if _, _, found, aerr := s.store.GetMemberByNewapiTokenID(ctx, int64(t.ID)); aerr != nil {
+			s.log.Error("导入:查重失败,跳过该令牌", "token_id", t.ID, "err", aerr)
+			failed++
+			continue
+		} else if found {
+			continue // 已导入(幂等重跑)
+		}
+		name := t.Name
+		if namePolicy == "random" || name == "" {
+			name = "成员-" + randEmailSuffix()
+		}
+		grp := t.Group
+		memberID, cerr := s.store.CreateMemberProvisional(ctx, &model.Member{
+			OrgID: orgID, LoginEmail: org.Slug + "-" + randEmailSuffix() + "@nexus.local",
+			DisplayName: &name, Role: string(session.RoleMember), NewapiGroup: &grp,
+		})
+		if cerr != nil {
+			s.log.Error("导入:建成员失败", "token_id", t.ID, "err", cerr)
+			failed++
+			continue
+		}
+		masked := t.KeyMasked
+		if masked == "" {
+			masked = "••••"
+		}
+		tid := int64(t.ID)
+		final := &model.Member{ID: memberID, OrgID: orgID, NewapiTokenID: &tid, KeyMasked: &masked, KeyRotation: 1}
+		if ferr := s.store.FinalizeBootstrap(ctx, final, t.Name); ferr != nil {
+			if merr := s.store.MarkBootstrapFailedAndRelease(ctx, orgID, memberID); merr != nil {
+				s.log.Error("导入:finalize 失败且标记失败也失败", "member_id", memberID, "err", merr)
+			}
+			s.log.Error("导入:绑定令牌失败(标失败,重新导入可补)", "token_id", t.ID, "member_id", memberID, "err", ferr)
+			failed++
+			continue
+		}
+		if t.Status == 2 { // 带过来禁用状态(只改平台侧展示,不动 new-api——只读导入)
+			_ = s.store.UpdateMemberStatus(ctx, orgID, memberID, model.MemberStatusDisabled)
+		}
+		imported++
+	}
+	s.log.Info("门B 令牌导入完成", "org_id", orgID, "total", len(tokens), "imported", imported, "failed", failed)
+	return imported, failed
+}
+
+// ReimportOrgTokens 门B"重新导入"(运营方,幂等):导入中途失败/后续补齐用。只补建缺的,已导入的跳过。
+func (s *Service) ReimportOrgTokens(ctx context.Context, c session.Claims, orgID int64) (imported, failed int, err error) {
+	if err := assertRole(c, session.RoleOperator); err != nil {
+		return 0, 0, err
+	}
+	org, gerr := s.store.GetOrganization(ctx, orgID)
+	if errors.Is(gerr, repo.ErrNotFound) {
+		return 0, 0, apperr.NotFound("组织不存在")
+	}
+	if gerr != nil {
+		return 0, 0, apperr.Internal("").WithCause(gerr)
+	}
+	if org.CreatedByPlatform {
+		return 0, 0, apperr.InvalidParam("仅关联型组织支持重新导入")
+	}
+	cred, cerr := s.orgCred(ctx, orgID)
+	if cerr != nil {
+		return 0, 0, cerr
+	}
+	imported, failed = s.importOrgTokens(ctx, orgID, cred, "inherit")
+	s.audit(ctx, c, orgID, "reimport_tokens", "organization", &orgID, map[string]any{"imported": imported, "failed": failed})
+	return imported, failed, nil
 }
 
 // GetOrg 取组织详情(运营方任意 / 组织管理员本组织)。

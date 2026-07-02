@@ -418,7 +418,15 @@ func (s *Service) EnsureOrgProvisioned(ctx context.Context, orgID int64, orgName
 	if cred, ok, err := s.loadOrgCred(ctx, orgID); err != nil {
 		return newapi.MemberCred{}, err
 	} else if ok {
-		return cred, nil // 快路径:已开通(无锁读)
+		s.ensureWalletOnly(ctx, orgID, cred) // v1 H1(20-§7):幂等补设,不靠一次性动作
+		return cred, nil                     // 快路径:已开通(无锁读)
+	}
+	// 【#6 涉钱红线 guard,20-§8】门B 关联组织(created_by_platform=false)的 new-api user 是**企业资产**:
+	// 若走到这(凭证缺失)绝不允许平台"新建 user+初始清零"兜底——新建虽然清的是新 user,但会把组织悄悄换绑到
+	// 平台 user 上、企业原池子被甩开(账就串了)。显式拒 + 告警,运维重粘 access token(19-§7)。
+	if org, gerr := s.store.GetOrganization(ctx, orgID); gerr == nil && !org.CreatedByPlatform {
+		s.log.Error("关联组织凭证缺失:拒绝平台新建 user 兜底,需运维重粘 access token", "org_id", orgID)
+		return newapi.MemberCred{}, apperr.New(apperr.CodeInvalidParam, 409, "关联组织凭证待更新,请运维重新录入 access token")
 	}
 	release, lerr := s.quotaLocker.Acquire(ctx, provisionLockKey(orgID))
 	if lerr != nil {
@@ -467,10 +475,38 @@ func (s *Service) EnsureOrgProvisioned(ctx context.Context, orgID int64, orgName
 	}
 	// 模型2 escrow 对账前提:org user 初始额度/邀请赠送清零,使"已释放(桶1)==newapi(quota+used)"恒成立。
 	// 一次性、刚建无令牌无消费,override 0 安全(override 禁令针对花钱热路径,不含此处)。失败也由 reconcile 自愈。
+	// 注(#6):此清零只作用于**本次平台刚 Bootstrap 出来的新 user**;门B 关联组织在函数开头已被 guard 拒绝,
+	// 物理到不了这——企业池子余额分文不动(测试 AssocPoolUntouched)。
 	if err := s.upstream.ManageUserQuota(ctx, res.NewapiUserID, newapi.QuotaOverride, 0); err != nil {
 		s.log.Warn("org user 初始额度清零失败(reconcile 将纠偏)", "org_id", orgID, "err", err)
 	}
-	return newapi.MemberCred{NewapiUserID: res.NewapiUserID, AccessToken: res.AccessToken}, nil
+	cred := newapi.MemberCred{NewapiUserID: res.NewapiUserID, AccessToken: res.AccessToken}
+	s.ensureWalletOnly(ctx, orgID, cred) // v1 H1(20-§7):门A 建号即设 wallet_only(堵订阅旁路);失败靠幂等补设
+	return cred, nil
+}
+
+// ensureWalletOnly v1 订阅口径 H1(20-§7):钱包组织(billing_kind=wallet)幂等确保 new-api 侧
+// billing_preference=wallet_only(billing_session.go:404 永不回退订阅)——否则该 user 一旦有 active 订阅,
+// 消费走订阅**不扣 user.quota**(quota.go:411-425),读求和余额虚高、原生停服失效。
+// 订阅组织(门B 关联时检测到 active 订阅)不碰企业计费方式(19-§8-①)。best-effort:失败告警,下次 provision 重试。
+func (s *Service) ensureWalletOnly(ctx context.Context, orgID int64, cred newapi.MemberCred) {
+	org, err := s.store.GetOrganization(ctx, orgID)
+	if err != nil || org.BillingKind != model.BillingKindWallet {
+		return
+	}
+	sub, gerr := s.upstream.GetSelfSubscription(ctx, cred)
+	if gerr != nil {
+		s.log.Warn("读订阅偏好失败(wallet_only 待下次补设)", "org_id", orgID, "err", gerr)
+		return
+	}
+	if sub.BillingPreference == "wallet_only" {
+		return // 已是目标态(幂等快路径)
+	}
+	if serr := s.upstream.SetBillingPreference(ctx, cred, "wallet_only"); serr != nil {
+		s.log.Error("设 wallet_only 失败(订阅旁路风险,待下次 provision 补设)", "org_id", orgID, "err", serr)
+		return
+	}
+	s.log.Info("org user 已设 wallet_only(堵订阅旁路 H1)", "org_id", orgID)
 }
 
 // orgCred 取组织的 new-api 凭证(模型2:员工 token 一律在 org user 下建/管,用 org 的 user_id + access_token)。

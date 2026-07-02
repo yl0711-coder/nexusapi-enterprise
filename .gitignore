@@ -25,3 +25,8 @@ dev/测试指南.md
 dev/工单-*/
 dev/工单-*.md
 dev/研发回执-*.md
+
+# 联调临时产物(new-api uid/token 转储等,勿入库)
+/*_newapi_uid.txt
+/*_newapi_token.txt
+orgA_newapi_uid.txt

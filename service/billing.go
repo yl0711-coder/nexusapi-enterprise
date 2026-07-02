@@ -205,6 +205,9 @@ func (s *Service) GetBalance(ctx context.Context, c session.Claims, orgID int64)
 
 // ListRecharges 列入账记录(O/A)。
 func (s *Service) ListRecharges(ctx context.Context, c session.Claims, orgID int64, limit, offset int) ([]*model.Recharge, int, error) {
+	if !s.fundingEnabled {
+		return nil, 0, apperr.NotFound("") // v1 escrow 休眠(产品软点):平台不经手钱,充值流水端点一并下线(卫生)
+	}
 	if err := assertOrgScope(c, orgID); err != nil {
 		return nil, 0, err
 	}
@@ -306,6 +309,9 @@ func (s *Service) RequestRecharge(ctx context.Context, c session.Claims, orgID i
 
 // ListRechargeRequests 列申请(O/A)。
 func (s *Service) ListRechargeRequests(ctx context.Context, c session.Claims, orgID int64, limit, offset int) ([]*model.RechargeRequest, int, error) {
+	if !s.fundingEnabled {
+		return nil, 0, apperr.NotFound("") // v1 escrow 休眠(产品软点):平台不经手钱,充值流水端点一并下线(卫生)
+	}
 	if err := assertOrgScope(c, orgID); err != nil {
 		return nil, 0, err
 	}
@@ -395,6 +401,11 @@ func (s *Service) recomputeOrgStatus(ctx context.Context, orgID int64, b *model.
 	org, err := s.store.GetOrganization(ctx, orgID)
 	if err != nil {
 		return err
+	}
+	// GAP-2(三总监验收):运维硬停(hard_stopped)与余额状态机正交——结算/入账驱动的状态重算**绝不覆盖硬停**,
+	// 否则 v2 开钱后一次结算就把风控硬停的组织翻回 active(风控失效)。解除硬停只走 HardStopOrg(release)。
+	if org.Status == model.OrgStatusHardStopped {
+		return nil
 	}
 	if org.Status == target {
 		return nil

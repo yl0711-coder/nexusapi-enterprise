@@ -399,6 +399,22 @@ func TestIntegration_LedgerRescueLateCommit(t *testing.T) {
 		t.Fatalf("🔴补漏重跑不应重复计入,实=%d", got)
 	}
 	t.Logf("M3 补漏真账 ok: 迟提交漏行(id≤水位+窗口已过)被补扫捞回 4000000;重跑查重不双计")
+
+	// BUG-1 边界回归(三总监验收):一条 created_at **恰等于 since**、id>水位的迟提交行,只能被主窗口收一次——
+	// 补漏区间上界是 since−1,不与主窗口 [since, until] 重叠;修复前两阶段各算一次=报表多算。去修复(rescanUntil
+	// 改回 since)本断言必红。
+	var curTS int64
+	_ = store.DB().QueryRowContext(ctx, `SELECT last_settled_ts FROM settlement_cursor WHERE org_id=0`).Scan(&curTS)
+	seedConsumptionLogTok(t, newapiSQLDSN, int64(cred.NewapiUserID), tokenID, "gpt-edge", 2_000_000, curTS) // created_at==since
+	time.Sleep(7 * time.Second) // 让 until(now−lag5s) 越过 since,主窗口张开(否则窗口为空提前返回,边界行读不到)
+	if _, err := svc.RunSettlement(ctx); err != nil {
+		t.Fatalf("边界结算失败: %v", err)
+	}
+	_ = store.DB().QueryRowContext(ctx, `SELECT COALESCE(SUM(consumed_quota),0) FROM usage_ledger WHERE org_id=?`, orgID).Scan(&got)
+	if got != 6_000_000 { // 4000000 + 边界行恰一次 2000000;双计=8000000
+		t.Fatalf("🔴BUG-1:created_at==since 的迟提交行应只计一次(总额 6000000),实=%d(8000000=补漏与主窗口双计)", got)
+	}
+	t.Logf("BUG-1 边界真账 ok: created_at==since 的行只被主窗口收一次(总额 6000000),补漏区间 since-1 不重叠")
 }
 
 // M4 时点归因:离职(软删)成员的迟同步历史消费仍归原成员,不丢不串。

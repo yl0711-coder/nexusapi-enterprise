@@ -197,13 +197,17 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 	// 没看见、时间窗又推过去 → 不补扫即永久漏。重扫 [since−overlap, since),已入 usage_detail 的查重跳过。
 	// **绝不在此推进 maxLogID**:该区间靠查重幂等;高水位只能在"完全可见"的主窗口内推进,否则时钟偏斜的
 	// 大 id 会把主窗口外未读的行永久挡在水位下。
+	// BUG-1(三总监验收):补漏区间上界必须 since−1——logs API 时间过滤双闭区间,补漏到 since 会与主窗口
+	// [since, untilSub] 在 created_at==since 上重叠;一条恰在 since、迟提交(id>水位)的行会被两阶段各算一次
+	// (detail 的 INSERT IGNORE 只防落库重复,同轮内存里 ledger 桶已累加两次)→ 报表多算、ledger 与 detail 背离。
 	rescanSince := since - settlementRescanOverlapSec
 	if rescanSince < 0 {
 		rescanSince = 0
 	}
+	rescanUntil := since - 1
 	var rescan []newapi.LogEntry
 	for page := 1; page <= settlementRescanMaxPages; page++ {
-		entries, total, rerr := s.upstream.ReadConsumptionLogs(ctx, rescanSince, since, page, 100)
+		entries, total, rerr := s.upstream.ReadConsumptionLogs(ctx, rescanSince, rescanUntil, page, 100)
 		if rerr != nil {
 			return 0, mapUpstream(rerr)
 		}

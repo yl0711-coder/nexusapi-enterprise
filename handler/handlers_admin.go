@@ -79,8 +79,9 @@ func (h *Handler) handleSetApprovalRules(w http.ResponseWriter, r *http.Request)
 
 // PATCH /members/{id} — 改团队/层级。
 type updateMemberReq struct {
-	TeamID *int64 `json:"team_id"`
-	TierID *int64 `json:"tier_id"`
+	TeamID      *int64  `json:"team_id"`
+	TierID      *int64  `json:"tier_id"`
+	DisplayName *string `json:"display_name"` // v1 19-F2:管理员改成员显示名(导入名/随机名可改)
 }
 
 func (h *Handler) handleUpdateMember(w http.ResponseWriter, r *http.Request) {
@@ -95,7 +96,7 @@ func (h *Handler) handleUpdateMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, err)
 		return
 	}
-	m, err := h.svc.UpdateMember(r.Context(), c, c.OrgID, mid, in.TeamID, in.TierID)
+	m, err := h.svc.UpdateMember(r.Context(), c, c.OrgID, mid, in.TeamID, in.TierID, in.DisplayName)
 	if err != nil {
 		writeErr(w, r, err)
 		return

@@ -21,6 +21,9 @@ type orgView struct {
 	DefaultTierID *int64 `json:"default_tier_id"`
 	BillingMode   string `json:"billing_mode"`
 	Archived      bool   `json:"archived"` // T12:是否已归档
+	// v1 正交属性(0022,只暴露非敏感位):门A/门B(前端"重新导入"按钮判断)+ 计费口径(订阅显示)。
+	CreatedByPlatform bool   `json:"newapi_created_by_platform"`
+	BillingKind       string `json:"billing_kind"`
 	CreatedAt     string `json:"created_at"`
 }
 
@@ -28,6 +31,7 @@ func toOrgView(o *model.Organization) orgView {
 	return orgView{
 		ID: o.ID, Name: o.Name, Slug: o.Slug, Status: o.Status, Timezone: o.Timezone,
 		DefaultTierID: o.DefaultTierID, BillingMode: o.BillingMode, Archived: o.ArchivedAt != nil,
+		CreatedByPlatform: o.CreatedByPlatform, BillingKind: o.BillingKind,
 		CreatedAt: o.CreatedAt.Format(time.RFC3339),
 	}
 }

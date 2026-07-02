@@ -96,11 +96,20 @@ func (s *Service) SetApprovalRules(ctx context.Context, c session.Claims, orgID 
 	return s.store.GetApprovalRules(ctx, orgID)
 }
 
-// UpdateMember 改成员团队/层级(PATCH /members/:id,A/L)。改层级会重算 override 下发。
-func (s *Service) UpdateMember(ctx context.Context, c session.Claims, orgID, memberID int64, teamID, tierID *int64) (*model.Member, error) {
+// UpdateMember 改成员团队/层级/显示名(PATCH /members/:id,A/L)。改层级会重算 override 下发。
+// v1 加 displayName(19-F2:导入/开通的成员管理员可随时改名)。
+func (s *Service) UpdateMember(ctx context.Context, c session.Claims, orgID, memberID int64, teamID, tierID *int64, displayName *string) (*model.Member, error) {
 	m, err := s.loadManageableMember(ctx, c, orgID, memberID)
 	if err != nil {
 		return nil, err
+	}
+	if displayName != nil {
+		if err := checkName("显示名", *displayName, maxNameLen); err != nil {
+			return nil, err
+		}
+		if err := s.store.UpdateMemberDisplayName(ctx, orgID, memberID, *displayName); err != nil {
+			return nil, apperr.Internal("").WithCause(err)
+		}
 	}
 	if teamID != nil {
 		if _, err := s.store.GetTeam(ctx, orgID, *teamID); errors.Is(err, repo.ErrNotFound) {
@@ -129,7 +138,7 @@ func (s *Service) UpdateMember(ctx context.Context, c session.Claims, orgID, mem
 			s.log.Warn("改团队/层级后重算 override 失败", "member_id", memberID, "err", err)
 		}
 	}
-	s.audit(ctx, c, orgID, "update_member", "member", &memberID, map[string]any{"team_id": teamID, "tier_id": tierID})
+	s.audit(ctx, c, orgID, "update_member", "member", &memberID, map[string]any{"team_id": teamID, "tier_id": tierID, "renamed": displayName != nil})
 	return s.store.GetMember(ctx, orgID, memberID)
 }
 

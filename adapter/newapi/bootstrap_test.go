@@ -17,6 +17,14 @@ func testInput() BootstrapInput {
 	}
 }
 
+// testInputAdopt v1.1 项B:模拟"重开/重试本方已拥有的用户名"(AllowAdopt=true)——撞"已存在"应 adopt 复用,
+// 而非当外部用户报冲突。首次 provision(AllowAdopt=false)的撞名归属闸另由 orgusername 集成测试覆盖。
+func testInputAdopt() BootstrapInput {
+	in := testInput()
+	in.AllowAdopt = true
+	return in
+}
+
 func TestBootstrapMember_HappyPath(t *testing.T) {
 	f := newFakeNewapi()
 	defer f.close()
@@ -75,11 +83,11 @@ func TestBootstrapMember_IdempotentAdopt(t *testing.T) {
 	defer f.close()
 	a := New(f.config(), nil)
 
-	first, err := a.BootstrapMember(context.Background(), testInput())
+	first, err := a.BootstrapMember(context.Background(), testInputAdopt())
 	if err != nil {
 		t.Fatalf("first bootstrap: %v", err)
 	}
-	second, err := a.BootstrapMember(context.Background(), testInput())
+	second, err := a.BootstrapMember(context.Background(), testInputAdopt())
 	if err != nil {
 		t.Fatalf("second bootstrap: %v", err)
 	}
@@ -113,7 +121,7 @@ func TestBootstrapMember_ConcurrentSameMemberSerialized(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			results[i], errs[i] = a.BootstrapMember(context.Background(), testInput())
+			results[i], errs[i] = a.BootstrapMember(context.Background(), testInputAdopt())
 		}(i)
 	}
 	wg.Wait()

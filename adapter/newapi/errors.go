@@ -24,6 +24,7 @@ const (
 	CodeUpstreamRevealKey = 50203 // 上游取 key 失败
 	CodeUpstreamAuth      = 50301 // 上游鉴权失效(凭证问题;自愈失败才返此)
 	CodeUpstreamBizReject = 50400 // 上游业务拒绝(如模型未配价拒发)
+	CodeUsernameConflict  = 50409 // v1.1 项B:首次 provision 的随机用户名撞了外部 new-api 用户(绝不接管,调用方重生成)
 	CodeUpstreamDown      = 50500 // 上游不可用(连接失败/熔断打开)
 	CodeUpstreamTimeout   = 50504 // 上游超时
 )
@@ -56,6 +57,12 @@ func (e *UpstreamError) Retryable() bool { return e.class == classRetryable }
 
 // AuthExpired 报告是否为上游鉴权失效(401),用以触发 §2.7 自愈复核。
 func (e *UpstreamError) AuthExpired() bool { return e.class == classAuthExpired }
+
+// IsUsernameConflict 报告是否为 v1.1 项B 的"随机用户名撞外部用户"(首次 provision,绝不接管;调用方重生成随机名重试)。
+func IsUsernameConflict(err error) bool {
+	var e *UpstreamError
+	return errors.As(err, &e) && e.PlatformCode == CodeUsernameConflict
+}
 
 // classifyHTTP 把上游 HTTP 状态码映射成 errClass + 平台码。
 // step 用于选对 5xxxx 码;timeout/连接错由 newTransportError 单独构造。

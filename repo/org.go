@@ -61,7 +61,7 @@ func (s *Store) GetOrgIDByNewapiUserID(ctx context.Context, newapiUserID int64) 
 
 // orgCols 组织查询列清单(与 scanOrg 一一对应,唯一来源防三处漂移)。
 const orgCols = `id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, default_token_group, archived_at,
-	funding_mode, newapi_user_created_by_platform, member_cap_mode, billing_kind, created_at, updated_at`
+	newapi_username, funding_mode, newapi_user_created_by_platform, member_cap_mode, billing_kind, created_at, updated_at`
 
 // GetOrganization 按 id 取组织(未删)。不存在 → ErrNotFound。
 func (s *Store) GetOrganization(ctx context.Context, id int64) (*model.Organization, error) {
@@ -81,11 +81,16 @@ func (s *Store) GetOrganizationBySlug(ctx context.Context, slug string) (*model.
 // access_token/password 由 service 层加密后传入(密钥不进库);password 供 access_token 失效时重登录自愈。
 // **WHERE newapi_user_id IS NULL 守卫**(R5 OBS-3):仅首写生效,返回 wrote=是否本次写入。并发/多节点首开
 // 同组织时后到者落空(wrote=false)→ 调用方改读已落库凭证,防把"已被旋转作废的 access_token"覆盖掉有效凭证。
-func (s *Store) SetOrgNewapiUser(ctx context.Context, orgID, newapiUserID int64, accessTokenEnc, passwordEnc []byte) (bool, error) {
+// v1.1 项B:username 为门A 生成的随机 new-api 用户名(存库,重开/自愈从库读);门B 关联传空(用企业自己的名,不落此列)。
+func (s *Store) SetOrgNewapiUser(ctx context.Context, orgID, newapiUserID int64, username string, accessTokenEnc, passwordEnc []byte) (bool, error) {
+	var uname *string
+	if username != "" {
+		uname = &username
+	}
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE organization SET newapi_user_id = ?, newapi_access_token_enc = ?, newapi_password_enc = ?
+		`UPDATE organization SET newapi_user_id = ?, newapi_username = ?, newapi_access_token_enc = ?, newapi_password_enc = ?
 		   WHERE id = ? AND deleted_at IS NULL AND newapi_user_id IS NULL`,
-		newapiUserID, accessTokenEnc, passwordEnc, orgID)
+		newapiUserID, uname, accessTokenEnc, passwordEnc, orgID)
 	if err != nil {
 		if isDupKey(err) { // uk_org_newapi_user(0022):该 new-api 用户已被别的组织关联(并发竞态兜底)
 			return false, ErrConflict
@@ -313,7 +318,7 @@ type rowScanner interface {
 func scanOrg(r rowScanner) (*model.Organization, error) {
 	var o model.Organization
 	err := r.Scan(&o.ID, &o.Name, &o.Slug, &o.Status, &o.Timezone, &o.NewapiUserGroup,
-		&o.DefaultTierID, &o.BillingMode, &o.DefaultTokenGroup, &o.ArchivedAt,
+		&o.DefaultTierID, &o.BillingMode, &o.DefaultTokenGroup, &o.ArchivedAt, &o.NewapiUsername,
 		&o.FundingMode, &o.CreatedByPlatform, &o.MemberCapMode, &o.BillingKind, &o.CreatedAt, &o.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound

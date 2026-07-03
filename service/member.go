@@ -453,10 +453,30 @@ func (s *Service) EnsureOrgProvisioned(ctx context.Context, orgID int64, orgName
 	if err != nil {
 		return newapi.MemberCred{}, apperr.Internal("").WithCause(err)
 	}
-	res, berr := s.upstream.BootstrapMember(ctx, newapi.BootstrapInput{
-		OrgID: orgID, MemberID: 0, Username: deriveOrgUsername(orgID), Password: pw, DisplayName: orgName, SkipToken: true,
-	})
-	if berr != nil {
+	// v1.1 项B:门A 用户名 = 高熵随机名(取代可猜的 org<id>)+ 撞名有界重生成。AllowAdopt=false:随机名撞"已存在"
+	// 一定是撞了外部用户 → adapter 返 UsernameConflict、绝不接管/不 disable → 这里重生成重试。生成后随凭证落库。
+	const maxUsernameAttempts = 5
+	var res newapi.BootstrapResult
+	var username string
+	for attempt := 1; ; attempt++ {
+		username, err = genOrgUsername()
+		if err != nil {
+			return newapi.MemberCred{}, apperr.Internal("").WithCause(err)
+		}
+		r, berr := s.upstream.BootstrapMember(ctx, newapi.BootstrapInput{
+			OrgID: orgID, MemberID: 0, Username: username, Password: pw, DisplayName: orgName, SkipToken: true, AllowAdopt: false,
+		})
+		if berr == nil {
+			res = r
+			break
+		}
+		if newapi.IsUsernameConflict(berr) {
+			if attempt < maxUsernameAttempts {
+				s.log.Warn("org 随机用户名撞名,重生成重试", "org_id", orgID, "attempt", attempt)
+				continue
+			}
+			s.log.Error("org 随机用户名连续撞名达上限(生成器/环境异常,需人工核)", "org_id", orgID, "attempts", maxUsernameAttempts)
+		}
 		return newapi.MemberCred{}, mapUpstream(berr)
 	}
 	encAccessNew, err := s.keyring.EncryptString(res.AccessToken)
@@ -467,7 +487,7 @@ func (s *Service) EnsureOrgProvisioned(ctx context.Context, orgID int64, orgName
 	if err != nil {
 		return newapi.MemberCred{}, apperr.Internal("").WithCause(err)
 	}
-	wrote, serr := s.store.SetOrgNewapiUser(ctx, orgID, int64(res.NewapiUserID), []byte(encAccessNew), []byte(encPw))
+	wrote, serr := s.store.SetOrgNewapiUser(ctx, orgID, int64(res.NewapiUserID), username, []byte(encAccessNew), []byte(encPw))
 	if serr != nil {
 		return newapi.MemberCred{}, apperr.Internal("").WithCause(serr)
 	}
@@ -536,6 +556,15 @@ func (s *Service) orgCred(ctx context.Context, orgID int64) (newapi.MemberCred, 
 	return newapi.MemberCred{NewapiUserID: int(uid), AccessToken: accessToken}, nil
 }
 
+// orgNewapiUsername v1.1 项B:取组织存库的 new-api 用户名(随机名);NULL 遗留组织(灰度清库后不该有)兜底旧 org<id> 口径。
+func (s *Service) orgNewapiUsername(ctx context.Context, orgID int64) string {
+	if org, err := s.store.GetOrganization(ctx, orgID); err == nil && org.NewapiUsername != nil && *org.NewapiUsername != "" {
+		return *org.NewapiUsername
+	}
+	s.log.Warn("组织无存库 new-api 用户名,兜底旧 org<id> 口径(遗留数据?)", "org_id", orgID)
+	return deriveOrgUsername(orgID)
+}
+
 // EnsureFreshCred 401 自愈(R5后步骤5,§15):持 per-org 锁 → 锁内先 Probe 现存 access_token(有效即用,别无谓轮换)
 // → 失效则用**存的加密密码重登**派生新 token、加密落库 → 返回新凭证。重登失败=放弃返错(调用方报警)。
 // org user 凭证当内部密钥用(别给人登以降误旋转);probe-first 复用弱化 OBS-3 旋转竞态。
@@ -564,8 +593,10 @@ func (s *Service) EnsureFreshCred(ctx context.Context, orgID int64) (newapi.Memb
 	if derr != nil {
 		return newapi.MemberCred{}, apperr.Internal("").WithCause(derr)
 	}
+	// v1.1 项B:重登用**库里存的随机用户名**(不再按 org<id> 猜)。遗留组织(NULL,灰度清库后不该有)兜底旧口径。
+	username := s.orgNewapiUsername(ctx, orgID)
 	newAccess, rerr := s.upstream.RefreshAccessToken(ctx, newapi.BootstrapInput{
-		OrgID: orgID, MemberID: 0, Username: deriveOrgUsername(orgID), Password: pw,
+		OrgID: orgID, MemberID: 0, Username: username, Password: pw,
 	})
 	if rerr != nil {
 		return newapi.MemberCred{}, mapUpstream(rerr)

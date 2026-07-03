@@ -170,7 +170,8 @@ func (s *Service) CreateOrg(ctx context.Context, c session.Claims, in CreateOrgI
 		if eerr != nil {
 			return nil, apperr.Internal("").WithCause(eerr)
 		}
-		wrote, werr := s.store.SetOrgNewapiUser(ctx, orgID, a.NewapiUserID, []byte(encTok), nil)
+		// 门B 关联:用企业自己的 new-api 用户名(不落 newapi_username,传空);password 留空(无自愈,运维重粘)。项B 门A-only。
+		wrote, werr := s.store.SetOrgNewapiUser(ctx, orgID, a.NewapiUserID, "", []byte(encTok), nil)
 		if werr != nil || !wrote {
 			// uk_org_newapi_user 并发撞车(两运营方同时关联同一企业 user):补偿归档半截组织,明确报错(F2 不留半截)。
 			_ = s.store.SetOrgArchived(ctx, orgID, true)

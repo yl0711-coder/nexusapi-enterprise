@@ -51,6 +51,7 @@ type Organization struct {
 	DefaultTokenGroup *string    // 组织级默认令牌计价分组(D1 两级;nil=回落 default)
 	ArchivedAt        *time.Time // 归档时间(NULL=未归档,T12)
 	NewapiUserID      *int64     // 模型2(0020):组织=一个 new-api user,此为池子锚(user.quota=预付池子);nil=尚未开通
+	NewapiUsername    *string    // v1.1 项B(0024):门A 组织 new-api 用户名(随机名存库,取代可猜的 org<id>);门B/未开通=nil
 	AccessTokenEnc    []byte     // 模型2(0020):该组织 new-api user 的 access_token,应用层加密存(建员工 token 用);列 newapi_access_token_enc
 	PasswordEnc       []byte     // 模型2(0020):该组织 new-api user 的密码,加密存(access_token 失效时重登录自愈);列 newapi_password_enc
 	// v1 正交属性(0022,20-§2):一种组织按属性工作,不按场景分支;场景(门A/门B)仅决定初值。

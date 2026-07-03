@@ -35,6 +35,11 @@ type BootstrapInput struct {
 	DisplayName string
 	Role        string // new-api role,成员一般为普通用户
 	SkipToken   bool   // 改动②(MVP):只建用户、不建令牌(令牌由员工自助建,改动③);仍取 access_token 供自助建 key
+	// AllowAdopt v1.1 项B 归属校验闸:
+	//   true  = 重开/重试同组织,Username 是本组织库里存好的名 → CreateUser 撞"已存在"即接管(确是自己的用户)。
+	//   false = 首次 provision,Username 是刚生成的随机名(库里还没有)→ 撞"已存在"= 撞了外部用户 → **绝不接管**,
+	//           返 ErrUsernameConflict(IsUsernameConflict 可判),由调用方重生成随机名重试;绝不 disable 那个外部用户。
+	AllowAdopt bool
 }
 
 // BootstrapResult 是代发 key 全链路成功后的产物。

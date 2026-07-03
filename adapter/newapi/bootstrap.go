@@ -39,7 +39,19 @@ func (a *Adapter) BootstrapMember(ctx context.Context, in BootstrapInput) (Boots
 	}
 	defer release()
 
-	// ① CreateUser:确定性 username 作幂等键。已存在 → 接管(§2.5)。
+	// 归属校验闸(v1.1 项B):AllowAdopt=false(首次 provision,Username 是刚生成的随机名)时,**建之前先确定性预检**——
+	// 名若已存在 = 撞了外部用户(我们的随机名库里还没有)→ 立即返 UsernameConflict,**绝不 CreateUser/接管/disable**,
+	// 由调用方重生成随机名重试。不靠解析上游"已存在"错误消息(不稳),用 getUserByUsername 直接判,确定性。
+	if !in.AllowAdopt {
+		if _, found, ferr := a.getUserByUsername(ctx, in.Username); ferr == nil && found {
+			a.c.log("WARN", "bootstrap.username_conflict_external", map[string]any{"org_id": in.OrgID, "username": in.Username})
+			return BootstrapResult{}, &UpstreamError{Step: stepCreateUser, PlatformCode: CodeUsernameConflict, Message: "new-api 用户名已被占用(疑外部用户),不接管", class: classNonRetryable}
+		}
+	}
+
+	// ① CreateUser:username 作幂等键。撞"已存在"的处置分两种(v1.1 项B 归属校验闸):
+	//   - AllowAdopt=true(重开/重试,Username 是本组织库里存好的名)→ 接管(确是自己的用户,§2.5)。
+	//   - AllowAdopt=false(预检后仍撞,罕见并发抢注)→ **绝不接管**,返 ErrUsernameConflict 让调用方重生成;**绝不 disable**。
 	adopted := false
 	_, cerr := a.c.do(ctx, stepCreateUser, "POST", "/api/user/", adminAuth(a.c.cfg), map[string]any{
 		"username":     in.Username,
@@ -49,11 +61,17 @@ func (a *Adapter) BootstrapMember(ctx context.Context, in BootstrapInput) (Boots
 	})
 	if cerr != nil {
 		if isAlreadyExists(cerr) {
+			if !in.AllowAdopt {
+				// 首次 provision 撞名 = 撞外部用户。绝不接管、绝不触碰那个用户,直接返冲突让上层重生成。
+				a.c.log("WARN", "bootstrap.username_conflict_external", map[string]any{"org_id": in.OrgID, "username": in.Username})
+				return BootstrapResult{}, &UpstreamError{Step: stepCreateUser, PlatformCode: CodeUsernameConflict, Message: "new-api 用户名已被占用(疑外部用户),不接管", class: classNonRetryable}
+			}
 			adopted = true
 			a.c.log("INFO", "bootstrap.adopt_existing_user", map[string]any{"org_id": in.OrgID, "member_id": in.MemberID})
 		} else {
 			// 5xx 已由 client 退避重试过仍失败,或 4xx 语义错;此时用户未确定建成。
-			// 但 5xx 可能"已建成"(§2.2 ①),故仍按 username 查重接管一次再决定。
+			// 但 5xx 可能"已建成"(§2.2 ①):对 AllowAdopt=false 的首次 provision,Username 是刚生成的高熵随机名,
+			// 若此时查得到 = 极大概率是我们 5xx-但已建成的那个(外部预先占用同一随机名的概率 ~2^-80,可忽略)→ 接管安全。
 			if id, found, ferr := a.getUserByUsername(ctx, in.Username); ferr == nil && found {
 				adopted = true
 				a.c.log("WARN", "bootstrap.create_user_uncertain_adopted", map[string]any{"member_id": in.MemberID, "user_id": id})

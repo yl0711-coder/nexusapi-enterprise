@@ -2,6 +2,7 @@ package service
 
 import (
 	"crypto/rand"
+	"encoding/base32"
 	"encoding/base64"
 	"fmt"
 	"strings"
@@ -63,10 +64,21 @@ func randEmailSuffix() string {
 	return strings.ToLower(base64.RawURLEncoding.EncodeToString(b))
 }
 
-// deriveOrgUsername 模型2:组织 new-api user 的确定性 username(幂等键,adopt-existing 防重复建)。
-// 与成员名(o{}m{})不撞:org 名恒带 "org" 前缀、无 'm' 段。<=20。
+// deriveOrgUsername 【已弃用·仅遗留兜底】旧的确定性 org 用户名(org<id>)。v1.1 项B 换成 genOrgUsername 随机名存库
+// (共享 new-api 上 org<id> 可猜/会撞主站客户)。仅在读到 NULL newapi_username 的遗留组织时兜底(灰度清库后不该出现)。
 func deriveOrgUsername(orgID int64) string {
 	return fmt.Sprintf("org%d", orgID)
+}
+
+// genOrgUsername v1.1 项B:门A 组织 new-api 用户名——高熵随机名。`ent_` 前缀(可辨识是平台建的)+ base32 随机,
+// 总长 ≤ 20(满足 rc.4 username 约束)。首次 provision 生成、落库;意外撞名(概率 ~2^-80)由调用方有界重生成兜。
+func genOrgUsername() (string, error) {
+	b := make([]byte, 10) // 10 字节 = 16 个 base32 字符,80 位熵
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	suffix := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b))
+	return "ent_" + suffix, nil // 4 + 16 = 20 字符
 }
 
 // deriveTokenName 派生 new-api 侧确定性 token name(10 §2.5),与 adapter 内部一致。

@@ -104,6 +104,7 @@ func TestContract_AgainstRealRC4(t *testing.T) {
 	// 4) 幂等重开 → 接管同一用户。注意:重开会重新 login+GET token → **旋转 access_token**,
 	//    旧 cred 随即失效(这是 rc.4 既定行为,§2.6)。生产中 service 凭 bootstrap_state=done
 	//    短路、不会重跑;这里重开后必须改用 again 返回的新 token。
+	in.AllowAdopt = true // v1.1 项B:重开本方已拥有的用户名 → adopt(首次已建,此处显式 AllowAdopt=true 走接管路径)
 	again, err := a.BootstrapMember(ctx, in)
 	if err != nil {
 		t.Fatalf("幂等重开失败: %v", err)

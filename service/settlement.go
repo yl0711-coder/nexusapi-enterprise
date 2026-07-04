@@ -163,6 +163,10 @@ func (s *Service) commitUsageOnly(ctx context.Context, tx *sql.Tx, aggs map[stri
 // v1 裁定B(20-§2.1):**落账全组织无条件(报表是 v1 核心交付);billing_enabled 只闸"扣余额"一步**(平台执行扣费=v2)。
 // 返回本次新落账的总消耗(quota)。
 func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
+	// 串行化所有 forward(settlement-worker + escrow-drain 两入口)与历史回填:三者共用 settlementMu,
+	// 绝不并发写 ledger——回填/forward-补漏在 600s 重叠带靠 detail 幂等去重,并发即 TOCTOU 双算(24-§3.3)。
+	s.settlementMu.Lock()
+	defer s.settlementMu.Unlock()
 	cur, err := s.store.GetOrCreateCursor(ctx, 0) // org_id=0 全局 leader 水位
 	if err != nil {
 		return 0, err

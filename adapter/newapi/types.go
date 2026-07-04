@@ -110,6 +110,8 @@ type NewapiAdapter interface {
 
 	// ReadConsumptionLogs 读消费日志窗口(type=2,小窗口分页,绝不全表),供计费结算(03 §3.1)。
 	ReadConsumptionLogs(ctx context.Context, sinceUnix, untilUnix int64, page, pageSize int) ([]LogEntry, int, error)
+	// ReadConsumptionLogsByUsername 同上但按 new-api username 精确过滤,供历史日志回填只拉单个企业用户(24-§7.2)。
+	ReadConsumptionLogsByUsername(ctx context.Context, username string, sinceUnix, untilUnix int64, page, pageSize int) ([]LogEntry, int, error)
 
 	// 计价/折扣联动(03 §3.5.1,单向写入 new-api、只读回显):
 	// 平台只写 GroupGroupRatio(分组特殊倍率,覆盖式);GroupRatio 只读(取基础倍率快照)。

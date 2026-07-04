@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/nexusapi-platform/enterprise/adapter/newapi"
@@ -40,6 +41,17 @@ type Service struct {
 
 	// memberRole 是开通成员时给 new-api 用户的角色(普通用户)。
 	memberRole string
+
+	// settlementMu 串行化所有 forward 结算(RunSettlement:settlement-worker + escrow-drain 两入口)与
+	// 历史回填(RunBackfillSlice),使二者绝不并发——回填与 forward-补漏在 600s 重叠带只靠 usage_detail 幂等
+	// 去重(ledger 无按行去重),并发即 TOCTOU 双算(24-§3.3 命根子)。v1 单节点进程内锁即足;
+	// v2 多节点由选主保证单节点跑这两个 worker(见 project_enterprise_platform_multinode_leader)。
+	settlementMu sync.Mutex
+
+	// backfillWindowsPerTick 历史回填每 tick 处理的子窗口数上限(串行进单写者,防大回填饿死 forward);
+	// backfillQPS 读 new-api 日志的页/秒限速(24-§4.5)。
+	backfillWindowsPerTick int
+	backfillQPS            int
 }
 
 // Deps 是构造 Service 的依赖集合。
@@ -54,6 +66,9 @@ type Deps struct {
 	ObserveMode bool
 	// FundingEnabled 平台经手钱总闸(v1 恒 false=escrow 休眠;v2 开)。
 	FundingEnabled bool
+	// BackfillWindowsPerTick 历史回填每 tick 子窗口数上限(<=0 默认 8);BackfillQPS 读日志页/秒限速(<=0 默认 5)。
+	BackfillWindowsPerTick int
+	BackfillQPS            int
 }
 
 // New 构造 Service。
@@ -61,6 +76,14 @@ func New(d Deps) *Service {
 	log := d.Logger
 	if log == nil {
 		log = slog.Default()
+	}
+	windowsPerTick := d.BackfillWindowsPerTick
+	if windowsPerTick <= 0 {
+		windowsPerTick = 8
+	}
+	qps := d.BackfillQPS
+	if qps <= 0 {
+		qps = 5
 	}
 	return &Service{
 		store:       d.Store,
@@ -72,6 +95,8 @@ func New(d Deps) *Service {
 		observeMode:    d.ObserveMode,
 		fundingEnabled: d.FundingEnabled,
 		memberRole:  "", // new-api 普通用户角色,空 = 默认普通用户
+		backfillWindowsPerTick: windowsPerTick,
+		backfillQPS:            qps,
 	}
 }
 

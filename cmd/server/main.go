@@ -121,6 +121,9 @@ func run(log *slog.Logger) error {
 	svc := service.New(service.Deps{
 		Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log,
 		ObserveMode: mvpMode, FundingEnabled: fundingEnabled,
+		// 历史回填限速旋钮(24-§4.5):默认 8 窗口/tick、5 页/秒,量小够用;大回填靠分片多 tick 排空。
+		BackfillWindowsPerTick: atoiOr("NEXUS_BACKFILL_WINDOWS_PER_TICK", 8),
+		BackfillQPS:            atoiOr("NEXUS_BACKFILL_QPS", 5),
 	})
 
 	// 运营方引导账号(首启种子,幂等)。

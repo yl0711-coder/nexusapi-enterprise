@@ -3,11 +3,47 @@ package service
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/nexusapi-platform/enterprise/adapter/newapi"
 	"github.com/nexusapi-platform/enterprise/repo"
 )
+
+// enqueueBackfill 门B 关联成功后触发历史回填(24-§7.3):快照全局 forward 边界 B、插 pending 任务。
+// 仅由 org.Associate(门B)在关联提交后调用,非阻断。
+//
+// 【B_ts==0 守卫(24-§3.2 订正,涉钱正确性)】cursor 未初始化(forward 尚未首跑)时:
+//   - 直接以 (0,0) 为界:belongsToBackfill 恒 false,回填吃不到历史 + forward 基线又跳过历史 → 静默丢史。
+//   - 简单置 boundary_ts=now 也不行:回填会盖 [now-lag, now),而 forward 基线后的**主窗口**也处理这段
+//     (主窗口只按 id 水位去重、不查 detail 幂等 —— 只有 rescan 查),两边各 += 一次 → ledger 双算。
+//   - 正解:先强制 forward 基线一轮(cursor=(0,0) 时 RunSettlement 只推水位到 now-lag、不读日志,极快),
+//     再以真实 cursor 为界 → 退化成正常情形:回填 <=B 与 forward >B 无缝无叠,唯一重叠(rescan 600s)由 detail 幂等兜。
+func (s *Service) enqueueBackfill(ctx context.Context, orgID, newapiUserID int64, username string) error {
+	if username == "" {
+		return fmt.Errorf("门B 回填触发缺 new-api username(org=%d)", orgID)
+	}
+	cur, err := s.store.GetOrCreateCursor(ctx, 0)
+	if err != nil {
+		return err
+	}
+	if cur.LastSettledTS == 0 {
+		if _, serr := s.RunSettlement(ctx); serr != nil { // cursor=(0,0) 时只做基线(不读日志),快
+			return fmt.Errorf("回填触发前强制 forward 基线失败: %w", serr)
+		}
+		cur, err = s.store.GetOrCreateCursor(ctx, 0)
+		if err != nil {
+			return err
+		}
+		if cur.LastSettledTS == 0 {
+			return fmt.Errorf("强制 forward 基线后 cursor 仍为 0(org=%d),放弃触发以免丢史或双算", orgID)
+		}
+	}
+	return s.store.InsertBackfillJob(ctx, &repo.BackfillJob{
+		OrgID: orgID, NewapiUserID: newapiUserID, NewapiUsername: username,
+		BoundaryTS: cur.LastSettledTS, BoundaryLogID: cur.LastSettledLogID, CursorTS: cur.LastSettledTS,
+	})
+}
 
 // belongsToBackfill 判定一条日志属回填侧(24-§3.1,(created_at, id) 词典序):
 //

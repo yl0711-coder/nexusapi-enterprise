@@ -131,6 +131,30 @@ func (s *Service) ingestEntry(ctx context.Context, sk *settleSink, e newapi.LogE
 	return nil
 }
 
+// commitUsageOnly 是**只写报表**的落账段(24-§4.4):在调用方事务内把本轮聚合落进
+// usage_ledger(小时桶原子自增)+ 逐条明细落进 usage_detail(INSERT IGNORE 幂等)。
+// forward 结算与历史回填**共用此段**,保证两条路径报表口径逐字节一致。
+//
+// 【钱路径绊线】此函数只吃 aggs + details、只返 err;绝不引用 perOrg / maxLogID / cursor.Version / postBal——
+// 扣余额(DeductBalanceTx)与推全局水位(AdvanceCursorTx)是 forward 独有、留在 RunSettlement 事务里,
+// 回填只调本函数(不扣钱、不推水位,§10 红线在代码层落死)。若某天发现"需要"上述任一状态,立即停手回来对边界。
+func (s *Service) commitUsageOnly(ctx context.Context, tx *sql.Tx, aggs map[string]*bucketAgg, details []repo.DetailRow) error {
+	for _, a := range aggs {
+		if err := s.store.AddToLedgerBucketTx(ctx, tx, &repo.LedgerBucket{
+			OrgID: a.orgID, MemberID: a.memberID, NewapiUserID: a.newapiUserID, KeyID: a.keyID, TeamID: a.teamID,
+			ModelName: a.model, TimeBucket: a.bucket, ConsumedQuota: a.consumed,
+			LogMaxTS: time.Unix(a.maxTS, 0).UTC(),
+		}); err != nil {
+			return err
+		}
+	}
+	// v2 M2-2:逐条明细与 ledger 落账同事务原子写(INSERT IGNORE 幂等);observe 下也写(报表数据,不涉钱)。
+	if err := s.store.InsertUsageDetailTx(ctx, tx, details); err != nil {
+		return err
+	}
+	return nil
+}
+
 // RunSettlement 是计费结算的单次扫描(leader 单写者,03 §3.1 / GZ-01 原子化版):
 // 选一个不超限的时间子窗口(路径B,永不截断少收)→ 读 new-api 消费 logs 按 (org,user,model,小时桶) 聚合 →
 // 在一个事务里原子提交:usage_ledger 落账 + 扣对应组织 company_balance(乐观锁,FOR UPDATE)+ 推进水位;
@@ -284,17 +308,9 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 	postBal := map[int64]*model.Balance{}
 	var totalDeducted int64
 	txErr := s.store.WithTx(ctx, func(tx *sql.Tx) error {
-		for _, a := range aggs {
-			if err := s.store.AddToLedgerBucketTx(ctx, tx, &repo.LedgerBucket{
-				OrgID: a.orgID, MemberID: a.memberID, NewapiUserID: a.newapiUserID, KeyID: a.keyID, TeamID: a.teamID,
-				ModelName: a.model, TimeBucket: a.bucket, ConsumedQuota: a.consumed,
-				LogMaxTS: time.Unix(a.maxTS, 0).UTC(),
-			}); err != nil {
-				return err
-			}
-		}
-		// v2 M2-2:逐条明细与 ledger 落账同事务原子写(INSERT IGNORE 幂等);observe 下也写(报表数据,不涉钱)。
-		if err := s.store.InsertUsageDetailTx(ctx, tx, details); err != nil {
+		// 落账(ledger 桶累加 + 逐条明细)——与历史回填共用的**只写报表**段(24-§4.4);无条件全组织写
+		// (v1 裁定B),不涉钱、不受 observeMode/billing 门控。扣余额 + 推水位仍是本事务后半段 forward 独有。
+		if err := s.commitUsageOnly(ctx, tx, aggs, details); err != nil {
 			return err
 		}
 		// 改动⑤:observe 下整体跳过扣余额(只落账)。postBal 留空 → 提交后守恒断言/状态硬停/扣费审计

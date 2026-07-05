@@ -310,6 +310,12 @@ func (s *Service) HardStopOrg(ctx context.Context, c session.Claims, orgID int64
 		s.log.Error("硬停:new-api 已生效但组织状态落库失败(重试补)", "org_id", orgID, "stop", stop, "err", serr)
 		return apperr.Internal("").WithCause(serr)
 	}
+	// A3/WB-4:硬停即刻失效——作废该组织全部成员的平台会话(否则被硬停组织的成员旧 token 仍可操作达 12h)。
+	if stop {
+		if berr := s.store.BumpOrgMembersSessionEpoch(ctx, orgID); berr != nil {
+			s.log.Error("硬停:作废成员会话失败(旧 token 最长 12h 后自然失效)", "org_id", orgID, "err", berr)
+		}
+	}
 	s.audit(ctx, c, orgID, action, "organization", &orgID, map[string]any{"newapi_user_id": uid})
 	return nil
 }

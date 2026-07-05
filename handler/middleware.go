@@ -172,6 +172,12 @@ func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeErr(w, r, apperr.Unauthenticated("会话凭证非法"))
 			return
 		}
+		// A3 会话有效性回查:非支持态 token 校验成员 status==active 且 session_epoch 匹配(禁用/降级/改密/硬停即刻失效)。
+		// 支持态 token 内部跳过(交下面的 CheckSupportGuard)。
+		if err := h.svc.ValidateSession(r.Context(), claims); err != nil {
+			writeErr(w, r, err)
+			return
+		}
 		// 支持态后端闸(08 §2.2):只读态拒所有写、协助态动钱/读 key 红线挡。真正的闸在后端。
 		if err := h.svc.CheckSupportGuard(r.Context(), claims, r.Method, r.URL.Path); err != nil {
 			ctx := context.WithValue(r.Context(), ctxKeyClaims, claims)

@@ -119,6 +119,20 @@ func (s *Store) UpdateMemberStatus(ctx context.Context, orgID, memberID int64, s
 	return err
 }
 
+// BumpMemberSessionEpoch 自增某成员会话代次(A3):禁用/改角色/改密后调用,令其所有旧平台 token 立即失效。
+func (s *Store) BumpMemberSessionEpoch(ctx context.Context, orgID, memberID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE member SET session_epoch = session_epoch + 1 WHERE id = ? AND org_id = ?`, memberID, orgID)
+	return err
+}
+
+// BumpOrgMembersSessionEpoch 自增某组织**全部**成员会话代次(A3/WB-4):硬停时调用,令该组织所有成员平台会话立即失效。
+func (s *Store) BumpOrgMembersSessionEpoch(ctx context.Context, orgID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE member SET session_epoch = session_epoch + 1 WHERE org_id = ? AND deleted_at IS NULL`, orgID)
+	return err
+}
+
 // OffboardMember 离职(软删):deleted_at=now + status=offboarded + 清 token 指针。ListMembers(deleted_at IS NULL)自动排除。
 func (s *Store) OffboardMember(ctx context.Context, orgID, memberID int64) error {
 	_, err := s.db.ExecContext(ctx,
@@ -322,13 +336,13 @@ func (s *Store) ListMembers(ctx context.Context, orgID int64, f MemberFilter) ([
 // memberSelect 模型2:不含 newapi_user_id/access_token_enc/member_password_enc(已从 member 移除,归 organization)。
 const memberSelect = `SELECT id, org_id, team_id, login_email, display_name, role, tier_id, newapi_group,
 	status, expire_at, platform_password_hash, bootstrapped_at,
-	newapi_token_id, key_masked, key_rotation, bootstrap_state, created_at, updated_at FROM member`
+	newapi_token_id, key_masked, key_rotation, bootstrap_state, session_epoch, created_at, updated_at FROM member`
 
 func scanMember(r rowScanner) (*model.Member, error) {
 	var m model.Member
 	err := r.Scan(&m.ID, &m.OrgID, &m.TeamID, &m.LoginEmail, &m.DisplayName, &m.Role, &m.TierID, &m.NewapiGroup,
 		&m.Status, &m.ExpireAt, &m.PlatformPasswordHash, &m.BootstrappedAt,
-		&m.NewapiTokenID, &m.KeyMasked, &m.KeyRotation, &m.BootstrapState, &m.CreatedAt, &m.UpdatedAt)
+		&m.NewapiTokenID, &m.KeyMasked, &m.KeyRotation, &m.BootstrapState, &m.SessionEpoch, &m.CreatedAt, &m.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

@@ -161,6 +161,10 @@ func (s *Service) AssignRole(ctx context.Context, c session.Claims, orgID, membe
 	if err := s.store.UpdateMemberRole(ctx, orgID, memberID, role); err != nil {
 		return apperr.Internal("").WithCause(err)
 	}
+	// A3:改角色自增 epoch,作废该成员旧 token——堵"角色漂移"(降级者旧 token 仍是旧角色、可在 12h 内自改回)。
+	if err := s.store.BumpMemberSessionEpoch(ctx, orgID, memberID); err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
 	s.audit(ctx, c, orgID, "assign_role", "member", &memberID, map[string]any{"role": role})
 	return nil
 }

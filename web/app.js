@@ -181,7 +181,13 @@ async function renderView() {
 }
 
 /* ---------- helpers ---------- */
-function head(h1, sub) { return `<div class="h1">${esc(h1)}</div><div class="sub">${esc(sub || "")}</div>`; }
+function head(h1, sub) {
+  // A4:支持态横幅——运营方进入客户组织支持会话后,顶部常显身份提示 + 退出入口(还原运营方身份)。
+  const sb = S.opToken ? `<div class="safebar" style="background:#fff3cd;color:#7a5b00">支持态:你正以支持身份操作该组织,每步双身份留痕。<span class="lk" onclick="exitSupport()" style="margin-left:8px"><b>退出支持会话</b></span></div>` : "";
+  return sb + `<div class="h1">${esc(h1)}</div><div class="sub">${esc(sub || "")}</div>`;
+}
+// A4:退出支持会话,还原运营方身份(支持 token 仅内存,localStorage 始终是运营方 token,刷新亦回运营方)。
+function exitSupport() { if (!S.opToken) return; S.token = S.opToken; S.opToken = null; S.supportOrgId = 0; toast("已退出支持会话"); boot(); }
 function kpi(k, v, d) { return `<div class="card kpi"><div class="k">${esc(k)}</div><div class="v">${v}</div><div class="d">${esc(d || "")}</div></div>`; }
 function pill(t, c) { return `<span class="pill ${c || "mut"}">${esc(t)}</span>`; }
 function toast(t) { const e = document.getElementById("toast"); e.textContent = t; e.classList.add("on"); setTimeout(() => e.classList.remove("on"), 2200); }
@@ -434,7 +440,9 @@ async function doSupport(id) {
   try {
     const scope = val("sp_s");
     const d = await api("POST", "/organizations/" + id + "/support-sessions", { scope, grant_type: scope === "assist" ? "authorized" : "", ttl_seconds: 7200, reason: "运营支持" });
-    S.token = d.token; localStorage.setItem("nx_token", S.token); closeM(); toast("已进入" + (scope === "readonly" ? "只读" : "协助") + "支持态"); await boot();
+    // A4:记住运营方 token(仅内存,退出/刷新还原);支持 token 只切内存、**不写 localStorage**,不覆盖运营方身份。
+    S.opToken = S.token; S.token = d.token; S.supportOrgId = id;
+    closeM(); toast("已进入" + (scope === "readonly" ? "只读" : "协助") + "支持态"); await boot();
   } catch (e) { toast(e.message); }
 }
 

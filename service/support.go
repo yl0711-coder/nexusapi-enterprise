@@ -149,19 +149,29 @@ func (s *Service) CheckSupportGuard(ctx context.Context, c session.Claims, metho
 	if c.SupportScope == model.SupportReadonly {
 		return apperr.ReadonlyBlocked("只读支持态下不可写")
 	}
-	// 协助态:动钱 / 读明文 key 红线后端硬挡(08 §2.2)。
-	if isMoneyOrKeyRedline(path) {
-		return apperr.MoneyRedline("协助态下动钱 / 读明文 key 触发红线,已拦截(需客户本人或破玻璃专项)")
+	// 协助态:动钱 / 铸或读明文 key 红线后端硬挡(08 §2.2)。
+	if isMoneyOrKeyRedline(method, path) {
+		return apperr.MoneyRedline("协助态下动钱 / 铸或读明文 key 触发红线,已拦截(需客户本人或破玻璃专项)")
 	}
 	return nil
 }
 
-// isMoneyOrKeyRedline 判定路径是否属"动钱 / 读明文 key"红线(协助态硬挡)。
-func isMoneyOrKeyRedline(path string) bool {
-	for _, p := range []string{"/recharges", "/recharge-requests", "/pricing", "/billing-settings", "/key:"} {
+// isMoneyOrKeyRedline 判定 (method, path) 是否属"动钱 / 铸或读明文 key"红线(协助态硬挡)。
+// A4:从纯路径子串黑名单改为端点能力枚举——补上开通成员(回显落客户池子的明文 key)与建 token 这两个铸 key 口子,
+// 否则运营方经协助态即可铸出计费落客户池子的明文 key,绕过"读明文 key 需破玻璃"红线。
+func isMoneyOrKeyRedline(method, path string) bool {
+	// 动钱:充值/续充/退款/改价/计费设置。
+	for _, p := range []string{"/recharges", "/recharge-requests", "/pricing", "/billing-settings"} {
 		if strings.Contains(path, p) {
 			return true
 		}
+	}
+	// 铸/读明文 key:开通成员(POST .../members 回显客户明文 key)、建 token、轮换/读 key/IP 白名单。
+	if method == http.MethodPost && strings.HasSuffix(path, "/members") {
+		return true
+	}
+	if strings.Contains(path, "/tokens") || strings.Contains(path, "/key:") {
+		return true
 	}
 	return false
 }

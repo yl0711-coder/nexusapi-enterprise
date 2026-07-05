@@ -180,6 +180,7 @@ type Member struct {
 	KeyMasked            *string
 	KeyRotation          int
 	BootstrapState       string
+	SessionEpoch         int // A3:会话代次;禁用/降级/改密/硬停自增,令旧平台 token 立即失效
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
 }

@@ -1,0 +1,5 @@
+-- 迁移 0028(深审 C21):org_backfill_job 的时间列从 TIMESTAMP(2038 溢出 + 与全库 DATETIME(3) 不一致)
+-- 改为 DATETIME(3),口径统一、无 2038 问题。MODIFY 重跑幂等(同类型无操作)。
+ALTER TABLE org_backfill_job
+  MODIFY created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  MODIFY updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3);

@@ -223,11 +223,14 @@ func truncateRunes(s string, n int) string {
 }
 
 func roleValue(role string) any {
-	// new-api role 为整型(普通用户=1);允许调用方传字符串语义,这里收敛为默认普通用户。
-	if role == "" {
+	// C16:new-api role 是整型(普通用户=1)。收敛为**显式 int 映射**,绝不把字符串塞进整型字段(原来非空字符串
+	// 直接透传给整型 role 字段=埋雷)。平台只建普通用户;任何值(含未知)都归普通用户,绝不误建管理员。
+	switch role {
+	case "", "common", "user", "1":
+		return 1
+	default:
 		return 1
 	}
-	return role
 }
 
 // parseLoginUserID 从 POST /api/user/login 的 data 中取 user id。

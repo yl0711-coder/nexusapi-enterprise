@@ -149,23 +149,34 @@ func TestIntegration_UsageDetail(t *testing.T) {
 		t.Fatalf("幂等失败:同 newapi_log_id 应 1 行,实 %d", dupCnt)
 	}
 
-	// 3) 90 天保留清理:插一条 100 天前明细 → PurgeOldUsageDetail 删它,近 3 行保留。
+	// 3) 保留期可配(24-§6 / AC-8):插一条 100 天前明细。默认保留期=0 → 不清理(永久保留);设 N=90 才清 N 天前。
 	oldRow := repo.DetailRow{OrgID: orgID, MemberID: memberID, NewapiUserID: userID, KeyID: wantKeyID, ModelName: "old", NewapiLogID: 888888, ConsumedQuota: 7, LogTS: time.Now().Add(-100 * 24 * time.Hour).UTC()}
 	if err := store.WithTx(ctx, func(tx *sql.Tx) error { return store.InsertUsageDetailTx(ctx, tx, []repo.DetailRow{oldRow}) }); err != nil {
 		t.Fatalf("插旧明细失败: %v", err)
 	}
+	// 3a) 默认 svc(retention=0):PurgeOldUsageDetail 应为 no-op,100 天前的行仍在(全历史回填随时可查的前提)。
 	if err := svc.PurgeOldUsageDetail(ctx); err != nil {
-		t.Fatalf("清理失败: %v", err)
+		t.Fatalf("默认清理失败: %v", err)
+	}
+	var oldCnt0 int
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_detail WHERE newapi_log_id=888888`).Scan(&oldCnt0)
+	if oldCnt0 != 1 {
+		t.Fatalf("AC-8 默认保留期=0 应不清理,100 天前明细应仍在,实 %d 行", oldCnt0)
+	}
+	// 3b) retention=90 的 svc(同一 store):清 100 天前、近 3 行保留。
+	svcPurge := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log, ObserveMode: true, UsageDetailRetentionDays: 90})
+	if err := svcPurge.PurgeOldUsageDetail(ctx); err != nil {
+		t.Fatalf("配置清理失败: %v", err)
 	}
 	var oldCnt, recentCnt int
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_detail WHERE newapi_log_id=888888`).Scan(&oldCnt)
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_detail WHERE org_id=? AND model_name='gpt-det'`, orgID).Scan(&recentCnt)
 	if oldCnt != 0 {
-		t.Fatalf("90 天前明细应被清理,实仍 %d 行", oldCnt)
+		t.Fatalf("AC-8 retention=90 应清 100 天前,实仍 %d 行", oldCnt)
 	}
 	if recentCnt != 3 {
 		t.Fatalf("近期明细应保留 3 行,实 %d", recentCnt)
 	}
 
-	t.Logf("M2-2 明细落库 ok: 结算落 3 行逐条(key_id=%d 归因/token 指标 100·200/合计 6000);幂等同 log_id 1 行;90 天清理删旧留新", wantKeyID)
+	t.Logf("M2-2 明细落库 ok: 结算落 3 行逐条(key_id=%d 归因/token 100·200/合计 6000);幂等同 log_id 1 行;AC-8 保留期默认0不清、配90清旧留新", wantKeyID)
 }

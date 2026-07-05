@@ -52,6 +52,10 @@ type Service struct {
 	// backfillQPS 读 new-api 日志的页/秒限速(24-§4.5)。
 	backfillWindowsPerTick int
 	backfillQPS            int
+
+	// usageDetailRetentionDays 逐条明细保留天数(24-§6):0=永久保留(不清理,回填全历史随时可查的前提);
+	// 设正整数 N 才清 N 天前。默认 0——量涨到千万行级再配天数启用(旋钮,不返工)。
+	usageDetailRetentionDays int
 }
 
 // Deps 是构造 Service 的依赖集合。
@@ -69,6 +73,8 @@ type Deps struct {
 	// BackfillWindowsPerTick 历史回填每 tick 子窗口数上限(<=0 默认 8);BackfillQPS 读日志页/秒限速(<=0 默认 5)。
 	BackfillWindowsPerTick int
 	BackfillQPS            int
+	// UsageDetailRetentionDays 逐条明细保留天数(24-§6):0=永久保留(默认,不清理);正整数 N=清 N 天前。
+	UsageDetailRetentionDays int
 }
 
 // New 构造 Service。
@@ -97,6 +103,7 @@ func New(d Deps) *Service {
 		memberRole:  "", // new-api 普通用户角色,空 = 默认普通用户
 		backfillWindowsPerTick: windowsPerTick,
 		backfillQPS:            qps,
+		usageDetailRetentionDays: d.UsageDetailRetentionDays, // 默认 0 = 永久保留(不清理)
 	}
 }
 

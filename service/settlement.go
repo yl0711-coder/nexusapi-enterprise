@@ -571,18 +571,20 @@ func (s *Service) ReconcileBalanceLedger(ctx context.Context) error {
 	return nil
 }
 
-// usageDetailRetentionDays 逐条明细保留天数(13 §4.4:下钻明细落库保 90 天)。
-const usageDetailRetentionDays = 90
-
-// PurgeOldUsageDetail 清理超过保留期(90 天)的逐条明细;reconcile worker 周期调用。只删本库,不碰 new-api。
+// PurgeOldUsageDetail 清理超过保留期的逐条明细;reconcile worker 周期调用。只删本库,不碰 new-api。
+// 保留期可配(24-§6,NEXUS_USAGE_DETAIL_RETENTION_DAYS):**默认 0 = 永久保留(直接跳过,不删)** ——
+// 历史全量回填后 detail 承载"逐条随时可查",故默认关清理;设正整数 N 才清 N 天前(量涨到千万行级再启用)。
 func (s *Service) PurgeOldUsageDetail(ctx context.Context) error {
-	cutoff := s.now().Add(-time.Duration(usageDetailRetentionDays) * 24 * time.Hour)
+	if s.usageDetailRetentionDays <= 0 {
+		return nil // 0 或未配 = 永久保留,不清理
+	}
+	cutoff := s.now().Add(-time.Duration(s.usageDetailRetentionDays) * 24 * time.Hour)
 	n, err := s.store.PurgeUsageDetailBefore(ctx, cutoff)
 	if err != nil {
 		return err
 	}
 	if n > 0 {
-		s.log.Info("用量明细保留清理", "purged", n, "cutoff", cutoff.Format(time.RFC3339))
+		s.log.Info("用量明细保留清理", "purged", n, "cutoff", cutoff.Format(time.RFC3339), "retention_days", s.usageDetailRetentionDays)
 	}
 	return nil
 }

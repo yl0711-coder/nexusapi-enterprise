@@ -204,6 +204,37 @@ func (h *Handler) handleReimportTokens(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, r, http.StatusOK, map[string]any{"imported": imported, "failed": failed})
 }
 
+// handleGetBackfill 读历史回填状态(24-§9:回填中 / 已同步·起点 / 失败)。运营方 + org_admin。
+func (h *Handler) handleGetBackfill(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	orgID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	v, err := h.svc.GetBackfillStatus(r.Context(), c, orgID)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, v)
+}
+
+// handleRequeueBackfill 运营方"重新回填"(24-§9,幂等)。
+func (h *Handler) handleRequeueBackfill(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	orgID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	if err := h.svc.RequeueBackfill(r.Context(), c, orgID); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{"requeued": true})
+}
+
 func (h *Handler) handleGetOrg(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())
 	orgID, err := pathInt64(r, "id")

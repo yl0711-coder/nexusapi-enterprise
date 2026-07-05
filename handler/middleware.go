@@ -22,7 +22,8 @@ var mvpWriteAllow = []string{
 	"PATCH /api/v1/organizations/*",
 	"POST /api/v1/organizations/*/archive",
 	"POST /api/v1/organizations/*/unarchive",
-	"POST /api/v1/organizations/*/import-tokens", // 门B 重新导入(运营方,幂等,只补建平台侧成员映射不动 new-api)
+	"POST /api/v1/organizations/*/import-tokens",     // 门B 重新导入(运营方,幂等,只补建平台侧成员映射不动 new-api)
+	"POST /api/v1/organizations/*/backfill/requeue", // 重新回填(运营方,幂等,只重置报表回填任务,不涉钱不动 new-api,24-§9)
 	"POST /api/v1/organizations/*/hard-stop",         // 运维硬停(风控;禁用 org 用户,非钱)
 	"POST /api/v1/organizations/*/hard-stop-release", // 解除硬停
 	"POST /api/v1/organizations/*/teams",

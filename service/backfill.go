@@ -7,8 +7,64 @@ import (
 	"time"
 
 	"github.com/nexusapi-platform/enterprise/adapter/newapi"
+	"github.com/nexusapi-platform/enterprise/pkg/apperr"
+	"github.com/nexusapi-platform/enterprise/pkg/session"
 	"github.com/nexusapi-platform/enterprise/repo"
 )
+
+// BackfillStatusView 门B 组织历史回填状态(前端展示,24-§9 UX:回填中 / 已同步·起点 / 失败·重跑)。
+type BackfillStatusView struct {
+	Status         string `json:"status"`           // pending|running|done|failed|none(门A 或未触发,无历史)
+	RowsIngested   int64  `json:"rows_ingested"`    // 已灌逐条数(回填中可见增长)
+	EarliestSeenTS *int64 `json:"earliest_seen_ts"` // 历史起点(unix秒);done 时前端显示"已同步,起点 xx"
+	LastError      string `json:"last_error"`       // failed 时的错误(供运营方判断是否重跑)
+}
+
+// GetBackfillStatus 读某组织历史回填状态(24-§9)。运营方 + org_admin 可见本组织。
+func (s *Service) GetBackfillStatus(ctx context.Context, c session.Claims, orgID int64) (*BackfillStatusView, error) {
+	if err := assertOrgScope(c, orgID); err != nil {
+		return nil, err
+	}
+	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
+		return nil, err
+	}
+	j, err := s.store.GetBackfillJob(ctx, orgID)
+	if err != nil {
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	if j == nil {
+		return &BackfillStatusView{Status: "none"}, nil // 门A 或未触发:无历史回填
+	}
+	v := &BackfillStatusView{Status: j.Status, RowsIngested: j.RowsIngested}
+	if j.EarliestSeenTS.Valid {
+		e := j.EarliestSeenTS.Int64
+		v.EarliestSeenTS = &e
+	}
+	if j.LastError.Valid {
+		v.LastError = j.LastError.String
+	}
+	return v, nil
+}
+
+// RequeueBackfill 运营方"重新回填"(24-§9,幂等):cursor 回到 boundary、status=pending,worker 下轮重跑
+// (detail 幂等,不会双算)。仅运营方。
+func (s *Service) RequeueBackfill(ctx context.Context, c session.Claims, orgID int64) error {
+	if err := assertRole(c, session.RoleOperator); err != nil {
+		return err
+	}
+	j, err := s.store.GetBackfillJob(ctx, orgID)
+	if err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	if j == nil {
+		return apperr.InvalidParam("该组织无历史回填任务(门A 新建组织无历史,或未触发)")
+	}
+	if err := s.store.RequeueBackfillJob(ctx, orgID); err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	s.audit(ctx, c, orgID, "backfill_requeue", "backfill", &orgID, nil)
+	return nil
+}
 
 // enqueueBackfill 门B 关联成功后触发历史回填(24-§7.3):快照全局 forward 边界 B、插 pending 任务。
 // 仅由 org.Associate(门B)在关联提交后调用,非阻断。

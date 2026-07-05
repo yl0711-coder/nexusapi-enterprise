@@ -336,9 +336,10 @@ async function doCreateOrg() {
 async function enterOrg(id, name) {
   S.orgId = id; S.org = { id, name };
   // v1(20-§9):充值在 new-api 完成,平台无充值/续充入口(escrow 休眠);运营方看实时余额 + 硬停(风控)+ 门B 重新导入。
-  const [org, eb] = await Promise.all([
+  const [org, eb, bf] = await Promise.all([
     api("GET", "/organizations/" + id, null),
     api("GET", "/organizations/" + id + "/escrow-balance", null).catch(() => ({})),
+    api("GET", "/organizations/" + id + "/backfill", null).catch(() => ({ status: "none" })),
   ]);
   const mem = await api("GET", "/organizations/" + id + "/members?page=1&page_size=20", null);
   const main = document.getElementById("main");
@@ -358,9 +359,29 @@ async function enterOrg(id, name) {
         ? `<button class="btn pri" onclick="doHardStop(${id},false)">解除硬停</button>`
         : `<button class="btn danger" onclick="confirmHardStop(${id})">硬停(风控)</button>`}
       ${org.newapi_created_by_platform === false ? `<button class="btn" onclick="doReimport(${id})">重新导入令牌</button>` : ""}
+      ${bf && bf.status && bf.status !== "none" ? `<button class="btn" onclick="doRequeueBackfill(${id})">重新回填</button>` : ""}
       <button class="btn" onclick="openSupport(${id})">支持会话</button>
     </div>
+    ${bf && bf.status && bf.status !== "none" ? `<div class="panel"><div class="ph">历史用量回填</div><div class="pb">${backfillLine(bf)}</div></div>` : ""}
     <div class="panel"><div class="ph">成员</div><div class="pb"><table><tbody>${rows || '<tr><td class="empty">暂无成员</td></tr>'}</tbody></table></div></div>`;
+}
+// 历史回填状态行(24-§9):回填中 / 已同步·起点 / 失败·重跑。
+function backfillLine(bf) {
+  if (bf.status === "done") {
+    const s = bf.earliest_seen_ts ? new Date(bf.earliest_seen_ts * 1000).toLocaleDateString() : "-";
+    return `${pill("已同步", "ok")} 历史用量已全部回填,起点 ${s}(逐条 ${bf.rows_ingested || 0} 条,可在成员用量下钻查全历史)。`;
+  }
+  if (bf.status === "failed") {
+    return `${pill("回填失败", "warn")} ${esc(bf.last_error || "")} —— 点"重新回填"重试(幂等,不会重复计)。`;
+  }
+  return `${pill("回填中", "mut")} 正在同步该企业历史用量…(已灌 ${bf.rows_ingested || 0} 条,通常秒级完成,可刷新查看)。`;
+}
+// 运营方重新回填(幂等):后台从边界重跑,detail 幂等不双算。
+async function doRequeueBackfill(id) {
+  try {
+    await api("POST", "/organizations/" + id + "/backfill/requeue", null);
+    toast("已触发重新回填(幂等,后台执行)"); enterOrg(id, S.org.name);
+  } catch (e) { toast(e.message); }
 }
 // v1 硬停(20-§4,风控):禁用该组织的 new-api 用户,近实时 403 全部令牌(有钱也停:欠费纠纷/风控);可解除。
 function confirmHardStop(id) {

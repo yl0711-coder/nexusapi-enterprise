@@ -2,6 +2,8 @@ package handler
 
 import (
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/nexusapi-platform/enterprise/repo"
 	"github.com/nexusapi-platform/enterprise/service"
@@ -21,11 +23,23 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, err)
 		return
 	}
+	// A2:账号级 + IP 级失败退避(纵深防御,叠加 CF 边缘限流)。
+	acct := "login:" + strings.ToLower(in.Email)
+	ipk := "login-ip:" + clientIP(r)
+	if !h.authLim.gate(w, r, acct, ipk) {
+		return
+	}
 	res, err := h.svc.Login(r.Context(), in.Email, in.Password)
 	if err != nil {
+		if isCredFailure(err) { // 仅凭据错误计入(禁用账号/系统错不误锁)
+			h.authLim.fail(acct)
+			h.authLim.fail(ipk)
+		}
 		writeErr(w, r, err)
 		return
 	}
+	h.authLim.reset(acct)
+	h.authLim.reset(ipk)
 	writeOK(w, r, http.StatusOK, map[string]any{
 		"token":  res.Token,
 		"member": toMemberView(res.Member),
@@ -45,10 +59,20 @@ func (h *Handler) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, err)
 		return
 	}
+	// A2:改密失败退避——防在线爆破旧密码(按成员 + IP 计数)。
+	acct := "chpw:" + strconv.FormatInt(c.MemberID, 10)
+	ipk := "chpw-ip:" + clientIP(r)
+	if !h.authLim.gate(w, r, acct, ipk) {
+		return
+	}
 	if err := h.svc.ChangePassword(r.Context(), c, in.OldPassword, in.NewPassword); err != nil {
+		h.authLim.fail(acct) // 改密失败(旧密码错等)一律计入,节流旧密码猜测
+		h.authLim.fail(ipk)
 		writeErr(w, r, err)
 		return
 	}
+	h.authLim.reset(acct)
+	h.authLim.reset(ipk)
 	writeOK(w, r, http.StatusOK, map[string]any{"ok": true})
 }
 

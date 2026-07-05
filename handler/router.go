@@ -19,6 +19,7 @@ type Handler struct {
 	log     *slog.Logger
 	version string
 	mvpMode bool // 改动⑥:MVP 灰度封锁(mvpGate 路由白名单 + /me 透出 mvp_mode 给前端藏菜单)
+	authLim *attemptLimiter // A2:登录/改密账号级失败退避(应用层纵深)
 }
 
 // New 构造 Handler。
@@ -27,7 +28,7 @@ func New(svc *service.Service, signer *session.Signer, log *slog.Logger, version
 		log = slog.Default()
 	}
 	markStarted(time.Now().Unix()) // /metrics uptime 起点
-	return &Handler{svc: svc, signer: signer, log: log, version: version, mvpMode: mvpMode}
+	return &Handler{svc: svc, signer: signer, log: log, version: version, mvpMode: mvpMode, authLim: newAttemptLimiter()}
 }
 
 // Routes 返回挂好中间件的根 http.Handler。

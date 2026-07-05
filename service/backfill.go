@@ -115,8 +115,9 @@ func belongsToBackfill(createdAt, id, bTS, bID int64) bool {
 // backfillWindowsPerTick 个子窗口即让位(tick 分片,防大回填饿死 forward)。
 //
 // 涉钱红线(24-§10):回填**只调 commitUsageOnly**——绝不扣 company_balance、绝不推进全局 settlement_cursor。
-// 并发红线(24-§3.3):每个子窗口在 settlementMu 下完成(与所有 forward 互斥),使回填与 forward-补漏在
-// 600s 重叠带靠 detail 幂等去重时绝不并发 TOCTOU 双算。**仅由 settlement-worker 单 goroutine 调用**。
+// 并发红线(24-§3.3):每个子窗口的"去重→落账"写相在 settlementMu 下完成(与所有 forward 互斥;HTTP 读页在
+// 锁外,不阻塞 forward——R6 中危修),使回填与 forward-补漏在 600s 重叠带靠 detail 幂等去重时绝不并发 TOCTOU
+// 双算。**仅由 settlement-worker 单 goroutine 调用**。
 func (s *Service) RunBackfillSlice(ctx context.Context) error {
 	job, err := s.store.NextBackfillJob(ctx)
 	if err != nil {
@@ -154,24 +155,22 @@ func (s *Service) RunBackfillSlice(ctx context.Context) error {
 	return nil
 }
 
-// backfillOneWindow 在 settlementMu 保护下处理 [lo, hi] 一个子窗口(lo 由二分选出,使窗口日志数
-// <= settlementMaxPages*100,可一次完整读尽,绝不截断):读页 → 过滤(belongsToBackfill + 防御性 UserID
-// 归属)→ detail 幂等去重 → ingestEntry 归因聚合 → commitUsageOnly 单事务落账。
-// 返回本窗口新落行数、见到的最早日志 ts(0=无)、窗口下界 lo。
+// backfillOneWindow 处理 [lo, hi] 一个子窗口(lo 由二分选出,使窗口日志数 <= settlementMaxPages*100,
+// 可一次完整读尽、绝不截断)。分两相以缩短持锁(R6 中危修:HTTP 读页移出锁,不阻塞 forward):
+//
+//	读相(**锁外**):二分选窗 + 逐页拉 + 过滤(belongsToBackfill + 防御性 UserID 归属)→ keep。HTTP 慢,不持锁。
+//	写相(**settlementMu 内**,与所有 forward 互斥,持锁极短):detail 幂等去重 → ingestEntry 归因聚合 →
+//	  commitUsageOnly 单事务落账。
+//
+// 正确性(为何读页可在锁外):跨写者 TOCTOU 只发生在 600s 重叠带的"去重→落账"上,而这一整段在锁内原子完成、
+// FilterExisting 反映 forward 已提交态;锁外读到的行若被 forward 抢先提交,锁内 FilterExisting 必查重跳过 →
+// 绝不双算(24-§3.3)。boundary 在触发时已快照固定,belongsToBackfill 过滤与 forward 进度无关。
+// 返回本窗口新落行数、见到的最早日志 ts(0=无)、窗口下界 lo。仅由 settlement-worker 单 goroutine 调用。
 func (s *Service) backfillOneWindow(ctx context.Context, job *repo.BackfillJob, hi int64) (rows, earliest, lo int64, err error) {
-	// 与所有 forward 互斥:读页/去重/落账全程持锁,使"FilterExisting → ingest → commit"相对 forward 原子,
-	// 杜绝 600s 重叠带的跨写者 TOCTOU(24-§3.3)。量小,持锁时间短;v1 escrow-drain 休眠、几无争用。
-	s.settlementMu.Lock()
-	defer s.settlementMu.Unlock()
-
+	// ---- 读相(锁外)----
 	lo, err = s.backfillLowerBound(ctx, job.NewapiUsername, hi)
 	if err != nil {
 		return 0, 0, hi, err
-	}
-
-	sk := &settleSink{
-		aggs: map[string]*bucketAgg{}, flagCache: map[int64]bool{},
-		attrCache: map[int64]tokenAttr{}, orgByUser: map[int64]int64{}, orphanAlerted: map[int64]bool{},
 	}
 	var keep []newapi.LogEntry
 	for page := 1; page <= settlementMaxPages; page++ {
@@ -199,6 +198,9 @@ func (s *Service) backfillOneWindow(ctx context.Context, job *repo.BackfillJob, 
 		return 0, 0, lo, nil
 	}
 
+	// ---- 写相(settlementMu 内,与所有 forward 互斥;持锁仅一次 FilterExisting + 内存聚合 + 一个本地事务)----
+	s.settlementMu.Lock()
+	defer s.settlementMu.Unlock()
 	// detail 幂等去重(24-§3.3 第二重保险):ledger 无按行去重,ingest 前查 usage_detail 已存在的跳过。
 	ids := make([]int64, len(keep))
 	for i, e := range keep {
@@ -207,6 +209,11 @@ func (s *Service) backfillOneWindow(ctx context.Context, job *repo.BackfillJob, 
 	existing, ferr := s.store.FilterExistingDetailLogIDs(ctx, ids)
 	if ferr != nil {
 		return 0, 0, hi, ferr
+	}
+	sk := &settleSink{
+		aggs: map[string]*bucketAgg{}, flagCache: map[int64]bool{},
+		attrCache: map[int64]tokenAttr{}, orgByUser: map[int64]int64{}, orphanAlerted: map[int64]bool{},
+		backfillMode: true, // 回填:跳过孤儿告警刷屏 + 无用的 billing flag 查询(回填从不扣钱,flagCache 不被读)
 	}
 	for _, e := range keep {
 		if existing[e.ID] {

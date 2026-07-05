@@ -55,6 +55,7 @@ type settleSink struct {
 	attrCache     map[int64]tokenAttr
 	orgByUser     map[int64]int64 // newapi user_id -> 平台 org id(0=非平台组织;共用实例,主站客户日志按此跳过)
 	orphanAlerted map[int64]bool  // token_id -> 已告警(每个孤儿令牌每轮只告警一次)
+	backfillMode  bool            // 回填槽(R6 nit):跳过孤儿告警刷屏 + 无用的 billing flag 查询(回填从不扣钱)
 }
 
 // ingestEntry 归因并聚合一条消费日志(M4 时点归因,20-§6):
@@ -77,7 +78,8 @@ func (s *Service) ingestEntry(ctx context.Context, sk *settleSink, e newapi.LogE
 	if att.found {
 		m, keyID = att.member, att.keyID
 		// GZ-03:开通失败的成员令牌仍在消费 = 孤儿消费。告警使漏扣"可发现",仍正常聚合(money 不漏)。
-		if m.BootstrapState == model.BootstrapFailed && !sk.orphanAlerted[e.TokenID] {
+		// 回填期跳过(R6 nit):回填全历史会把当前 failed 成员的历史消费逐窗刷屏告警,且回填不涉扣费、无"漏扣"语义。
+		if !sk.backfillMode && m.BootstrapState == model.BootstrapFailed && !sk.orphanAlerted[e.TokenID] {
 			sk.orphanAlerted[e.TokenID] = true
 			s.log.Error("孤儿消费告警:开通失败的成员令牌仍在产生消费(需核 new-api)",
 				"member_id", m.ID, "org_id", m.OrgID, "token_id", e.TokenID, "model", e.ModelName)
@@ -104,12 +106,15 @@ func (s *Service) ingestEntry(ctx context.Context, sk *settleSink, e newapi.LogE
 		m, keyID = &model.Member{ID: 0, OrgID: orgID}, 0 // M4 未知桶:member_id=0(前端显示"未归因")
 	}
 	// v1 裁定B(20-§2.1):落账与 billing_enabled 解耦(全组织落账);flag 只闸事务内扣余额一步。
-	if _, ok := sk.flagCache[m.OrgID]; !ok {
-		f, ferr := s.store.GetOrgBillingFlags(ctx, m.OrgID)
-		if ferr != nil {
-			return ferr
+	// 回填跳过(R6 nit):回填只调 commitUsageOnly、从不扣余额,flagCache 不被读 → 免这次无用查询。
+	if !sk.backfillMode {
+		if _, ok := sk.flagCache[m.OrgID]; !ok {
+			f, ferr := s.store.GetOrgBillingFlags(ctx, m.OrgID)
+			if ferr != nil {
+				return ferr
+			}
+			sk.flagCache[m.OrgID] = f.BillingEnabled
 		}
-		sk.flagCache[m.OrgID] = f.BillingEnabled
 	}
 	bkt := hourBucket(e.CreatedAt)
 	key := fmt.Sprintf("%d|%d|%d|%s|%d", m.OrgID, e.UserID, keyID, e.ModelName, bkt.Unix())

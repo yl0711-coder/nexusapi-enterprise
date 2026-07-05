@@ -127,6 +127,15 @@ func (cb *circuitBreaker) onSuccess() {
 	cb.probing = false
 }
 
+// probeAbort 释放半开探测名额但**不改变状态**:该探测请求未真正拿到上游结果(ctx 取消 / 限速未过 → 根本没发出),
+// 既非成功也非失败;清 probing 让下一次请求可再放一个探测,避免 probing 永停 true 导致熔断器卡死(A1)。
+// 状态不变:half-open 仍 half-open(下次 allow 放新探测)、closed 下为 no-op。
+func (cb *circuitBreaker) probeAbort() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.probing = false
+}
+
 func (cb *circuitBreaker) onFailure() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()

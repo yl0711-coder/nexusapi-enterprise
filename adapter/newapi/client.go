@@ -157,6 +157,7 @@ func (c *client) do(ctx context.Context, step, method, path string, auth authMod
 
 	// 2) 限速:等到有令牌或 ctx 取消。
 	if err := c.limiter.wait(ctx); err != nil {
+		c.cb.probeAbort() // A1:限速未过/ctx 取消,探测请求根本没发出——释放已消费的半开探测名额,防卡死
 		return nil, newTransportError(step, isTimeout(err), err)
 	}
 
@@ -191,6 +192,9 @@ func (c *client) do(ctx context.Context, step, method, path string, auth authMod
 			})
 			continue
 		}
+		// A1:不可重试(4xx/鉴权)= 上游已响应、连通正常 → 按成功结算熔断器(闭合/复位半开探测),再返回业务错误。
+		// 否则半开探测恰是常态 4xx/401 时 probing 永停 true → 熔断器卡死、平台对 new-api 全拒需重启。
+		c.cb.onSuccess()
 		return nil, uerr
 	}
 	return nil, lastErr

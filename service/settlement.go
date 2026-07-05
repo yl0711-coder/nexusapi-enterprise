@@ -601,6 +601,11 @@ func (s *Service) ReconcileBalanceLedger(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// B1:减 funding 激活基线——ledger 含观测期历史消费,total_consumed 只从 funding 后累计;不减基线必每轮误报 D4。
+	baselines, err := s.store.GetEscrowBaselines(ctx)
+	if err != nil {
+		return err
+	}
 	seen := map[int64]bool{}
 	for orgID := range consumed {
 		seen[orgID] = true
@@ -609,7 +614,7 @@ func (s *Service) ReconcileBalanceLedger(ctx context.Context) error {
 		seen[orgID] = true
 	}
 	for orgID := range seen {
-		tc, lg := consumed[orgID], ledger[orgID]
+		tc, lg := consumed[orgID], ledger[orgID]-baselines[orgID]
 		if tc == lg {
 			continue
 		}

@@ -365,12 +365,24 @@ func (s *Service) reconcileOrgEscrow(ctx context.Context, orgID int64) error {
 	} else if !errors.Is(agerr, repo.ErrNotFound) {
 		return agerr
 	}
-	// ① 窗口纠偏:目标窗口 = 已释放(桶1) − 已消费(我方账本 bigint)。地板 0。
+	// ① 窗口纠偏:目标窗口 = 已释放(桶1) − 已消费(funding 激活后的增量,B1)。地板 0。
 	consumed, cerr := s.store.SumOrgConsumed(ctx, orgID)
 	if cerr != nil {
 		return cerr
 	}
-	target := released - consumed
+	// B1:排除 funding 激活前(观测期)的历史消费——首次对账快照当前 SUM(ledger) 为基线,此后只算增量;
+	// 否则 v2 首充窗口被整段观测期消费冲成 0(客户真亏)。未快照时基线=当前(增量 0),优惠客户方向。
+	baseline := consumed
+	cfg, cfgErr := s.store.GetEscrowConfig(ctx, orgID)
+	if cfgErr != nil && !errors.Is(cfgErr, repo.ErrNotFound) {
+		return cfgErr
+	}
+	if cfg != nil && cfg.ConsumedBaseline != nil {
+		baseline = *cfg.ConsumedBaseline
+	} else if serr := s.store.SetEscrowConsumedBaseline(ctx, orgID, consumed); serr != nil {
+		return serr
+	}
+	target := released - (consumed - baseline)
 	if target < 0 {
 		target = 0 // 地板:消费超已释放(异常)也不把窗口算成负
 	}

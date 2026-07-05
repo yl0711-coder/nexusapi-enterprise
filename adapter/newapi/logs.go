@@ -60,6 +60,25 @@ func (a *Adapter) ReadConsumptionLogsByUsername(ctx context.Context, username st
 	return parseLogPage(res.data)
 }
 
+// SumConsumedQuotaByUsername 用 new-api 官方 GET /api/log/stat 取该 username 截至 untilUnix 的**权威总消耗**
+// (SumUsedQuota,data.quota)。供回填-台账对账安全网(24-§9):比对 SUM(usage_ledger) 与此权威值,漂移即告警。
+// 管理员身份;窗口 [0, untilUnix](untilUnix 取 forward 水位,避开未结算的近期尾巴造成假漂移)。
+func (a *Adapter) SumConsumedQuotaByUsername(ctx context.Context, username string, untilUnix int64) (int64, error) {
+	path := fmt.Sprintf("/api/log/stat?type=2&username=%s&start_timestamp=0&end_timestamp=%d",
+		url.QueryEscape(username), untilUnix)
+	res, err := a.c.do(ctx, stepReadLogs, "GET", path, adminAuth(a.c.cfg), nil)
+	if err != nil {
+		return 0, err
+	}
+	var env struct {
+		Quota int64 `json:"quota"`
+	}
+	if err := json.Unmarshal(res.data, &env); err != nil {
+		return 0, &UpstreamError{Step: stepReadLogs, PlatformCode: CodeInternal, Message: "解析日志统计失败", class: classNonRetryable, cause: err}
+	}
+	return env.Quota, nil
+}
+
 // parseLogPage 解析 /api/log/ 一页返回(data = {items,total});ReadConsumptionLogs 与
 // ReadConsumptionLogsByUsername 共用,保证两条读取路径解析口径逐字节一致。
 func parseLogPage(data json.RawMessage) ([]LogEntry, int, error) {

@@ -60,7 +60,11 @@ func (w *ReconcileWorker) Run(ctx context.Context) {
 				if eerr := w.svc.ReconcileEscrow(rc); eerr != nil {
 					w.log.Error("escrow 对账失败(下轮重试)", "err", eerr)
 				}
-				// v2 M2-2:逐条明细 90 天保留清理(只删本库,housekeeping,不涉钱)。
+				// 回填-台账对账安全网(24-§9):已回填组织 SUM(ledger) vs new-api stat 权威值,漂移即告警(只读)。
+				if berr := w.svc.ReconcileBackfillLedger(rc); berr != nil {
+					w.log.Error("回填-台账对账失败(下轮重试)", "err", berr)
+				}
+				// 逐条明细保留清理(24-§6:默认 0=永久保留跳过;配天数才清)。只删本库,housekeeping,不涉钱。
 				if perr := w.svc.PurgeOldUsageDetail(rc); perr != nil {
 					w.log.Error("用量明细保留清理失败(下轮重试)", "err", perr)
 				}

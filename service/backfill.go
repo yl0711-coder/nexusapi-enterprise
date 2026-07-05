@@ -196,6 +196,44 @@ func (s *Service) backfillLowerBound(ctx context.Context, username string, hi in
 	}
 }
 
+// ReconcileBackfillLedger 回填-台账对账安全网(24-§9,§4.4 长期安全网):对已回填完成(done)的组织,
+// 周期比对 SUM(usage_ledger) 与 new-api /api/log/stat 权威总消耗(截至 forward 水位,避开未结算的近期尾巴),
+// 漂移即告警(日志 + 审计)。只读、绝不改账——把"回填/forward 静默多算或漏算"的发现窗口从月级压到一个对账周期。
+// v1 报表期即挂:观测到漂移可提前修;v2 开计费后余额从 ledger 派生,这道网直接护住钱。
+func (s *Service) ReconcileBackfillLedger(ctx context.Context) error {
+	cur, err := s.store.GetOrCreateCursor(ctx, 0)
+	if err != nil {
+		return err
+	}
+	if cur.LastSettledTS <= 0 {
+		return nil // forward 尚未首跑,无水位可对
+	}
+	jobs, err := s.store.ListDoneBackfillJobs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, j := range jobs {
+		authoritative, aerr := s.upstream.SumConsumedQuotaByUsername(ctx, j.NewapiUsername, cur.LastSettledTS)
+		if aerr != nil {
+			s.log.Warn("回填-台账对账取权威值失败(下轮重试)", "org_id", j.OrgID, "err", aerr)
+			continue
+		}
+		ledgerSum, lerr := s.store.SumLedgerByOrg(ctx, j.OrgID)
+		if lerr != nil {
+			return lerr
+		}
+		if ledgerSum != authoritative {
+			s.log.Error("回填-台账对账漂移(人工核对:多=双算/少=漏)",
+				"org_id", j.OrgID, "ledger_sum", ledgerSum, "authoritative", authoritative, "diff", ledgerSum-authoritative)
+			orgID := j.OrgID
+			s.auditSystem(ctx, j.OrgID, "backfill_ledger_mismatch", "backfill", &orgID, map[string]any{
+				"ledger_sum": ledgerSum, "authoritative": authoritative, "diff": ledgerSum - authoritative,
+			}, "mismatch")
+		}
+	}
+	return nil
+}
+
 // backfillThrottle 页/窗间限速(NEXUS_BACKFILL_QPS);ctx 取消即返回。
 func (s *Service) backfillThrottle(ctx context.Context) {
 	if s.backfillQPS <= 0 {

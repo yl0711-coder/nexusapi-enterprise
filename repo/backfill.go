@@ -74,6 +74,36 @@ func (s *Store) GetBackfillJob(ctx context.Context, orgID int64) (*BackfillJob, 
 	return &j, nil
 }
 
+// ListDoneBackfillJobs 取所有已回填完成(done)的任务,供回填-台账对账安全网(24-§9)。
+func (s *Store) ListDoneBackfillJobs(ctx context.Context) ([]*BackfillJob, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT org_id, newapi_user_id, newapi_username, boundary_ts, boundary_log_id, cursor_ts,
+		        earliest_seen_ts, status, rows_ingested, last_error
+		   FROM org_backfill_job WHERE status = 'done'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*BackfillJob
+	for rows.Next() {
+		var j BackfillJob
+		if err := rows.Scan(&j.OrgID, &j.NewapiUserID, &j.NewapiUsername, &j.BoundaryTS, &j.BoundaryLogID, &j.CursorTS,
+			&j.EarliestSeenTS, &j.Status, &j.RowsIngested, &j.LastError); err != nil {
+			return nil, err
+		}
+		out = append(out, &j)
+	}
+	return out, rows.Err()
+}
+
+// SumLedgerByOrg 求某组织 usage_ledger 全量消耗合计(对账用)。
+func (s *Store) SumLedgerByOrg(ctx context.Context, orgID int64) (int64, error) {
+	var sum int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(consumed_quota),0) FROM usage_ledger WHERE org_id = ?`, orgID).Scan(&sum)
+	return sum, err
+}
+
 // SetBackfillStatus 置任务状态(pending→running→done),并清 last_error。
 func (s *Store) SetBackfillStatus(ctx context.Context, orgID int64, status string) error {
 	_, err := s.db.ExecContext(ctx,

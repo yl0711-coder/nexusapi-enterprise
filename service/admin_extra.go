@@ -173,7 +173,22 @@ func (s *Service) ListQuotaPolicies(ctx context.Context, c session.Claims, orgID
 	if err := assertRole(c, session.RoleOrgAdmin, session.RoleTeamLeader); err != nil {
 		return nil, err
 	}
-	return s.store.ListQuotaPolicies(ctx, orgID)
+	all, err := s.store.ListQuotaPolicies(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	// A8:team_leader 只能读**本团队**策略(与写侧 SetQuotaPolicy 同口径:仅 team 维度、本 TeamID);
+	// org_admin/operator 看全 org。避免越团队读到别团队/别人的额度上限(org 内信息泄露)。
+	if c.Role == session.RoleTeamLeader {
+		var mine []*repo.QuotaPolicy
+		for _, p := range all {
+			if p.Scope == "team" && p.ScopeID == c.TeamID {
+				mine = append(mine, p)
+			}
+		}
+		return mine, nil
+	}
+	return all, nil
 }
 
 // SetQuotaPolicy 建/改配额策略(A/L)。

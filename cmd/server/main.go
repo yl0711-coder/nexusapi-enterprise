@@ -112,6 +112,11 @@ func run(log *slog.Logger) error {
 	}
 	// v1 escrow 休眠总闸(20-§9):默认 false=平台不经手钱(充值/退款/续充/escrow对账/计费对账全禁);v2 才开。
 	fundingEnabled := os.Getenv("NEXUS_PLATFORM_FUNDING_ENABLED") == "true"
+	// A9(硬不变式):funding 蕴含非 observe——观测期平台绝不经手钱。误配即拒启动,
+	// 防 escrow对账/AutoRefill/applyRecharge 只受 fundingEnabled 门控、在"观测期"对 user.quota add/subtract。
+	if fundingEnabled && mvpMode {
+		return errors.New("配置互斥(A9):NEXUS_PLATFORM_FUNDING_ENABLED 与 NEXUS_MVP_MODE 不可同时为 true(观测期平台不得经手钱),请关闭其一")
+	}
 	if fundingEnabled {
 		log.Info("平台经手钱已开启(v2 escrow):入账/续充/退款/对账生效")
 	} else {

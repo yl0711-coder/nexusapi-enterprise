@@ -9,6 +9,9 @@ const brandDoc = () => BRAND.doc.includes("待定") ? "" : BRAND.doc;
 // 改动⑦:看板时间窗(小时)。7/30/90 天 + 全部历史(24:门B 回填历史可能远早于默认窗);默认 168=近 7 天。
 const WIN_ALL = 200000; // ≈22.8 年,覆盖全部历史(远早于任何真实日志,且 since 仍 >1970 不越 TIMESTAMP 下界)
 function winLabel(h) { return ({ 168: "近 7 天", 720: "近 30 天", 2160: "近 90 天", [WIN_ALL]: "全部历史" })[h] || ("近 " + Math.round(h / 24) + " 天"); }
+// A5:余额接口失败显示"暂不可用"占位,不把失败当真实 $0.00(否则误导客户误判欠费/停服)。
+// 取数处 catch 返回 {__err:true},渲染走此函数区分"真 0"与"取数失败"。
+function balMoney(b) { return (b && b.__err) ? "暂不可用" : money((b && b.available_quota) || 0); }
 function winSelect() {
   return `<select class="fsel" onchange="S.win=+this.value;renderView()">`
     + [168, 720, 2160, WIN_ALL].map(h => `<option value="${h}"${S.win === h ? " selected" : ""}>${winLabel(h)}</option>`).join("")
@@ -339,7 +342,7 @@ async function enterOrg(id, name) {
   // v1(20-§9):充值在 new-api 完成,平台无充值/续充入口(escrow 休眠);运营方看实时余额 + 硬停(风控)+ 门B 重新导入。
   const [org, eb, bf] = await Promise.all([
     api("GET", "/organizations/" + id, null),
-    api("GET", "/organizations/" + id + "/escrow-balance", null).catch(() => ({})),
+    api("GET", "/organizations/" + id + "/escrow-balance", null).catch(() => ({ __err: true })),
     api("GET", "/organizations/" + id + "/backfill", null).catch(() => ({ status: "none" })),
   ]);
   const mem = await api("GET", "/organizations/" + id + "/members?page=1&page_size=20", null);
@@ -351,7 +354,7 @@ async function enterOrg(id, name) {
     + `<div class="crumb"><span class="lk" onclick="go('orgs')">客户组织</span><span class="sep">/</span><b>${esc(name)}</b></div>
     ${hardStopped ? `<div class="note" style="color:#c00">该组织处于运维硬停中:全部 key 已 403,平台管理操作暂不可用,解除后恢复。</div>` : ""}
     <div class="cards">
-      ${kpi("实时余额", money(eb.available_quota || 0), "实时读 new-api 池子(v1 充值在 new-api 完成)")}
+      ${kpi("实时余额", balMoney(eb), "实时读 new-api 池子(v1 充值在 new-api 完成)")}
       ${kpi("组织状态", pill(org.status, org.status === "active" ? "ok" : "warn"), hardStopped ? "运维硬停中" : "")}
       ${kpi("成员数", (mem.pagination || {}).total || (mem.list || []).length || 0, "")}
     </div>
@@ -450,7 +453,7 @@ VIEWS.dash = async () => {
   const win = S.win, wl = winLabel(win);
   const reqs = [api("GET", "/organizations/" + id + "/usage?since_hours=" + win, null)];
   // v1 M5(20-§3):客户余额=读求和(实时读 new-api 池子,available_quota);订阅组织显示"订阅计费"。
-  reqs.push(api("GET", "/organizations/" + id + "/balance", null).catch(() => ({})));
+  reqs.push(api("GET", "/organizations/" + id + "/balance", null).catch(() => ({ __err: true })));
   // M2:用量趋势(折线图);失败不拖垮看板,降级空序列。
   reqs.push(api("GET", "/organizations/" + id + "/usage/timeseries?since_hours=" + win + "&granularity=" + S.gran, null).catch(() => ({ series: [] })));
   const [usage, bal, ts] = await Promise.all(reqs);
@@ -477,7 +480,7 @@ VIEWS.dash = async () => {
   // v1 M5:可用余额=读求和(实时);订阅计费组织不显示数字(池子不反映其消费,显示会误导)。
   const balCards = bal.billing_kind === "subscription"
     ? kpi("可用余额", "订阅计费", "该组织按订阅计费,无钱包余额")
-    : kpi("可用余额", money(bal.available_quota || 0), "实时读 new-api 池子(充值在 new-api 完成)");
+    : kpi("可用余额", balMoney(bal), "实时读 new-api 池子(充值在 new-api 完成)");
   const srch = (iid, cid, ph) => `<input id="${iid}" placeholder="${ph}" oninput="filterEls('${iid}','${cid}')" style="float:right;width:150px;padding:2px 8px;font-size:12px">`;
   // 数据安全承诺条(仅客户 org_admin);文案站得住:MVP 下成员 key 员工自助建、平台不经手,观测不扣款。
   const safebar = S.role === "org_admin" ? `<div class="safebar">本平台仅统计您的用量,不接触您的 API 密钥;观测期不扣款,数据仅用于用量统计。</div>` : "";
@@ -504,7 +507,7 @@ VIEWS.members = async () => {
   const id = S.orgId;
   const showOff = !!S.membersShowOffboarded;
   const reqs = [
-    api("GET", "/organizations/" + id + "/members?page=1&page_size=50", null),
+    api("GET", "/organizations/" + id + "/members?page=" + (S.membersPage || 1) + "&page_size=50", null),
     api("GET", "/organizations/" + id + "/teams", null).catch(() => []),
   ];
   if (showOff) reqs.push(api("GET", "/organizations/" + id + "/members/offboarded?page=1&page_size=50", null).catch(() => ({ list: [] })));
@@ -531,14 +534,23 @@ VIEWS.members = async () => {
     <td class="mini">key 已失效</td>
     <td class="right"><span class="btn sm" onclick="doRestoreMember(${m.id},'${jsstr(m.display_name || m.login_email)}')">恢复入职</span></td>
   </tr>`).join("") : "";
+  // A6:成员分页(page_size=50)——>50 成员时显示总数 + 上/下页,确保全量可达(客户端搜索只筛已加载行,不够)。
+  const memTotal = (d.pagination || {}).total || (d.list || []).length;
+  const memPage = S.membersPage || 1, memPages = Math.max(1, Math.ceil(memTotal / 50));
+  const memPager = memTotal > 50
+    ? `<div class="toolbar mini">共 ${memTotal} 名成员 · 第 ${memPage}/${memPages} 页
+        <button class="btn sm" ${memPage <= 1 ? "disabled" : ""} onclick="goMembersPage(-1)">上一页</button>
+        <button class="btn sm" ${memPage >= memPages ? "disabled" : ""} onclick="goMembersPage(1)">下一页</button></div>`
+    : "";
   return head(S.role === "team_leader" ? "团队成员" : "成员", "禁用=暂停(同 key,启用即通);离职=离开(key 失效、转离职列表可恢复,恢复需重建 key)")
     + `<div class="toolbar"><div class="search"></div>
       <label class="mini" style="margin-left:12px;cursor:pointer"><input type="checkbox" ${showOff ? "checked" : ""} onclick="S.membersShowOffboarded=this.checked;renderView()"> 显示离职</label>
       ${S.mvp ? "" : `<button class="btn" onclick="openBulk()">批量导入</button>`}<button class="btn pri" onclick="openAddMember()">+ 开通成员</button></div>
     <div class="panel"><table><thead><tr><th>成员</th><th>团队</th><th>状态</th><th>Key(脱敏)</th><th></th></tr></thead>
-    <tbody>${rows || '<tr><td colspan=5>' + emptyState("☷", "还没有成员", "开通第一位员工,系统会生成登录凭证交付给他", "+ 开通成员", "openAddMember()") + '</td></tr>'}</tbody></table></div>`
+    <tbody>${rows || '<tr><td colspan=5>' + emptyState("☷", "还没有成员", "开通第一位员工,系统会生成登录凭证交付给他", "+ 开通成员", "openAddMember()") + '</td></tr>'}</tbody></table>${memPager}</div>`
     + (showOff ? `<div class="panel"><div class="ph">离职成员(软删·可恢复)</div><div class="pb"><table><tbody>${offRows || '<tr><td class="empty">暂无离职成员</td></tr>'}</tbody></table></div></div>` : "");
 };
+function goMembersPage(delta) { S.membersPage = Math.max(1, (S.membersPage || 1) + delta); renderView(); }
 function openChangeTeam(mid, curTid) {
   const topts = (S.teamsCache || []).filter(t => t.status !== "archived").map(t => `<option value="${t.id}" ${t.id === curTid ? "selected" : ""}>${esc(t.name)}</option>`).join("");
   if (!topts) { toast("请先在「团队」页建团队"); return; }
@@ -759,11 +771,11 @@ VIEWS.billing = async () => {
   const id = S.orgId;
   // v1(19-F3/F6):余额=读求和实时读 new-api;充值在 new-api 完成,平台无充值入口/不记充值流水;
   // 藏价(19-F7):不展示折扣/倍率/计费设置。订阅计费组织显示"订阅计费(无钱包余额)"。
-  const bal = await api("GET", "/organizations/" + id + "/balance", null).catch(() => ({}));
+  const bal = await api("GET", "/organizations/" + id + "/balance", null).catch(() => ({ __err: true }));
   const isSub = bal.billing_kind === "subscription";
   const balCards = isSub
     ? kpi("计费方式", "订阅计费", "该组织按订阅计费,无钱包余额;用量报表照常")
-    : kpi("可用余额", money(bal.available_quota || 0), "实时读取,消费即时反映");
+    : kpi("可用余额", balMoney(bal), "实时读取,消费即时反映");
   return head("余额", isSub ? "订阅计费组织:无钱包余额,用量见概览" : "可用余额实时读取;充值请联系运营方(在 new-api 侧完成)")
     + `<div class="cards">${balCards}</div>
     <div class="panel"><div class="ph">说明</div><div class="pb"><div class="note">

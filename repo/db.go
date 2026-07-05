@@ -107,6 +107,11 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 		for _, stmt := range splitSQL(string(raw)) {
 			if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+				// A7:多语句迁移中途被杀后重跑,已应用的语句会撞"已存在"(1050表/1060列/1061键)——视为已应用继续,
+				// 使部分应用的迁移可安全重跑续成(0016/0020 未拆单语句时的卡死根治),不改文件名、已上线实例不受影响。
+				if isAlreadyApplied(err) {
+					continue
+				}
 				return fmt.Errorf("repo: 执行迁移 %s 失败: %w\n语句: %.120s", name, err, stmt)
 			}
 		}
@@ -138,6 +143,20 @@ func splitSQL(s string) []string {
 		}
 	}
 	return out
+}
+
+// isAlreadyApplied 报告 DDL 错误是否为"该 schema 变更已存在":1050 表已存在 / 1060 列已存在 / 1061 键名已存在。
+// 用于让多语句迁移可安全重跑(A7):某语句应用后进程被杀 → 重跑重执行该语句得此错误 → 视为已应用继续。
+func isAlreadyApplied(err error) bool {
+	var me *mysql.MySQLError
+	if !errors.As(err, &me) {
+		return false
+	}
+	switch me.Number {
+	case 1050, 1060, 1061:
+		return true
+	}
+	return false
 }
 
 // isDupKey 报告错误是否为 MySQL 唯一键冲突(errno 1062)。

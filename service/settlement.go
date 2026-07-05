@@ -322,6 +322,7 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 	//    任一步失败或 AdvanceCursor 未命中 → 回滚,本轮不推水位、不计扣,下轮干净重做。
 	postBal := map[int64]*model.Balance{}
 	var totalDeducted int64
+	var missingBal []int64 // B3:billing_enabled 却无 company_balance 行的组织(误配),提交后告警,不整批回滚
 	txErr := s.store.WithTx(ctx, func(tx *sql.Tx) error {
 		// 落账(ledger 桶累加 + 逐条明细)——与历史回填共用的**只写报表**段(24-§4.4);无条件全组织写
 		// (v1 裁定B),不涉钱、不受 observeMode/billing 门控。扣余额 + 推水位仍是本事务后半段 forward 独有。
@@ -339,8 +340,15 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 					continue
 				}
 				bal, err := s.store.DeductBalanceTx(ctx, tx, orgID, amount)
+				if errors.Is(err, repo.ErrNotFound) {
+					// B3:billing_enabled 但无 company_balance 行(误配:开计费却从未充值/建行)。单组织隔离——
+					// 跳过该组织扣费(消费仍已落 ledger 供报表),记下提交后告警;**绝不整批回滚**,否则该组织每轮
+					// ErrNotFound → 水位永不推进 → 全平台结算永久卡死。运营方补建余额行后,后续轮自动正常扣费。
+					missingBal = append(missingBal, orgID)
+					continue
+				}
 				if err != nil {
-					return err // 含 ErrOptimisticLock(FOR UPDATE 下不应发生)/ErrNotFound;整批回滚
+					return err // ErrOptimisticLock(FOR UPDATE 下不应发生)/ 真 DB 错:整批回滚,下轮干净重做
 				}
 				postBal[orgID] = bal
 				totalDeducted += amount
@@ -360,6 +368,12 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 		// 回滚:本轮不推水位、不计扣,下一轮干净重做(无半截 ledger、无双扣)。
 		s.log.Error("结算事务回滚(下轮重做)", "err", txErr, "since", since, "until_sub", untilSub)
 		return 0, txErr
+	}
+	// B3:提交后告警"billing_enabled 却无 company_balance 行"的误配组织(结算已续跑、未卡死;需运营方补建余额行)。
+	for _, orgID := range missingBal {
+		oid := orgID
+		s.log.Error("结算:组织开了 billing_enabled 却无 company_balance 行,已跳过其扣费(消费仍落 ledger),请补建余额行", "org_id", orgID)
+		s.auditSystem(ctx, orgID, "settlement_missing_balance", "balance", &oid, map[string]any{"skipped_deduct": true}, "alert")
 	}
 
 	// 改动⑤:observe 模式落账完成 → 记一条可见日志(落了账、未扣钱),postBal 为空使下面副作用整体空转。

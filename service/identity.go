@@ -155,6 +155,31 @@ func (s *Service) UpdateMyDisplayName(ctx context.Context, c session.Claims, nam
 	return s.Me(ctx, c)
 }
 
+// ResetMemberPassword 管理员/团队负责人重置某成员的平台登录密码(C22:忘密/找回路径)。生成新随机密码、
+// bump epoch 作废该成员所有旧会话(A3),返回明文一次(供交付客户)。RBAC 同成员管理(loadManageableMember)。
+func (s *Service) ResetMemberPassword(ctx context.Context, c session.Claims, orgID, memberID int64) (string, error) {
+	if _, err := s.loadManageableMember(ctx, c, orgID, memberID); err != nil {
+		return "", err
+	}
+	pw, err := genPlatformPassword()
+	if err != nil {
+		return "", apperr.Internal("").WithCause(err)
+	}
+	hash, err := hashPassword(pw)
+	if err != nil {
+		return "", apperr.Internal("").WithCause(err)
+	}
+	if err := s.store.UpdateMemberPassword(ctx, orgID, memberID, hash); err != nil {
+		return "", apperr.Internal("").WithCause(err)
+	}
+	// A3:重置密码作废该成员所有旧 token(须以新密码重新登录)。
+	if err := s.store.BumpMemberSessionEpoch(ctx, orgID, memberID); err != nil {
+		return "", apperr.Internal("").WithCause(err)
+	}
+	s.audit(ctx, c, orgID, "reset_member_password", "member", &memberID, nil)
+	return pw, nil
+}
+
 // SeedOperator 在平台首次启动时确保存在一个运营方账号(引导账号)。
 // 幂等:若该邮箱已存在则不改动。运营方账号挂在专属的运营方组织下,
 // 是平台账号(无 new-api 代发 key,newapi_user_id 留空)。

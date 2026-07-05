@@ -98,6 +98,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/members/{id}/grants", h.requireAuth(h.handleSetGrant))
 	mux.HandleFunc("GET /api/v1/members/{id}/grants", h.requireAuth(h.handleListGrants))
 	mux.HandleFunc("DELETE /api/v1/grants/{id}", h.requireAuth(h.handleRevokeGrant))
+	mux.HandleFunc("POST /api/v1/members/{id}/password:reset", h.requireAuth(h.handleResetMemberPassword)) // C22 重置成员登录密码
 	mux.HandleFunc("POST /api/v1/members/{id}/status", h.requireAuth(h.handleSetMemberStatus))
 	mux.HandleFunc("POST /api/v1/members/{id}/offboard", h.requireAuth(h.handleOffboardMember))                    // 离职(删token+软删)
 	mux.HandleFunc("POST /api/v1/members/{id}/restore", h.requireAuth(h.handleRestoreMember))                      // 恢复入职

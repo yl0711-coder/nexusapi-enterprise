@@ -84,6 +84,8 @@ func (s *Service) enqueueBackfill(ctx context.Context, orgID, newapiUserID int64
 		return err
 	}
 	if cur.LastSettledTS == 0 {
+		// C19:此处同步调 RunSettlement——settlementMu 非重入,**调用方(org.Associate)绝不能持 settlementMu**,否则死锁;
+		// 当前从关联提交后调用、未持锁,安全。(隐性脚枪已注释标注,后续可改异步触发彻底解耦。)
 		if _, serr := s.RunSettlement(ctx); serr != nil { // cursor=(0,0) 时只做基线(不读日志),快
 			return fmt.Errorf("回填触发前强制 forward 基线失败: %w", serr)
 		}
@@ -145,7 +147,7 @@ func (s *Service) RunBackfillSlice(ctx context.Context) error {
 			_ = s.store.SetBackfillError(ctx, job.OrgID, werr.Error())
 			return werr
 		}
-		hi = lo - 1
+		hi = lo - 1 // C3:走到底时 hi 可为 -1(cursor_ts=-1 哨兵=已回填到 0);下方 hi<=0 判定据此收敛为 done
 		if err := s.store.UpdateBackfillProgress(ctx, job.OrgID, hi, rows, earliest); err != nil {
 			return err
 		}
@@ -274,6 +276,8 @@ func (s *Service) backfillLowerBound(ctx context.Context, username string, hi in
 // 漂移即告警(日志 + 审计)。只读、绝不改账——把"回填/forward 静默多算或漏算"的发现窗口从月级压到一个对账周期。
 // v1 报表期即挂:观测到漂移可提前修;v2 开计费后余额从 ledger 派生,这道网直接护住钱。
 func (s *Service) ReconcileBackfillLedger(ctx context.Context) error {
+	// C2:边界秒残余竞态——SUM(ledger) 与 stat(end=水位) 两次读之间若有恰在水位秒的日志落库,可能瞬时不等 → 偶发误报,
+	// 下一轮水位推进后自消。量小、只读告警,可接受;若刷屏可对边界秒延迟一轮再比。
 	cur, err := s.store.GetOrCreateCursor(ctx, 0)
 	if err != nil {
 		return err

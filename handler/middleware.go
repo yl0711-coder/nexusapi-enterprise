@@ -43,6 +43,7 @@ var mvpWriteAllow = []string{
 	"POST /api/v1/members/*/key:rotate",
 	"POST /api/v1/members/*/key:ip-whitelist",
 	"POST /api/v1/members/*/tokens", // 改动③ 员工自助建 key
+	"POST /api/v1/members/*/password:reset", // C22 管理员重置成员登录密码
 	"POST /api/v1/members/*/status",   // 停用/恢复(禁用不删)
 	"POST /api/v1/members/*/offboard", // 离职(删token+软删)
 	"POST /api/v1/members/*/restore",  // 恢复入职

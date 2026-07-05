@@ -76,6 +76,22 @@ func (h *Handler) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, r, http.StatusOK, map[string]any{"ok": true})
 }
 
+// POST /members/{id}/password:reset — 管理员/团队负责人重置成员登录密码(C22),返回新初始密码一次。
+func (h *Handler) handleResetMemberPassword(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	memberID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	pw, err := h.svc.ResetMemberPassword(r.Context(), c, c.OrgID, memberID)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{"initial_password": pw})
+}
+
 type updateMeReq struct {
 	DisplayName string `json:"display_name"`
 }

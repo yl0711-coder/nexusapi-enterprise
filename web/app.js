@@ -828,7 +828,10 @@ VIEWS.mykey = async () => {
       <div class="note">IP 限制在调用入口处生效,不影响平台访问。</div></div></div>`;
 }
 async function saveIP() {
-  try { await api("POST", "/members/" + S.me.id + "/key:ip-whitelist", { allow_ips: val("ipwl") }); toast("已保存 IP 白名单"); }
+  // C9:平台不留存 allow_ips、无法预填,故清空前显式确认防误清(完整预填需新建读 new-api token 端点,后续)。
+  const v = val("ipwl").trim();
+  if (!v && !confirm("留空将清空 IP 白名单(允许所有 IP 调用该 key),确认?")) return;
+  try { await api("POST", "/members/" + S.me.id + "/key:ip-whitelist", { allow_ips: v }); toast(v ? "已保存 IP 白名单" : "已清空 IP 白名单"); }
   catch (e) { toast(e.message); }
 };
 async function rotateKey() {

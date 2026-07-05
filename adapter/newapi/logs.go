@@ -32,6 +32,8 @@ func (a *Adapter) ReadConsumptionLogs(ctx context.Context, sinceUnix, untilUnix 
 	if pageSize <= 0 || pageSize > 100 {
 		pageSize = 100
 	}
+	// C17:new-api /api/log/ 时间过滤为**双闭区间** [since,until];相邻窗口在边界秒会重叠 → 调用方须按 log.id 去重
+	// (forward 靠 id 水位、回填靠 usage_detail 幂等)。
 	path := fmt.Sprintf("/api/log/?type=2&start_timestamp=%d&end_timestamp=%d&p=%d&page_size=%d",
 		sinceUnix, untilUnix, page, pageSize)
 	res, err := a.c.do(ctx, stepReadLogs, "GET", path, adminAuth(a.c.cfg), nil)

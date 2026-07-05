@@ -34,6 +34,7 @@ func (h *Handler) handleSubmitApproval(w http.ResponseWriter, r *http.Request) {
 // GET /api/v1/organizations/{id}/approvals?state= — 审批队列(O/A 全 org / L 本团队 / M 本人)。
 func (h *Handler) handleListApprovals(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())
+	// C13:路径 {id} 不用于取数——ListApprovals 以会话 c.OrgID 为权威 org(防 IDOR,路径 org 不信任,仅 URL 语义)。
 	page, size, offset := parsePaging(r, 20)
 	as, total, err := h.svc.ListApprovals(r.Context(), c, r.URL.Query().Get("state"), size, offset)
 	if err != nil {

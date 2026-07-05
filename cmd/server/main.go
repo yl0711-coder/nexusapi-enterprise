@@ -123,9 +123,19 @@ func run(log *slog.Logger) error {
 		log.Info("v1 观测管理版:escrow 休眠(钱在 new-api,平台只看不碰)")
 	}
 
+	// B5:leader-only 写工作准入支点(结算/回填/托管对账)。v1=envLeadership(NEXUS_WORKER_ENABLED != false),
+	// 无租约/无 fencing——**多节点接 LB 前必须换 leaseLeadership(MySQL 租约 + term fencing),只换实现、调用点不改**。
+	workerEnabled := os.Getenv("NEXUS_WORKER_ENABLED") != "false"
+	if workerEnabled {
+		// 启动自检/告警(过渡期):本节点将跑 leader-only 单写者。多节点场景下**必须保证同时只有一个节点**开 worker,
+		// 否则结算/回填会跨节点重复写(双扣/双灌)——v1 无选主,靠此纪律 + 单节点部署;接 LB 前落 leaseLeadership。
+		log.Warn("worker 已启用:本节点承担 leader-only 单写者(结算/回填/对账)。多节点务必保证仅一个节点开 worker;接 LB 前须落选主(B5)")
+	}
+
 	svc := service.New(service.Deps{
 		Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log,
 		ObserveMode: mvpMode, FundingEnabled: fundingEnabled,
+		Leadership: service.NewEnvLeadership(workerEnabled), // B5
 		// 历史回填限速旋钮(24-§4.5):默认 8 窗口/tick、5 页/秒,量小够用;大回填靠分片多 tick 排空。
 		BackfillWindowsPerTick: atoiOr("NEXUS_BACKFILL_WINDOWS_PER_TICK", 8),
 		BackfillQPS:            atoiOr("NEXUS_BACKFILL_QPS", 5),

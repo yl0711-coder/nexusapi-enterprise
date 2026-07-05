@@ -323,6 +323,12 @@ func (s *Service) ReconcileEscrow(ctx context.Context) error {
 	if !s.fundingEnabled {
 		return nil // v1 escrow 休眠(20-§9):worker 静默短路(v2 开 flag 恢复)
 	}
+	// B5:leader-only 准入(escrow-drain·对账入口)。非 leader 不做。
+	if ok, _, err := s.leadership.CanRunTick(ctx); err != nil {
+		return err
+	} else if !ok {
+		return nil
+	}
 	if _, err := s.RunSettlement(ctx); err != nil { // drain-to-boundary:落账不扣钱(observe/非observe 都只落 ledger)
 		s.log.Warn("escrow 对账前 drain 结算失败(用当前账本继续)", "err", err)
 	}

@@ -56,6 +56,9 @@ type Service struct {
 	// usageDetailRetentionDays 逐条明细保留天数(24-§6):0=永久保留(不清理,回填全历史随时可查的前提);
 	// 设正整数 N 才清 N 天前。默认 0——量涨到千万行级再配天数启用(旋钮,不返工)。
 	usageDetailRetentionDays int
+
+	// leadership B5:leader-only 写工作(结算/回填/托管对账)的准入决策支点;v1=envLeadership,v2 换 leaseLeadership。
+	leadership Leadership
 }
 
 // Deps 是构造 Service 的依赖集合。
@@ -75,6 +78,8 @@ type Deps struct {
 	BackfillQPS            int
 	// UsageDetailRetentionDays 逐条明细保留天数(24-§6):0=永久保留(默认,不清理);正整数 N=清 N 天前。
 	UsageDetailRetentionDays int
+	// Leadership B5:leader-only 写工作准入(nil → 默认 envLeadership(true),即单节点/测试恒 leader)。
+	Leadership Leadership
 }
 
 // New 构造 Service。
@@ -91,6 +96,10 @@ func New(d Deps) *Service {
 	if qps <= 0 {
 		qps = 5
 	}
+	leadership := d.Leadership
+	if leadership == nil {
+		leadership = NewEnvLeadership(true) // 默认恒 leader(单节点/测试);多节点由 main.go 注入
+	}
 	return &Service{
 		store:       d.Store,
 		upstream:    d.Upstream,
@@ -104,6 +113,7 @@ func New(d Deps) *Service {
 		backfillWindowsPerTick: windowsPerTick,
 		backfillQPS:            qps,
 		usageDetailRetentionDays: d.UsageDetailRetentionDays, // 默认 0 = 永久保留(不清理)
+		leadership:               leadership,
 	}
 }
 

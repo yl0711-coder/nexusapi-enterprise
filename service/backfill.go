@@ -119,6 +119,12 @@ func belongsToBackfill(createdAt, id, bTS, bID int64) bool {
 // 锁外,不阻塞 forward——R6 中危修),使回填与 forward-补漏在 600s 重叠带靠 detail 幂等去重时绝不并发 TOCTOU
 // 双算。**仅由 settlement-worker 单 goroutine 调用**。
 func (s *Service) RunBackfillSlice(ctx context.Context) error {
+	// B5:leader-only 准入(与结算同一支点)。非 leader 不回填,防多节点两 worker 取同 job 双灌(B4)。
+	if ok, _, err := s.leadership.CanRunTick(ctx); err != nil {
+		return err
+	} else if !ok {
+		return nil
+	}
 	job, err := s.store.NextBackfillJob(ctx)
 	if err != nil {
 		return err

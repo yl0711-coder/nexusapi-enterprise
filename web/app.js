@@ -6,11 +6,12 @@ const S = { token: localStorage.getItem("nx_token") || "", me: null, role: "", v
 const BRAND = { product: "企业管理台", company: "(公司名待定)", support: "support@example.com", doc: "(文档地址待定)" };
 const brandCompany = () => BRAND.company.includes("待定") ? "" : BRAND.company;
 const brandDoc = () => BRAND.doc.includes("待定") ? "" : BRAND.doc;
-// 改动⑦:看板时间窗(小时)。7/30/90 天选择器用,默认 168=近 7 天。
-function winLabel(h) { return ({ 168: "近 7 天", 720: "近 30 天", 2160: "近 90 天" })[h] || ("近 " + Math.round(h / 24) + " 天"); }
+// 改动⑦:看板时间窗(小时)。7/30/90 天 + 全部历史(24:门B 回填历史可能远早于默认窗);默认 168=近 7 天。
+const WIN_ALL = 200000; // ≈22.8 年,覆盖全部历史(远早于任何真实日志,且 since 仍 >1970 不越 TIMESTAMP 下界)
+function winLabel(h) { return ({ 168: "近 7 天", 720: "近 30 天", 2160: "近 90 天", [WIN_ALL]: "全部历史" })[h] || ("近 " + Math.round(h / 24) + " 天"); }
 function winSelect() {
   return `<select class="fsel" onchange="S.win=+this.value;renderView()">`
-    + [168, 720, 2160].map(h => `<option value="${h}"${S.win === h ? " selected" : ""}>${winLabel(h)}</option>`).join("")
+    + [168, 720, 2160, WIN_ALL].map(h => `<option value="${h}"${S.win === h ? " selected" : ""}>${winLabel(h)}</option>`).join("")
     + `</select>`;
 }
 // M2:用量趋势粒度(天/周/月,UTC+8 自然边界,后端 /usage/timeseries 同口径)。
@@ -437,6 +438,15 @@ async function doSupport(id) {
 /* ===================== 组织管理员 / 团队负责人 ===================== */
 VIEWS.dash = async () => {
   const id = S.orgId;
+  // 门B 回填历史常远早于默认窗(近7天)→ 首次进入该组织若有更早的已回填历史,自动切"全部历史",
+  // 免客户第一眼以为没数据(24 验收·产品建议)。仅首次自动一次;之后用户手动改窗不再被覆盖。
+  if (S._dashWideFor !== id) {
+    S._dashWideFor = id;
+    const bf = await api("GET", "/organizations/" + id + "/backfill", null).catch(() => ({ status: "none" }));
+    if (bf.status === "done" && bf.earliest_seen_ts && (Date.now() / 1000 - bf.earliest_seen_ts) > S.win * 3600) {
+      S.win = WIN_ALL;
+    }
+  }
   const win = S.win, wl = winLabel(win);
   const reqs = [api("GET", "/organizations/" + id + "/usage?since_hours=" + win, null)];
   // v1 M5(20-§3):客户余额=读求和(实时读 new-api 池子,available_quota);订阅组织显示"订阅计费"。

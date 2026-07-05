@@ -483,49 +483,75 @@ func (s *Service) ReconcileBilling(ctx context.Context) error {
 	memberCache := map[int64]*model.Member{}
 	flagCache := map[int64]bool{}
 	since, until := hourStart.Unix(), hourEnd.Unix()-1
-	for page := 1; page <= settlementMaxPages; page++ {
-		entries, total, err := s.upstream.ReadConsumptionLogs(ctx, since, until, page, 100)
-		if err != nil {
-			return mapUpstream(err)
+	// 单条日志归因累加(按 token_id;成员共享 org user)。
+	ingest := func(e newapi.LogEntry) error {
+		if e.Quota <= 0 {
+			return nil
 		}
-		for _, e := range entries {
-			if e.Quota <= 0 {
-				continue
+		m := memberCache[e.TokenID]
+		if m == nil {
+			mm, _, found, merr := s.store.GetMemberByNewapiTokenID(ctx, e.TokenID)
+			if merr != nil {
+				return apperr.Internal("").WithCause(merr) // DB 错,非上游故障(P1-3)
 			}
-			// 模型2:按 token_id 归因(成员共享 org user)。缓存按 token_id。
-			m := memberCache[e.TokenID]
-			if m == nil {
-				mm, _, found, merr := s.store.GetMemberByNewapiTokenID(ctx, e.TokenID)
-				if merr != nil {
-					return apperr.Internal("").WithCause(merr) // DB 错,非上游故障(P1-3:勿误走 mapUpstream)
-				}
-				if !found {
-					memberCache[e.TokenID] = &model.Member{} // 非平台 token,标记跳过
-					continue
-				}
-				memberCache[e.TokenID] = mm
-				m = mm
+			if !found {
+				memberCache[e.TokenID] = &model.Member{} // 非平台 token,标记跳过
+				return nil
 			}
-			if m.ID == 0 {
-				continue
-			}
-			billing, ok := flagCache[m.OrgID]
-			if !ok {
-				f, ferr := s.store.GetOrgBillingFlags(ctx, m.OrgID)
-				if ferr != nil {
-					return ferr
-				}
-				billing = f.BillingEnabled
-				flagCache[m.OrgID] = billing
-			}
-			if !billing {
-				continue
-			}
-			logByOrg[m.OrgID] += e.Quota
+			memberCache[e.TokenID] = mm
+			m = mm
 		}
-		if page*100 >= total {
-			break
+		if m.ID == 0 {
+			return nil
 		}
+		billing, ok := flagCache[m.OrgID]
+		if !ok {
+			f, ferr := s.store.GetOrgBillingFlags(ctx, m.OrgID)
+			if ferr != nil {
+				return ferr
+			}
+			billing = f.BillingEnabled
+			flagCache[m.OrgID] = billing
+		}
+		if !billing {
+			return nil
+		}
+		logByOrg[m.OrgID] += e.Quota
+		return nil
+	}
+	// B6b:整小时可能 >2000 行,原来固定 20 页硬截断 → 漏读 → 假"少收"告警刷屏。改子窗口二分(复刻结算手法),
+	// 逐子窗口完整读尽、绝不截断。加 billing_enabled 组织过滤本就少量,基本一子窗口即完。
+	for sub := since; sub <= until; {
+		subEnd := until
+		for {
+			_, total, err := s.upstream.ReadConsumptionLogs(ctx, sub, subEnd, 1, 100)
+			if err != nil {
+				return mapUpstream(err)
+			}
+			if total <= settlementMaxPages*100 {
+				break
+			}
+			if subEnd <= sub {
+				s.log.Error("计费对账单秒日志数超上限(极端,请关注)", "sub", sub, "total", total)
+				break
+			}
+			subEnd = sub + (subEnd-sub)/2 // 二分缩小子窗口
+		}
+		for page := 1; page <= settlementMaxPages; page++ {
+			entries, total, err := s.upstream.ReadConsumptionLogs(ctx, sub, subEnd, page, 100)
+			if err != nil {
+				return mapUpstream(err)
+			}
+			for _, e := range entries {
+				if ierr := ingest(e); ierr != nil {
+					return ierr
+				}
+			}
+			if page*100 >= total {
+				break
+			}
+		}
+		sub = subEnd + 1
 	}
 
 	// 2) usage_ledger 同小时桶各组织已结算消耗。

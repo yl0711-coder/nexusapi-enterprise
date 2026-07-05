@@ -129,7 +129,12 @@ func (s *Service) CreateOrg(ctx context.Context, c session.Claims, in CreateOrgI
 
 	// 首个组织管理员:平台账号(无代发 key)。
 	pw := in.AdminPassword
-	if pw == "" {
+	if pw != "" {
+		// C12:显式传入的初始密码走与改密同款强度校验(8–64),防运营方设弱密。
+		if n := len(pw); n < 8 || n > 64 {
+			return nil, apperr.InvalidParam("管理员初始密码长度须为 8–64 位")
+		}
+	} else {
 		if pw, err = genPlatformPassword(); err != nil {
 			return nil, apperr.Internal("").WithCause(err)
 		}

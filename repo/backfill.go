@@ -137,9 +137,11 @@ func (s *Store) UpdateBackfillProgress(ctx context.Context, orgID, cursorTS, add
 // RequeueBackfillJob 重新回填(运营方按钮,幂等,24-§9):cursor_ts 回到 boundary_ts、status=pending、清错。
 // 重跑靠 detail 幂等去重,不会双算;rows_ingested 保留(重跑几乎全部命中已存在、新增为 0)。
 func (s *Store) RequeueBackfillJob(ctx context.Context, orgID int64) error {
+	// C1:不覆盖"正在跑"的 slice——status='running' 时不重置(避免与在跑窗口竞态静默吞;幂等本就不双算,
+	// 但重置 cursor_ts 撞在跑的 slice 会让"这次重新回填没生效")。运营方对 running 组织稍后再点即可。
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE org_backfill_job
 		    SET status = 'pending', cursor_ts = boundary_ts, earliest_seen_ts = NULL, last_error = NULL
-		  WHERE org_id = ?`, orgID)
+		  WHERE org_id = ? AND status <> 'running'`, orgID)
 	return err
 }

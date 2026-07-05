@@ -228,6 +228,26 @@ func (s *Store) SumOrgConsumed(ctx context.Context, orgID int64) (int64, error) 
 	return q.Int64, nil
 }
 
+// ListWalletBillingOrgIDs 列所有钱包计费(billing_kind=wallet)且已开通池子的组织 id(B6a 订阅旁路再断言)。
+func (s *Store) ListWalletBillingOrgIDs(ctx context.Context) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM organization WHERE billing_kind = ? AND deleted_at IS NULL AND newapi_user_id IS NOT NULL`,
+		model.BillingKindWallet)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // ListEscrowOrgIDs 列所有有桶的组织 id(escrow 对账 worker 逐组织核窗口)。
 func (s *Store) ListEscrowOrgIDs(ctx context.Context) ([]int64, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT org_id FROM escrow_bucket`)

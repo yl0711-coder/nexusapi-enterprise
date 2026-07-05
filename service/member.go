@@ -539,6 +539,48 @@ func (s *Service) ensureWalletOnly(ctx context.Context, orgID int64, cred newapi
 	s.log.Info("org user 已设 wallet_only(堵订阅旁路 H1)", "org_id", orgID)
 }
 
+// ReassertWalletOnly B6a:周期再断言钱包组织的 wallet_only(堵订阅旁路 P0-2:组织后续自助买订阅、或当初
+// SetBillingPreference 曾失败仅 warn → v2 消费走订阅=硬停失效+双计费)。逐钱包组织重设 wallet_only + 告警 active 订阅。
+// 仅 fundingEnabled(v2)下有意义;leader-only。
+func (s *Service) ReassertWalletOnly(ctx context.Context) error {
+	if !s.fundingEnabled {
+		return nil // v1 escrow 休眠:订阅旁路的钱风险仅 v2 触发
+	}
+	if ok, _, err := s.leadership.CanRunTick(ctx); err != nil {
+		return err
+	} else if !ok {
+		return nil
+	}
+	orgIDs, err := s.store.ListWalletBillingOrgIDs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, orgID := range orgIDs {
+		cred, cerr := s.orgCred(ctx, orgID)
+		if cerr != nil {
+			continue // 未开通池子等,跳过
+		}
+		sub, gerr := s.upstream.GetSelfSubscription(ctx, cred)
+		if gerr != nil {
+			s.log.Warn("B6a 读订阅偏好失败(下轮重试)", "org_id", orgID, "err", gerr)
+			continue
+		}
+		if sub.HasActive {
+			oid := orgID
+			s.log.Error("钱包计费组织出现 active 订阅(订阅旁路风险:消费可能走订阅不扣窗口,人工核)", "org_id", orgID)
+			s.auditSystem(ctx, orgID, "subscription_bypass_alert", "organization", &oid, map[string]any{"has_active_sub": true}, "alert")
+		}
+		if sub.BillingPreference != "wallet_only" {
+			if serr := s.upstream.SetBillingPreference(ctx, cred, "wallet_only"); serr != nil {
+				s.log.Error("B6a 重设 wallet_only 失败(下轮重试)", "org_id", orgID, "err", serr)
+			} else {
+				s.log.Info("B6a 已重设 wallet_only(堵订阅旁路)", "org_id", orgID)
+			}
+		}
+	}
+	return nil
+}
+
 // orgCred 取组织的 new-api 凭证(模型2:员工 token 一律在 org user 下建/管,用 org 的 user_id + access_token)。
 // 组织尚未开通池子 user → 409;access_token 解密自 organization.newapi_access_token_enc。
 func (s *Service) orgCred(ctx context.Context, orgID int64) (newapi.MemberCred, error) {

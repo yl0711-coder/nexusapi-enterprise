@@ -344,6 +344,10 @@ func (s *Service) ReconcileEscrow(ctx context.Context) error {
 	return nil
 }
 
+// escrowMaxCorrectFraction B2:单轮 escrow 窗口超拨自动纠偏的最大比例(占当前窗口);超此只告警不自动减,
+// 防"ledger 多算导致的假超拨"被一次减成真扣客户钱。0.2 = 一次最多减掉窗口的 20%。
+const escrowMaxCorrectFraction = 0.2
+
 func (s *Service) reconcileOrgEscrow(ctx context.Context, orgID int64) error {
 	release, lerr := s.quotaLocker.Acquire(ctx, escrowLockKey(orgID)) // 与入账/续充/退款互斥
 	if lerr != nil {
@@ -393,10 +397,20 @@ func (s *Service) reconcileOrgEscrow(ctx context.Context, orgID int64) error {
 	switch {
 	case actual > target:
 		// 超拨:实际窗口高于应有 → 自动 SUBTRACT 到目标(安全方向;地板 target≥0,绝不减到客户合法拥有之下)。
-		if err := s.upstream.ManageUserQuota(ctx, int(uid), newapi.QuotaSubtract, actual-target); err != nil {
+		delta := actual - target
+		// B2:单轮最大纠偏比例闸——正确性全押"ledger 绝不多算";万一 ledger 多算导致的假超拨,一次减掉过大比例
+		// 就是真扣客户钱。故一次纠偏超过窗口的 escrowMaxCorrectFraction 时**只告警不自动减**,待人工核对(不 fail-closed)。
+		if actual > 0 && float64(delta) > float64(actual)*escrowMaxCorrectFraction {
+			s.log.Error("escrow 窗口超拨过大(超单轮纠偏闸),只告警不自动减(疑 ledger 多算,人工核对)",
+				"org_id", orgID, "actual", actual, "target", target, "delta", delta, "gate_frac", escrowMaxCorrectFraction)
+			s.auditSystem(ctx, orgID, "escrow_overrelease_gated", "balance", &orgID,
+				map[string]any{"actual": actual, "target": target, "delta": delta}, "alert")
+			break
+		}
+		if err := s.upstream.ManageUserQuota(ctx, int(uid), newapi.QuotaSubtract, delta); err != nil {
 			return mapUpstream(err)
 		}
-		s.log.Warn("escrow 窗口超拨自动纠偏(减到目标)", "org_id", orgID, "actual", actual, "target", target, "subtract", actual-target)
+		s.log.Warn("escrow 窗口超拨自动纠偏(减到目标)", "org_id", orgID, "actual", actual, "target", target, "subtract", delta)
 	case actual < target:
 		// 欠拨:实际窗口低于应有 → **绝不自动 ADD**(已 drain 仍低=真欠拨,非滞后)。续充 worker(读真实窗口自愈)
 		// 或人工按 SLA 补。只告警,不动 newapi(§15 终极安全:对账永不经自动加垫钱)。

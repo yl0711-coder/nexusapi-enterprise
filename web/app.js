@@ -7,7 +7,7 @@ const BRAND = { product: "企业管理台", company: "(公司名待定)", suppor
 const brandCompany = () => BRAND.company.includes("待定") ? "" : BRAND.company;
 const brandDoc = () => BRAND.doc.includes("待定") ? "" : BRAND.doc;
 // 改动⑦:看板时间窗(小时)。7/30/90 天 + 全部历史(24:门B 回填历史可能远早于默认窗);默认 168=近 7 天。
-const WIN_ALL = 200000; // ≈22.8 年,覆盖全部历史(远早于任何真实日志,且 since 仍 >1970 不越 TIMESTAMP 下界)
+const WIN_ALL = 263520; // C4:=后端 maxUsageWindowHours(24*366*30≈30年),口径一致;覆盖全部历史且 since>1970
 function winLabel(h) { return ({ 168: "近 7 天", 720: "近 30 天", 2160: "近 90 天", [WIN_ALL]: "全部历史" })[h] || ("近 " + Math.round(h / 24) + " 天"); }
 // A5:余额接口失败显示"暂不可用"占位,不把失败当真实 $0.00(否则误导客户误判欠费/停服)。
 // 取数处 catch 返回 {__err:true},渲染走此函数区分"真 0"与"取数失败"。
@@ -356,7 +356,7 @@ async function enterOrg(id, name) {
   const rows = (mem.list || []).map(m => `<tr><td>${esc(m.display_name || m.login_email)}</td>
     <td>${pill(m.status, m.status === "active" ? "ok" : "mut")}</td><td class="mini">${esc(m.key_masked || "-")}</td></tr>`).join("");
   const hardStopped = org.status === "hard_stopped";
-  main.innerHTML = head(esc(name), "运营方支持视角 · 实时余额 / 成员 / 风控硬停 / 支持会话")
+  main.innerHTML = head(name, "运营方支持视角 · 实时余额 / 成员 / 风控硬停 / 支持会话") // C10:head() 内部已 esc,勿双重转义
     + `<div class="crumb"><span class="lk" onclick="go('orgs')">客户组织</span><span class="sep">/</span><b>${esc(name)}</b></div>
     ${hardStopped ? `<div class="note" style="color:#c00">该组织处于运维硬停中:全部 key 已 403,平台管理操作暂不可用,解除后恢复。</div>` : ""}
     <div class="cards">
@@ -483,7 +483,9 @@ VIEWS.dash = async () => {
   const maxt = Math.max(1, ...tms.map(b => b.consumed_quota));
   const tbars = tms.map(b => {
     const nm = b.label || ("团队#" + b.key);
-    return `<div class="bar lk" onclick="openTeamUsage(${b.key},'${jsstr(nm)}')" title="查看该团队成员/模型明细" data-q="${esc(nm.toLowerCase())}"><span class="nm">${esc(nm)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / maxt * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`;
+    const tid = Number(b.key); // C8:数字守卫——"未分组"桶(key=0/非数字)不可点,避免 onclick 语法错(对齐成员条)
+    const attrs = tid > 0 ? `class="bar lk" onclick="openTeamUsage(${tid},'${jsstr(nm)}')" title="查看该团队成员/模型明细"` : `class="bar"`;
+    return `<div ${attrs} data-q="${esc(nm.toLowerCase())}"><span class="nm">${esc(nm)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / maxt * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`;
   }).join("") || `<div class="empty">${wl}暂无用量(或未建团队)</div>`;
   // v1 M5:可用余额=读求和(实时);订阅计费组织不显示数字(池子不反映其消费,显示会误导)。
   const balCards = bal.billing_kind === "subscription"
@@ -855,7 +857,7 @@ async function doCreateKey() {
 }
 VIEWS.mynotif = async () => {
   const d = await api("GET", "/notifications?page=1&page_size=30", null);
-  const rows = (d.list || []).map(n => `<tr><td>${n.is_read ? "" : '<span class="dot" style="background:var(--brand)"></span> '}${esc(n.title)}<div class="mini">${esc(n.body || "")} · ${esc(n.created_at.slice(0, 16).replace("T", " "))}</div></td></tr>`).join("");
+  const rows = (d.list || []).map(n => `<tr><td>${n.is_read ? "" : '<span class="dot" style="background:var(--brand)"></span> '}${esc(n.title)}<div class="mini">${esc(n.body || "")} · ${esc((n.created_at || "").slice(0, 16).replace("T", " ") || "-")}</div></td></tr>`).join("");
   return head("通知", "站内通知 · 仅本人相关 · 未读 " + (d.unread || 0))
     + `<div class="toolbar"><button class="btn" onclick="markAll()">全部已读</button></div>
     <div class="panel"><table><tbody>${rows || '<tr><td>' + emptyState("✉", "暂无通知", "有审批、额度变更等消息会显示在这里", "", "") + '</td></tr>'}</tbody></table></div>`;

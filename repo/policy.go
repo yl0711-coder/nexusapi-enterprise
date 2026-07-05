@@ -19,6 +19,7 @@ type QuotaPolicy struct {
 }
 
 // MarkPolicyReset 记录策略本次重置点(周期重置 worker 用)。
+// C20:确定性绝对写(**非 CAS**)——单写者(leader)下无并发覆盖故安全;多写者由 B5 选主保证单节点跑重置,不靠此处 CAS。
 func (s *Store) MarkPolicyReset(ctx context.Context, id int64, at time.Time) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE quota_policy SET last_reset_at = ? WHERE id = ?`, at, id)
 	return err

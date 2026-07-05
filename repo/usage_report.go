@@ -144,6 +144,12 @@ func (s *Store) CountUsageDetailByDim(ctx context.Context, orgID int64, since ti
 // FilterExistingDetailLogIDs M3 补漏扫描(20-§6):批量查哪些 newapi_log_id 已入 usage_detail。
 // 重扫 overlap 区间时,已落过明细的行跳过(ledger 桶是累加、非按行幂等,靠这个查重防重复计入)。
 func (s *Store) FilterExistingDetailLogIDs(ctx context.Context, logIDs []int64) (map[int64]bool, error) {
+	return s.FilterExistingDetailLogIDsTx(ctx, s.db, logIDs)
+}
+
+// FilterExistingDetailLogIDsTx 同上,但在调用方提供的 execer 上查(B4:回填把"去重查 + 落账"收进同一写事务,
+// 使跨节点/失效切换的竞态窗口下,去重读与提交在同一事务快照内,配 B5 leader 租约杜绝跨节点回填双灌)。
+func (s *Store) FilterExistingDetailLogIDsTx(ctx context.Context, x dbtx, logIDs []int64) (map[int64]bool, error) {
 	out := map[int64]bool{}
 	const batch = 500
 	for start := 0; start < len(logIDs); start += batch {
@@ -163,7 +169,7 @@ func (s *Store) FilterExistingDetailLogIDs(ctx context.Context, logIDs []int64) 
 			args = append(args, id)
 		}
 		sb.WriteString(")")
-		rows, err := s.db.QueryContext(ctx, sb.String(), args...)
+		rows, err := x.QueryContext(ctx, sb.String(), args...)
 		if err != nil {
 			return nil, err
 		}

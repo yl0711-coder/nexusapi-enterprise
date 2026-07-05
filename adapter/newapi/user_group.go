@@ -25,7 +25,9 @@ func (a *Adapter) SetUserGroup(ctx context.Context, userID int, group string) er
 		return nil // 已是目标分组,免写
 	}
 	u["group"] = group
-	// 读-改-写回(保留 quota 等)。
+	// C15(lost-update 风险,已存档):读-改-写整个 user 对象回写,GET→PUT 窗口内若有并发 quota 变更(如 v2 充值)
+	// 会被此处写回的旧 quota 覆盖。v1 观测期平台不改 quota、且 SetUserGroup 仅开通时调用,窗口窄不触发;
+	// v2 开钱前须核实 rc.4 的 PUT /api/user/ 是否忽略未变字段——若否,改为"最小字段更新"或收进 org quota 写锁内。
 	if _, werr := a.c.do(ctx, stepManageUser, "PUT", "/api/user/", adminAuth(a.c.cfg), u); werr != nil {
 		return werr
 	}

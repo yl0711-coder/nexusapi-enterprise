@@ -70,6 +70,7 @@ func (s *Service) CreateOrg(ctx context.Context, c session.Claims, in CreateOrgI
 
 	// 门B 关联校验闸(20-§8,**全绿才建组织**,任一不过明确报错不留半截)。
 	var assocCred newapi.MemberCred
+	var assocUsername string // 门B:企业自己的 new-api 用户名,供历史回填按 username 精确过滤(24-§7.3)
 	billingKind := model.BillingKindWallet
 	if a := in.Associate; a != nil {
 		if a.NewapiUserID <= 0 || a.AccessToken == "" {
@@ -81,6 +82,7 @@ func (s *Service) CreateOrg(ctx context.Context, c session.Claims, in CreateOrgI
 		if ierr != nil {
 			return nil, apperr.InvalidParam("access token 无效或已过期,请企业在 new-api 重新生成后再录入")
 		}
+		assocUsername = info.Username // 门B:回填按此 username 精确拉该企业用户历史日志(24-§7.3)
 		if int64(info.ID) != a.NewapiUserID {
 			return nil, apperr.InvalidParam(fmt.Sprintf("access token 属于用户 %d,与录入的 %d 不符(防串号,拒绝)", info.ID, a.NewapiUserID))
 		}
@@ -127,7 +129,12 @@ func (s *Service) CreateOrg(ctx context.Context, c session.Claims, in CreateOrgI
 
 	// 首个组织管理员:平台账号(无代发 key)。
 	pw := in.AdminPassword
-	if pw == "" {
+	if pw != "" {
+		// C12:显式传入的初始密码走与改密同款强度校验(8–64),防运营方设弱密。
+		if n := len(pw); n < 8 || n > 64 {
+			return nil, apperr.InvalidParam("管理员初始密码长度须为 8–64 位")
+		}
+	} else {
 		if pw, err = genPlatformPassword(); err != nil {
 			return nil, apperr.Internal("").WithCause(err)
 		}
@@ -181,6 +188,12 @@ func (s *Service) CreateOrg(ctx context.Context, c session.Claims, in CreateOrgI
 			return nil, apperr.Internal("").WithCause(werr)
 		}
 		imported, importFailed = s.importOrgTokens(ctx, orgID, assocCred, a.NamePolicy)
+
+		// 历史日志全量回填(24-§7.3):关联成功 → 快照全局 forward 边界 B、插 pending 任务(worker 串行回填)。
+		// 非阻断:回填是报表补全(v1 不涉钱),失败不掀翻已成功的关联,可经运营方"重新回填"补。
+		if berr := s.enqueueBackfill(ctx, orgID, a.NewapiUserID, assocUsername); berr != nil {
+			s.log.Error("历史回填任务创建失败(不阻断关联,可经重新回填补)", "org_id", orgID, "err", berr)
+		}
 	}
 
 	org, err := s.store.GetOrganization(ctx, orgID)
@@ -301,6 +314,12 @@ func (s *Service) HardStopOrg(ctx context.Context, c session.Claims, orgID int64
 		// new-api 侧已生效(那是真动作),平台状态没跟上:告警,运维重试补状态。
 		s.log.Error("硬停:new-api 已生效但组织状态落库失败(重试补)", "org_id", orgID, "stop", stop, "err", serr)
 		return apperr.Internal("").WithCause(serr)
+	}
+	// A3/WB-4:硬停即刻失效——作废该组织全部成员的平台会话(否则被硬停组织的成员旧 token 仍可操作达 12h)。
+	if stop {
+		if berr := s.store.BumpOrgMembersSessionEpoch(ctx, orgID); berr != nil {
+			s.log.Error("硬停:作废成员会话失败(旧 token 最长 12h 后自然失效)", "org_id", orgID, "err", berr)
+		}
 	}
 	s.audit(ctx, c, orgID, action, "organization", &orgID, map[string]any{"newapi_user_id": uid})
 	return nil

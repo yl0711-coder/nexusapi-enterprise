@@ -112,15 +112,35 @@ func run(log *slog.Logger) error {
 	}
 	// v1 escrow 休眠总闸(20-§9):默认 false=平台不经手钱(充值/退款/续充/escrow对账/计费对账全禁);v2 才开。
 	fundingEnabled := os.Getenv("NEXUS_PLATFORM_FUNDING_ENABLED") == "true"
+	// A9(硬不变式):funding 蕴含非 observe——观测期平台绝不经手钱。误配即拒启动,
+	// 防 escrow对账/AutoRefill/applyRecharge 只受 fundingEnabled 门控、在"观测期"对 user.quota add/subtract。
+	if fundingEnabled && mvpMode {
+		return errors.New("配置互斥(A9):NEXUS_PLATFORM_FUNDING_ENABLED 与 NEXUS_MVP_MODE 不可同时为 true(观测期平台不得经手钱),请关闭其一")
+	}
 	if fundingEnabled {
 		log.Info("平台经手钱已开启(v2 escrow):入账/续充/退款/对账生效")
 	} else {
 		log.Info("v1 观测管理版:escrow 休眠(钱在 new-api,平台只看不碰)")
 	}
 
+	// B5:leader-only 写工作准入支点(结算/回填/托管对账)。v1=envLeadership(NEXUS_WORKER_ENABLED != false),
+	// 无租约/无 fencing——**多节点接 LB 前必须换 leaseLeadership(MySQL 租约 + term fencing),只换实现、调用点不改**。
+	workerEnabled := os.Getenv("NEXUS_WORKER_ENABLED") != "false"
+	if workerEnabled {
+		// 启动自检/告警(过渡期):本节点将跑 leader-only 单写者。多节点场景下**必须保证同时只有一个节点**开 worker,
+		// 否则结算/回填会跨节点重复写(双扣/双灌)——v1 无选主,靠此纪律 + 单节点部署;接 LB 前落 leaseLeadership。
+		log.Warn("worker 已启用:本节点承担 leader-only 单写者(结算/回填/对账)。多节点务必保证仅一个节点开 worker;接 LB 前须落选主(B5)")
+	}
+
 	svc := service.New(service.Deps{
 		Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log,
 		ObserveMode: mvpMode, FundingEnabled: fundingEnabled,
+		Leadership: service.NewEnvLeadership(workerEnabled), // B5
+		// 历史回填限速旋钮(24-§4.5):默认 8 窗口/tick、5 页/秒,量小够用;大回填靠分片多 tick 排空。
+		BackfillWindowsPerTick: atoiOr("NEXUS_BACKFILL_WINDOWS_PER_TICK", 8),
+		BackfillQPS:            atoiOr("NEXUS_BACKFILL_QPS", 5),
+		// 逐条明细保留期(24-§6):默认 0=永久保留(不清理);量涨后设天数启用定期清理。
+		UsageDetailRetentionDays: atoiOr("NEXUS_USAGE_DETAIL_RETENTION_DAYS", 0),
 	})
 
 	// 运营方引导账号(首启种子,幂等)。

@@ -185,6 +185,11 @@ type UsageDetailPage struct {
 
 const usageDetailMaxPageSize = 200
 
+// maxUsageWindowHours 用量报表时间窗上限:≈30 年,支持"全部历史"档(前端 WIN_ALL=200000h≈22.8 年)。
+// 原为 24*92(92天,当年绑 90 天 detail 保留);24-§6 detail 改永久保留 + 门B 全历史回填后,窗口须能覆盖老历史,
+// 否则回填的历史被时间窗挡在外(客户第一眼以为没数据)。超此上限仍打回 24h(防呆/防滥用)。
+const maxUsageWindowHours = 24 * 366 * 30
+
 func clampDetailPage(page, pageSize int) (int, int) {
 	if page <= 0 {
 		page = 1
@@ -199,7 +204,7 @@ func clampDetailPage(page, pageSize int) (int, int) {
 }
 
 func (s *Service) detailSince(sinceHours int) time.Time {
-	if sinceHours <= 0 || sinceHours > 24*92 {
+	if sinceHours <= 0 || sinceHours > maxUsageWindowHours {
 		sinceHours = 24
 	}
 	return time.Unix(s.now().Unix()-int64(sinceHours)*3600, 0).UTC()
@@ -259,7 +264,7 @@ func (s *Service) usageDetail(ctx context.Context, f repo.DetailFilter, page, pa
 
 // usageTimeSeries 时间序列内部聚合(身份过滤已由调用方做);只读 usage_ledger,无 live-logs(看板趋势用已结算数据即可)。
 func (s *Service) usageTimeSeries(ctx context.Context, orgID int64, sinceHours int, granularity string, memberFilter *int64) ([]UsageSeriesPoint, error) {
-	if sinceHours <= 0 || sinceHours > 24*92 {
+	if sinceHours <= 0 || sinceHours > maxUsageWindowHours {
 		sinceHours = 24
 	}
 	since := time.Unix(s.now().Unix()-int64(sinceHours)*3600, 0).UTC()
@@ -279,7 +284,7 @@ func (s *Service) usageTimeSeries(ctx context.Context, orgID int64, sinceHours i
 // new-api);只对"结算游标→now"小窗口实时读 logs 补当期(限 2 页,绝不长段全量)。
 // teamFilter:nil=不按团队过滤;*==0=未分组(team_id NULL);*>0=指定团队(口径A:成员当前 team_id)。
 func (s *Service) aggregateUsage(ctx context.Context, sinceHours int, orgFilter *int64, memberFilter *int64, teamFilter *int64) (*UsageReport, error) {
-	if sinceHours <= 0 || sinceHours > 24*92 {
+	if sinceHours <= 0 || sinceHours > maxUsageWindowHours {
 		sinceHours = 24
 	}
 	rep := &UsageReport{SinceHours: sinceHours}

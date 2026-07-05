@@ -377,6 +377,10 @@ func (s *Service) SetMemberStatus(ctx context.Context, c session.Claims, orgID, 
 	if err := s.store.UpdateMemberStatus(ctx, orgID, memberID, status); err != nil {
 		return apperr.Internal("").WithCause(err)
 	}
+	// A3:改状态自增 epoch,作废该成员旧 token——禁用者旧 token 立即失效(不必等 12h);再启用亦须重新登录。
+	if err := s.store.BumpMemberSessionEpoch(ctx, orgID, memberID); err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
 	s.audit(ctx, c, orgID, "set_member_status", "member", &memberID, map[string]any{"enabled": enabled})
 	return nil
 }

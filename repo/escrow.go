@@ -98,8 +98,8 @@ func (s *Store) MaxEscrowSeqTx(ctx context.Context, x dbtx, orgID int64) (int, e
 func (s *Store) GetEscrowConfig(ctx context.Context, orgID int64) (*model.OrgEscrowConfig, error) {
 	var c model.OrgEscrowConfig
 	err := s.db.QueryRowContext(ctx,
-		`SELECT org_id, threshold_auto, threshold_manual_override, updated_at FROM org_escrow_config WHERE org_id = ?`, orgID).
-		Scan(&c.OrgID, &c.ThresholdAuto, &c.ThresholdManualOverride, &c.UpdatedAt)
+		`SELECT org_id, threshold_auto, threshold_manual_override, consumed_baseline, updated_at FROM org_escrow_config WHERE org_id = ?`, orgID).
+		Scan(&c.OrgID, &c.ThresholdAuto, &c.ThresholdManualOverride, &c.ConsumedBaseline, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -190,6 +190,33 @@ func (s *Store) MergeHoldingIntoActiveTx(ctx context.Context, x dbtx, orgID, max
 	return merged, nil
 }
 
+// SetEscrowConsumedBaseline 快照某组织的"已消费基线"(B1:funding 激活后首次对账时置为当前 SUM(ledger))。
+func (s *Store) SetEscrowConsumedBaseline(ctx context.Context, orgID, baseline int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO org_escrow_config (org_id, consumed_baseline) VALUES (?, ?)
+		 ON DUPLICATE KEY UPDATE consumed_baseline = VALUES(consumed_baseline)`, orgID, baseline)
+	return err
+}
+
+// GetEscrowBaselines 批量取所有已快照的"已消费基线"(B1:ReconcileBalanceLedger 逐组织减基线用)。
+func (s *Store) GetEscrowBaselines(ctx context.Context) (map[int64]int64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT org_id, consumed_baseline FROM org_escrow_config WHERE consumed_baseline IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]int64{}
+	for rows.Next() {
+		var oid, b int64
+		if err := rows.Scan(&oid, &b); err != nil {
+			return nil, err
+		}
+		out[oid] = b
+	}
+	return out, rows.Err()
+}
+
 // SumOrgConsumed Σ 组织累计已消费(usage_ledger,bigint)。escrow 对账用**我方账本**算已消费——
 // 彻底不碰 new-api used_quota(int32 会溢出 + 将被定期清零)。目标窗口 = 已释放(桶1) − 本值。
 func (s *Store) SumOrgConsumed(ctx context.Context, orgID int64) (int64, error) {
@@ -199,6 +226,26 @@ func (s *Store) SumOrgConsumed(ctx context.Context, orgID int64) (int64, error) 
 		return 0, err
 	}
 	return q.Int64, nil
+}
+
+// ListWalletBillingOrgIDs 列所有钱包计费(billing_kind=wallet)且已开通池子的组织 id(B6a 订阅旁路再断言)。
+func (s *Store) ListWalletBillingOrgIDs(ctx context.Context) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM organization WHERE billing_kind = ? AND deleted_at IS NULL AND newapi_user_id IS NOT NULL`,
+		model.BillingKindWallet)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 // ListEscrowOrgIDs 列所有有桶的组织 id(escrow 对账 worker 逐组织核窗口)。

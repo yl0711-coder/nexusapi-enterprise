@@ -119,6 +119,7 @@ type OrgEscrowConfig struct {
 	OrgID                 int64
 	ThresholdAuto         int64  // 每天按近7天补货点重算
 	ThresholdManualOverride *int64 // 运维手动定(优先);nil=用 auto
+	ConsumedBaseline      *int64    // B1:funding 激活时快照的 SUM(ledger);窗口纠偏/对账只算此后增量。nil=未快照
 	UpdatedAt             time.Time
 }
 
@@ -180,6 +181,7 @@ type Member struct {
 	KeyMasked            *string
 	KeyRotation          int
 	BootstrapState       string
+	SessionEpoch         int // A3:会话代次;禁用/降级/改密/硬停自增,令旧平台 token 立即失效
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
 }

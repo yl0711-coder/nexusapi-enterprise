@@ -323,6 +323,12 @@ func (s *Service) ReconcileEscrow(ctx context.Context) error {
 	if !s.fundingEnabled {
 		return nil // v1 escrow 休眠(20-§9):worker 静默短路(v2 开 flag 恢复)
 	}
+	// B5:leader-only 准入(escrow-drain·对账入口)。非 leader 不做。
+	if ok, _, err := s.leadership.CanRunTick(ctx); err != nil {
+		return err
+	} else if !ok {
+		return nil
+	}
 	if _, err := s.RunSettlement(ctx); err != nil { // drain-to-boundary:落账不扣钱(observe/非observe 都只落 ledger)
 		s.log.Warn("escrow 对账前 drain 结算失败(用当前账本继续)", "err", err)
 	}
@@ -337,6 +343,10 @@ func (s *Service) ReconcileEscrow(ctx context.Context) error {
 	}
 	return nil
 }
+
+// escrowMaxCorrectFraction B2:单轮 escrow 窗口超拨自动纠偏的最大比例(占当前窗口);超此只告警不自动减,
+// 防"ledger 多算导致的假超拨"被一次减成真扣客户钱。0.2 = 一次最多减掉窗口的 20%。
+const escrowMaxCorrectFraction = 0.2
 
 func (s *Service) reconcileOrgEscrow(ctx context.Context, orgID int64) error {
 	release, lerr := s.quotaLocker.Acquire(ctx, escrowLockKey(orgID)) // 与入账/续充/退款互斥
@@ -359,12 +369,24 @@ func (s *Service) reconcileOrgEscrow(ctx context.Context, orgID int64) error {
 	} else if !errors.Is(agerr, repo.ErrNotFound) {
 		return agerr
 	}
-	// ① 窗口纠偏:目标窗口 = 已释放(桶1) − 已消费(我方账本 bigint)。地板 0。
+	// ① 窗口纠偏:目标窗口 = 已释放(桶1) − 已消费(funding 激活后的增量,B1)。地板 0。
 	consumed, cerr := s.store.SumOrgConsumed(ctx, orgID)
 	if cerr != nil {
 		return cerr
 	}
-	target := released - consumed
+	// B1:排除 funding 激活前(观测期)的历史消费——首次对账快照当前 SUM(ledger) 为基线,此后只算增量;
+	// 否则 v2 首充窗口被整段观测期消费冲成 0(客户真亏)。未快照时基线=当前(增量 0),优惠客户方向。
+	baseline := consumed
+	cfg, cfgErr := s.store.GetEscrowConfig(ctx, orgID)
+	if cfgErr != nil && !errors.Is(cfgErr, repo.ErrNotFound) {
+		return cfgErr
+	}
+	if cfg != nil && cfg.ConsumedBaseline != nil {
+		baseline = *cfg.ConsumedBaseline
+	} else if serr := s.store.SetEscrowConsumedBaseline(ctx, orgID, consumed); serr != nil {
+		return serr
+	}
+	target := released - (consumed - baseline)
 	if target < 0 {
 		target = 0 // 地板:消费超已释放(异常)也不把窗口算成负
 	}
@@ -375,10 +397,20 @@ func (s *Service) reconcileOrgEscrow(ctx context.Context, orgID int64) error {
 	switch {
 	case actual > target:
 		// 超拨:实际窗口高于应有 → 自动 SUBTRACT 到目标(安全方向;地板 target≥0,绝不减到客户合法拥有之下)。
-		if err := s.upstream.ManageUserQuota(ctx, int(uid), newapi.QuotaSubtract, actual-target); err != nil {
+		delta := actual - target
+		// B2:大额纠偏告警(不阻断)——正确性押"ledger 不多算";万一 ledger 多算导致的假超拨,一次减掉过大比例
+		// 就是真扣客户钱。但合法退款/续充也会产生大额纠偏,**不能只凭幅度一律不减**(否则超拨窗口留存也是错、且破退款)。
+		// 故:超过窗口 escrowMaxCorrectFraction 的纠偏**照常执行 + 同时告警**,供人工复核是否 ledger 多算;
+		// ledger 多算本身另由 ReconcileBackfillLedger / ReconcileBilling 对账告警兜住。
+		if actual > 0 && float64(delta) > float64(actual)*escrowMaxCorrectFraction {
+			s.log.Error("escrow 窗口大额纠偏(疑 ledger 多算?人工复核)", "org_id", orgID, "actual", actual, "target", target, "delta", delta, "frac", escrowMaxCorrectFraction)
+			s.auditSystem(ctx, orgID, "escrow_large_correction", "balance", &orgID,
+				map[string]any{"actual": actual, "target": target, "delta": delta}, "alert")
+		}
+		if err := s.upstream.ManageUserQuota(ctx, int(uid), newapi.QuotaSubtract, delta); err != nil {
 			return mapUpstream(err)
 		}
-		s.log.Warn("escrow 窗口超拨自动纠偏(减到目标)", "org_id", orgID, "actual", actual, "target", target, "subtract", actual-target)
+		s.log.Warn("escrow 窗口超拨自动纠偏(减到目标)", "org_id", orgID, "actual", actual, "target", target, "subtract", delta)
 	case actual < target:
 		// 欠拨:实际窗口低于应有 → **绝不自动 ADD**(已 drain 仍低=真欠拨,非滞后)。续充 worker(读真实窗口自愈)
 		// 或人工按 SLA 补。只告警,不动 newapi(§15 终极安全:对账永不经自动加垫钱)。

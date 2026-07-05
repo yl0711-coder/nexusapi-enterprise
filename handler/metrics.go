@@ -3,6 +3,7 @@ package handler
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"sync/atomic"
 	"time"
 )
@@ -80,6 +81,12 @@ func (h *Handler) accessLog(next http.Handler) http.Handler {
 
 // handleMetrics 暴露 Prometheus 文本格式指标(无需鉴权;部署内网/被监控抓取)。
 func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	// C14:可选 bearer 保护——NEXUS_METRICS_TOKEN 设了才校验(内网抓取不设即放行,不破坏现有 Prometheus);
+	// 若端口可能外部触达,设此 token 防指标外泄。
+	if tok := os.Getenv("NEXUS_METRICS_TOKEN"); tok != "" && r.Header.Get("Authorization") != "Bearer "+tok {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	uptime := int64(0)
 	if s := metricStartUnix.Load(); s > 0 {

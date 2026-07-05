@@ -55,6 +55,7 @@ type settleSink struct {
 	attrCache     map[int64]tokenAttr
 	orgByUser     map[int64]int64 // newapi user_id -> 平台 org id(0=非平台组织;共用实例,主站客户日志按此跳过)
 	orphanAlerted map[int64]bool  // token_id -> 已告警(每个孤儿令牌每轮只告警一次)
+	backfillMode  bool            // 回填槽(R6 nit):跳过孤儿告警刷屏 + 无用的 billing flag 查询(回填从不扣钱)
 }
 
 // ingestEntry 归因并聚合一条消费日志(M4 时点归因,20-§6):
@@ -77,7 +78,8 @@ func (s *Service) ingestEntry(ctx context.Context, sk *settleSink, e newapi.LogE
 	if att.found {
 		m, keyID = att.member, att.keyID
 		// GZ-03:开通失败的成员令牌仍在消费 = 孤儿消费。告警使漏扣"可发现",仍正常聚合(money 不漏)。
-		if m.BootstrapState == model.BootstrapFailed && !sk.orphanAlerted[e.TokenID] {
+		// 回填期跳过(R6 nit):回填全历史会把当前 failed 成员的历史消费逐窗刷屏告警,且回填不涉扣费、无"漏扣"语义。
+		if !sk.backfillMode && m.BootstrapState == model.BootstrapFailed && !sk.orphanAlerted[e.TokenID] {
 			sk.orphanAlerted[e.TokenID] = true
 			s.log.Error("孤儿消费告警:开通失败的成员令牌仍在产生消费(需核 new-api)",
 				"member_id", m.ID, "org_id", m.OrgID, "token_id", e.TokenID, "model", e.ModelName)
@@ -104,12 +106,15 @@ func (s *Service) ingestEntry(ctx context.Context, sk *settleSink, e newapi.LogE
 		m, keyID = &model.Member{ID: 0, OrgID: orgID}, 0 // M4 未知桶:member_id=0(前端显示"未归因")
 	}
 	// v1 裁定B(20-§2.1):落账与 billing_enabled 解耦(全组织落账);flag 只闸事务内扣余额一步。
-	if _, ok := sk.flagCache[m.OrgID]; !ok {
-		f, ferr := s.store.GetOrgBillingFlags(ctx, m.OrgID)
-		if ferr != nil {
-			return ferr
+	// 回填跳过(R6 nit):回填只调 commitUsageOnly、从不扣余额,flagCache 不被读 → 免这次无用查询。
+	if !sk.backfillMode {
+		if _, ok := sk.flagCache[m.OrgID]; !ok {
+			f, ferr := s.store.GetOrgBillingFlags(ctx, m.OrgID)
+			if ferr != nil {
+				return ferr
+			}
+			sk.flagCache[m.OrgID] = f.BillingEnabled
 		}
-		sk.flagCache[m.OrgID] = f.BillingEnabled
 	}
 	bkt := hourBucket(e.CreatedAt)
 	key := fmt.Sprintf("%d|%d|%d|%s|%d", m.OrgID, e.UserID, keyID, e.ModelName, bkt.Unix())
@@ -131,6 +136,30 @@ func (s *Service) ingestEntry(ctx context.Context, sk *settleSink, e newapi.LogE
 	return nil
 }
 
+// commitUsageOnly 是**只写报表**的落账段(24-§4.4):在调用方事务内把本轮聚合落进
+// usage_ledger(小时桶原子自增)+ 逐条明细落进 usage_detail(INSERT IGNORE 幂等)。
+// forward 结算与历史回填**共用此段**,保证两条路径报表口径逐字节一致。
+//
+// 【钱路径绊线】此函数只吃 aggs + details、只返 err;绝不引用 perOrg / maxLogID / cursor.Version / postBal——
+// 扣余额(DeductBalanceTx)与推全局水位(AdvanceCursorTx)是 forward 独有、留在 RunSettlement 事务里,
+// 回填只调本函数(不扣钱、不推水位,§10 红线在代码层落死)。若某天发现"需要"上述任一状态,立即停手回来对边界。
+func (s *Service) commitUsageOnly(ctx context.Context, tx *sql.Tx, aggs map[string]*bucketAgg, details []repo.DetailRow) error {
+	for _, a := range aggs {
+		if err := s.store.AddToLedgerBucketTx(ctx, tx, &repo.LedgerBucket{
+			OrgID: a.orgID, MemberID: a.memberID, NewapiUserID: a.newapiUserID, KeyID: a.keyID, TeamID: a.teamID,
+			ModelName: a.model, TimeBucket: a.bucket, ConsumedQuota: a.consumed,
+			LogMaxTS: time.Unix(a.maxTS, 0).UTC(),
+		}); err != nil {
+			return err
+		}
+	}
+	// v2 M2-2:逐条明细与 ledger 落账同事务原子写(INSERT IGNORE 幂等);observe 下也写(报表数据,不涉钱)。
+	if err := s.store.InsertUsageDetailTx(ctx, tx, details); err != nil {
+		return err
+	}
+	return nil
+}
+
 // RunSettlement 是计费结算的单次扫描(leader 单写者,03 §3.1 / GZ-01 原子化版):
 // 选一个不超限的时间子窗口(路径B,永不截断少收)→ 读 new-api 消费 logs 按 (org,user,model,小时桶) 聚合 →
 // 在一个事务里原子提交:usage_ledger 落账 + 扣对应组织 company_balance(乐观锁,FOR UPDATE)+ 推进水位;
@@ -139,6 +168,16 @@ func (s *Service) ingestEntry(ctx context.Context, sk *settleSink, e newapi.LogE
 // v1 裁定B(20-§2.1):**落账全组织无条件(报表是 v1 核心交付);billing_enabled 只闸"扣余额"一步**(平台执行扣费=v2)。
 // 返回本次新落账的总消耗(quota)。
 func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
+	// B5:leader-only 准入(v1 环境判断,v2 换租约只改实现)。非 leader 直接 no-op,绝不写 ledger/扣费/推水位。
+	if ok, _, err := s.leadership.CanRunTick(ctx); err != nil {
+		return 0, err
+	} else if !ok {
+		return 0, nil
+	}
+	// 串行化所有 forward(settlement-worker + escrow-drain 两入口)与历史回填:三者共用 settlementMu,
+	// 绝不并发写 ledger——回填/forward-补漏在 600s 重叠带靠 detail 幂等去重,并发即 TOCTOU 双算(24-§3.3)。
+	s.settlementMu.Lock()
+	defer s.settlementMu.Unlock()
 	cur, err := s.store.GetOrCreateCursor(ctx, 0) // org_id=0 全局 leader 水位
 	if err != nil {
 		return 0, err
@@ -283,18 +322,11 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 	//    任一步失败或 AdvanceCursor 未命中 → 回滚,本轮不推水位、不计扣,下轮干净重做。
 	postBal := map[int64]*model.Balance{}
 	var totalDeducted int64
+	var missingBal []int64 // B3:billing_enabled 却无 company_balance 行的组织(误配),提交后告警,不整批回滚
 	txErr := s.store.WithTx(ctx, func(tx *sql.Tx) error {
-		for _, a := range aggs {
-			if err := s.store.AddToLedgerBucketTx(ctx, tx, &repo.LedgerBucket{
-				OrgID: a.orgID, MemberID: a.memberID, NewapiUserID: a.newapiUserID, KeyID: a.keyID, TeamID: a.teamID,
-				ModelName: a.model, TimeBucket: a.bucket, ConsumedQuota: a.consumed,
-				LogMaxTS: time.Unix(a.maxTS, 0).UTC(),
-			}); err != nil {
-				return err
-			}
-		}
-		// v2 M2-2:逐条明细与 ledger 落账同事务原子写(INSERT IGNORE 幂等);observe 下也写(报表数据,不涉钱)。
-		if err := s.store.InsertUsageDetailTx(ctx, tx, details); err != nil {
+		// 落账(ledger 桶累加 + 逐条明细)——与历史回填共用的**只写报表**段(24-§4.4);无条件全组织写
+		// (v1 裁定B),不涉钱、不受 observeMode/billing 门控。扣余额 + 推水位仍是本事务后半段 forward 独有。
+		if err := s.commitUsageOnly(ctx, tx, aggs, details); err != nil {
 			return err
 		}
 		// 改动⑤:observe 下整体跳过扣余额(只落账)。postBal 留空 → 提交后守恒断言/状态硬停/扣费审计
@@ -308,8 +340,15 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 					continue
 				}
 				bal, err := s.store.DeductBalanceTx(ctx, tx, orgID, amount)
+				if errors.Is(err, repo.ErrNotFound) {
+					// B3:billing_enabled 但无 company_balance 行(误配:开计费却从未充值/建行)。单组织隔离——
+					// 跳过该组织扣费(消费仍已落 ledger 供报表),记下提交后告警;**绝不整批回滚**,否则该组织每轮
+					// ErrNotFound → 水位永不推进 → 全平台结算永久卡死。运营方补建余额行后,后续轮自动正常扣费。
+					missingBal = append(missingBal, orgID)
+					continue
+				}
 				if err != nil {
-					return err // 含 ErrOptimisticLock(FOR UPDATE 下不应发生)/ErrNotFound;整批回滚
+					return err // ErrOptimisticLock(FOR UPDATE 下不应发生)/ 真 DB 错:整批回滚,下轮干净重做
 				}
 				postBal[orgID] = bal
 				totalDeducted += amount
@@ -329,6 +368,12 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 		// 回滚:本轮不推水位、不计扣,下一轮干净重做(无半截 ledger、无双扣)。
 		s.log.Error("结算事务回滚(下轮重做)", "err", txErr, "since", since, "until_sub", untilSub)
 		return 0, txErr
+	}
+	// B3:提交后告警"billing_enabled 却无 company_balance 行"的误配组织(结算已续跑、未卡死;需运营方补建余额行)。
+	for _, orgID := range missingBal {
+		oid := orgID
+		s.log.Error("结算:组织开了 billing_enabled 却无 company_balance 行,已跳过其扣费(消费仍落 ledger),请补建余额行", "org_id", orgID)
+		s.auditSystem(ctx, orgID, "settlement_missing_balance", "balance", &oid, map[string]any{"skipped_deduct": true}, "alert")
 	}
 
 	// 改动⑤:observe 模式落账完成 → 记一条可见日志(落了账、未扣钱),postBal 为空使下面副作用整体空转。
@@ -438,49 +483,75 @@ func (s *Service) ReconcileBilling(ctx context.Context) error {
 	memberCache := map[int64]*model.Member{}
 	flagCache := map[int64]bool{}
 	since, until := hourStart.Unix(), hourEnd.Unix()-1
-	for page := 1; page <= settlementMaxPages; page++ {
-		entries, total, err := s.upstream.ReadConsumptionLogs(ctx, since, until, page, 100)
-		if err != nil {
-			return mapUpstream(err)
+	// 单条日志归因累加(按 token_id;成员共享 org user)。
+	ingest := func(e newapi.LogEntry) error {
+		if e.Quota <= 0 {
+			return nil
 		}
-		for _, e := range entries {
-			if e.Quota <= 0 {
-				continue
+		m := memberCache[e.TokenID]
+		if m == nil {
+			mm, _, found, merr := s.store.GetMemberByNewapiTokenID(ctx, e.TokenID)
+			if merr != nil {
+				return apperr.Internal("").WithCause(merr) // DB 错,非上游故障(P1-3)
 			}
-			// 模型2:按 token_id 归因(成员共享 org user)。缓存按 token_id。
-			m := memberCache[e.TokenID]
-			if m == nil {
-				mm, _, found, merr := s.store.GetMemberByNewapiTokenID(ctx, e.TokenID)
-				if merr != nil {
-					return apperr.Internal("").WithCause(merr) // DB 错,非上游故障(P1-3:勿误走 mapUpstream)
-				}
-				if !found {
-					memberCache[e.TokenID] = &model.Member{} // 非平台 token,标记跳过
-					continue
-				}
-				memberCache[e.TokenID] = mm
-				m = mm
+			if !found {
+				memberCache[e.TokenID] = &model.Member{} // 非平台 token,标记跳过
+				return nil
 			}
-			if m.ID == 0 {
-				continue
-			}
-			billing, ok := flagCache[m.OrgID]
-			if !ok {
-				f, ferr := s.store.GetOrgBillingFlags(ctx, m.OrgID)
-				if ferr != nil {
-					return ferr
-				}
-				billing = f.BillingEnabled
-				flagCache[m.OrgID] = billing
-			}
-			if !billing {
-				continue
-			}
-			logByOrg[m.OrgID] += e.Quota
+			memberCache[e.TokenID] = mm
+			m = mm
 		}
-		if page*100 >= total {
-			break
+		if m.ID == 0 {
+			return nil
 		}
+		billing, ok := flagCache[m.OrgID]
+		if !ok {
+			f, ferr := s.store.GetOrgBillingFlags(ctx, m.OrgID)
+			if ferr != nil {
+				return ferr
+			}
+			billing = f.BillingEnabled
+			flagCache[m.OrgID] = billing
+		}
+		if !billing {
+			return nil
+		}
+		logByOrg[m.OrgID] += e.Quota
+		return nil
+	}
+	// B6b:整小时可能 >2000 行,原来固定 20 页硬截断 → 漏读 → 假"少收"告警刷屏。改子窗口二分(复刻结算手法),
+	// 逐子窗口完整读尽、绝不截断。加 billing_enabled 组织过滤本就少量,基本一子窗口即完。
+	for sub := since; sub <= until; {
+		subEnd := until
+		for {
+			_, total, err := s.upstream.ReadConsumptionLogs(ctx, sub, subEnd, 1, 100)
+			if err != nil {
+				return mapUpstream(err)
+			}
+			if total <= settlementMaxPages*100 {
+				break
+			}
+			if subEnd <= sub {
+				s.log.Error("计费对账单秒日志数超上限(极端,请关注)", "sub", sub, "total", total)
+				break
+			}
+			subEnd = sub + (subEnd-sub)/2 // 二分缩小子窗口
+		}
+		for page := 1; page <= settlementMaxPages; page++ {
+			entries, total, err := s.upstream.ReadConsumptionLogs(ctx, sub, subEnd, page, 100)
+			if err != nil {
+				return mapUpstream(err)
+			}
+			for _, e := range entries {
+				if ierr := ingest(e); ierr != nil {
+					return ierr
+				}
+			}
+			if page*100 >= total {
+				break
+			}
+		}
+		sub = subEnd + 1
 	}
 
 	// 2) usage_ledger 同小时桶各组织已结算消耗。
@@ -530,6 +601,11 @@ func (s *Service) ReconcileBalanceLedger(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// B1:减 funding 激活基线——ledger 含观测期历史消费,total_consumed 只从 funding 后累计;不减基线必每轮误报 D4。
+	baselines, err := s.store.GetEscrowBaselines(ctx)
+	if err != nil {
+		return err
+	}
 	seen := map[int64]bool{}
 	for orgID := range consumed {
 		seen[orgID] = true
@@ -538,7 +614,7 @@ func (s *Service) ReconcileBalanceLedger(ctx context.Context) error {
 		seen[orgID] = true
 	}
 	for orgID := range seen {
-		tc, lg := consumed[orgID], ledger[orgID]
+		tc, lg := consumed[orgID], ledger[orgID]-baselines[orgID]
 		if tc == lg {
 			continue
 		}
@@ -551,18 +627,20 @@ func (s *Service) ReconcileBalanceLedger(ctx context.Context) error {
 	return nil
 }
 
-// usageDetailRetentionDays 逐条明细保留天数(13 §4.4:下钻明细落库保 90 天)。
-const usageDetailRetentionDays = 90
-
-// PurgeOldUsageDetail 清理超过保留期(90 天)的逐条明细;reconcile worker 周期调用。只删本库,不碰 new-api。
+// PurgeOldUsageDetail 清理超过保留期的逐条明细;reconcile worker 周期调用。只删本库,不碰 new-api。
+// 保留期可配(24-§6,NEXUS_USAGE_DETAIL_RETENTION_DAYS):**默认 0 = 永久保留(直接跳过,不删)** ——
+// 历史全量回填后 detail 承载"逐条随时可查",故默认关清理;设正整数 N 才清 N 天前(量涨到千万行级再启用)。
 func (s *Service) PurgeOldUsageDetail(ctx context.Context) error {
-	cutoff := s.now().Add(-time.Duration(usageDetailRetentionDays) * 24 * time.Hour)
+	if s.usageDetailRetentionDays <= 0 {
+		return nil // 0 或未配 = 永久保留,不清理
+	}
+	cutoff := s.now().Add(-time.Duration(s.usageDetailRetentionDays) * 24 * time.Hour)
 	n, err := s.store.PurgeUsageDetailBefore(ctx, cutoff)
 	if err != nil {
 		return err
 	}
 	if n > 0 {
-		s.log.Info("用量明细保留清理", "purged", n, "cutoff", cutoff.Format(time.RFC3339))
+		s.log.Info("用量明细保留清理", "purged", n, "cutoff", cutoff.Format(time.RFC3339), "retention_days", s.usageDetailRetentionDays)
 	}
 	return nil
 }

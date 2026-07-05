@@ -22,7 +22,8 @@ var mvpWriteAllow = []string{
 	"PATCH /api/v1/organizations/*",
 	"POST /api/v1/organizations/*/archive",
 	"POST /api/v1/organizations/*/unarchive",
-	"POST /api/v1/organizations/*/import-tokens", // 门B 重新导入(运营方,幂等,只补建平台侧成员映射不动 new-api)
+	"POST /api/v1/organizations/*/import-tokens",     // 门B 重新导入(运营方,幂等,只补建平台侧成员映射不动 new-api)
+	"POST /api/v1/organizations/*/backfill/requeue", // 重新回填(运营方,幂等,只重置报表回填任务,不涉钱不动 new-api,24-§9)
 	"POST /api/v1/organizations/*/hard-stop",         // 运维硬停(风控;禁用 org 用户,非钱)
 	"POST /api/v1/organizations/*/hard-stop-release", // 解除硬停
 	"POST /api/v1/organizations/*/teams",
@@ -42,6 +43,7 @@ var mvpWriteAllow = []string{
 	"POST /api/v1/members/*/key:rotate",
 	"POST /api/v1/members/*/key:ip-whitelist",
 	"POST /api/v1/members/*/tokens", // 改动③ 员工自助建 key
+	"POST /api/v1/members/*/password:reset", // C22 管理员重置成员登录密码
 	"POST /api/v1/members/*/status",   // 停用/恢复(禁用不删)
 	"POST /api/v1/members/*/offboard", // 离职(删token+软删)
 	"POST /api/v1/members/*/restore",  // 恢复入职
@@ -169,6 +171,12 @@ func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		default:
 			writeErr(w, r, apperr.Unauthenticated("会话凭证非法"))
+			return
+		}
+		// A3 会话有效性回查:非支持态 token 校验成员 status==active 且 session_epoch 匹配(禁用/降级/改密/硬停即刻失效)。
+		// 支持态 token 内部跳过(交下面的 CheckSupportGuard)。
+		if err := h.svc.ValidateSession(r.Context(), claims); err != nil {
+			writeErr(w, r, err)
 			return
 		}
 		// 支持态后端闸(08 §2.2):只读态拒所有写、协助态动钱/读 key 红线挡。真正的闸在后端。

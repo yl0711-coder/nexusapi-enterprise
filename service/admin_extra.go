@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/nexusapi-platform/enterprise/model"
 	"github.com/nexusapi-platform/enterprise/pkg/apperr"
@@ -23,6 +24,12 @@ func (s *Service) UpdateOrgSettings(ctx context.Context, c session.Claims, orgID
 	if name != nil {
 		if err := checkName("组织名称", *name, maxNameLen); err != nil {
 			return nil, err
+		}
+	}
+	// C11:时区须为合法 IANA 名(否则周期重置按组织时区会解析失败)。
+	if timezone != nil && *timezone != "" {
+		if _, err := time.LoadLocation(*timezone); err != nil {
+			return nil, apperr.InvalidParam("时区非法(须为 IANA 名,如 Asia/Shanghai)")
 		}
 	}
 	if defaultTierID != nil {
@@ -88,6 +95,10 @@ func (s *Service) SetApprovalRules(ctx context.Context, c session.Claims, orgID 
 	}
 	if err := assertRole(c, session.RoleOrgAdmin); err != nil {
 		return nil, err
+	}
+	// C11:审批阈值/自动过期天数不得为负。
+	if (autoMax != nil && *autoMax < 0) || (l1Max != nil && *l1Max < 0) || (autoDays != nil && *autoDays < 0) {
+		return nil, apperr.InvalidParam("审批阈值与自动过期天数不得为负")
 	}
 	if err := s.store.SetApprovalRules(ctx, orgID, autoMax, l1Max, autoDays); err != nil {
 		return nil, apperr.Internal("").WithCause(err)
@@ -161,6 +172,10 @@ func (s *Service) AssignRole(ctx context.Context, c session.Claims, orgID, membe
 	if err := s.store.UpdateMemberRole(ctx, orgID, memberID, role); err != nil {
 		return apperr.Internal("").WithCause(err)
 	}
+	// A3:改角色自增 epoch,作废该成员旧 token——堵"角色漂移"(降级者旧 token 仍是旧角色、可在 12h 内自改回)。
+	if err := s.store.BumpMemberSessionEpoch(ctx, orgID, memberID); err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
 	s.audit(ctx, c, orgID, "assign_role", "member", &memberID, map[string]any{"role": role})
 	return nil
 }
@@ -173,7 +188,22 @@ func (s *Service) ListQuotaPolicies(ctx context.Context, c session.Claims, orgID
 	if err := assertRole(c, session.RoleOrgAdmin, session.RoleTeamLeader); err != nil {
 		return nil, err
 	}
-	return s.store.ListQuotaPolicies(ctx, orgID)
+	all, err := s.store.ListQuotaPolicies(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	// A8:team_leader 只能读**本团队**策略(与写侧 SetQuotaPolicy 同口径:仅 team 维度、本 TeamID);
+	// org_admin/operator 看全 org。避免越团队读到别团队/别人的额度上限(org 内信息泄露)。
+	if c.Role == session.RoleTeamLeader {
+		var mine []*repo.QuotaPolicy
+		for _, p := range all {
+			if p.Scope == "team" && p.ScopeID == c.TeamID {
+				mine = append(mine, p)
+			}
+		}
+		return mine, nil
+	}
+	return all, nil
 }
 
 // SetQuotaPolicy 建/改配额策略(A/L)。

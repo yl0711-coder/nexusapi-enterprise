@@ -185,13 +185,21 @@ func (a *Adapter) findTokenByName(ctx context.Context, cred MemberCred, name str
 
 // getUserByUsername 按确定性 username 查重(10 §2.5),返回 user_id。用于 bootstrap 接管已存在用户。
 func (a *Adapter) getUserByUsername(ctx context.Context, username string) (int, bool, error) {
-	res, err := a.c.do(ctx, stepGetUser, "GET", q("/api/user/search", map[string]string{"keyword": username}), adminAuth(a.c.cfg), nil)
-	if err != nil {
-		return 0, false, err
-	}
-	for _, u := range parseUserList(res.data) {
-		if u.Username == username {
-			return u.ID, true, nil
+	// C18:翻页精确命中,不靠单页侥幸(keyword 可能匹配多用户、精确名落在后页)。高熵名基本首页即中,循环有界兜底。
+	for page := 1; page <= 20; page++ {
+		res, err := a.c.do(ctx, stepGetUser, "GET",
+			q("/api/user/search", map[string]string{"keyword": username, "p": strconv.Itoa(page), "page_size": "100"}), adminAuth(a.c.cfg), nil)
+		if err != nil {
+			return 0, false, err
+		}
+		list := parseUserList(res.data)
+		for _, u := range list {
+			if u.Username == username {
+				return u.ID, true, nil
+			}
+		}
+		if len(list) < 100 {
+			break // 末页
 		}
 	}
 	return 0, false, nil

@@ -58,8 +58,11 @@ type Claims struct {
 	SupportSessionID int64 `json:"sid,omitempty"`
 	// SupportScope 支持态能力:readonly(只读,拒所有写)/ assist(协助,可写但动钱/读key红线挡)。
 	SupportScope string `json:"sscope,omitempty"`
-	IssuedAt     int64  `json:"iat"`
-	ExpiresAt    int64  `json:"exp"`
+	// Epoch 是签发时成员的 session_epoch(A3):requireAuth 回查须与库中一致,禁用/降级/改密/硬停任一自增即令旧 token 失效。
+	// omitempty:老 token 无此字段 → 解析为 0 → 与 session_epoch 默认 0 匹配,部署瞬间不踢线,自然到期后新机制生效。
+	Epoch     int   `json:"ep,omitempty"`
+	IssuedAt  int64 `json:"iat"`
+	ExpiresAt int64 `json:"exp"`
 }
 
 // Signer 用签名密钥签发/校验 token。

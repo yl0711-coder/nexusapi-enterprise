@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 )
 
 // LogEntry 是 new-api 消费日志的一条(/api/log/ type=2,05 §1)。
@@ -31,12 +32,58 @@ func (a *Adapter) ReadConsumptionLogs(ctx context.Context, sinceUnix, untilUnix 
 	if pageSize <= 0 || pageSize > 100 {
 		pageSize = 100
 	}
+	// C17:new-api /api/log/ 时间过滤为**双闭区间** [since,until];相邻窗口在边界秒会重叠 → 调用方须按 log.id 去重
+	// (forward 靠 id 水位、回填靠 usage_detail 幂等)。
 	path := fmt.Sprintf("/api/log/?type=2&start_timestamp=%d&end_timestamp=%d&p=%d&page_size=%d",
 		sinceUnix, untilUnix, page, pageSize)
 	res, err := a.c.do(ctx, stepReadLogs, "GET", path, adminAuth(a.c.cfg), nil)
 	if err != nil {
 		return nil, 0, err
 	}
+	return parseLogPage(res.data)
+}
+
+// ReadConsumptionLogsByUsername 同 ReadConsumptionLogs,但额外按 new-api username **精确等值**过滤
+// (model/log.go:310 `logs.username = ?`,非 LIKE)——历史回填只拉这一个企业用户的日志,不扫全站(24-§7.2)。
+// forward 结算路径不使用此方法,其签名与行为不受影响。
+func (a *Adapter) ReadConsumptionLogsByUsername(ctx context.Context, username string, sinceUnix, untilUnix int64, page, pageSize int) ([]LogEntry, int, error) {
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 || pageSize > 100 {
+		pageSize = 100
+	}
+	path := fmt.Sprintf("/api/log/?type=2&start_timestamp=%d&end_timestamp=%d&p=%d&page_size=%d&username=%s",
+		sinceUnix, untilUnix, page, pageSize, url.QueryEscape(username))
+	res, err := a.c.do(ctx, stepReadLogs, "GET", path, adminAuth(a.c.cfg), nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	return parseLogPage(res.data)
+}
+
+// SumConsumedQuotaByUsername 用 new-api 官方 GET /api/log/stat 取该 username 截至 untilUnix 的**权威总消耗**
+// (SumUsedQuota,data.quota)。供回填-台账对账安全网(24-§9):比对 SUM(usage_ledger) 与此权威值,漂移即告警。
+// 管理员身份;窗口 [0, untilUnix](untilUnix 取 forward 水位,避开未结算的近期尾巴造成假漂移)。
+func (a *Adapter) SumConsumedQuotaByUsername(ctx context.Context, username string, untilUnix int64) (int64, error) {
+	path := fmt.Sprintf("/api/log/stat?type=2&username=%s&start_timestamp=0&end_timestamp=%d",
+		url.QueryEscape(username), untilUnix)
+	res, err := a.c.do(ctx, stepReadLogs, "GET", path, adminAuth(a.c.cfg), nil)
+	if err != nil {
+		return 0, err
+	}
+	var env struct {
+		Quota int64 `json:"quota"`
+	}
+	if err := json.Unmarshal(res.data, &env); err != nil {
+		return 0, &UpstreamError{Step: stepReadLogs, PlatformCode: CodeInternal, Message: "解析日志统计失败", class: classNonRetryable, cause: err}
+	}
+	return env.Quota, nil
+}
+
+// parseLogPage 解析 /api/log/ 一页返回(data = {items,total});ReadConsumptionLogs 与
+// ReadConsumptionLogsByUsername 共用,保证两条读取路径解析口径逐字节一致。
+func parseLogPage(data json.RawMessage) ([]LogEntry, int, error) {
 	var env struct {
 		Total int `json:"total"`
 		Items []struct {
@@ -51,7 +98,7 @@ func (a *Adapter) ReadConsumptionLogs(ctx context.Context, sinceUnix, untilUnix 
 			TokenName        string `json:"token_name"`
 		} `json:"items"`
 	}
-	if err := json.Unmarshal(res.data, &env); err != nil {
+	if err := json.Unmarshal(data, &env); err != nil {
 		return nil, 0, &UpstreamError{Step: stepReadLogs, PlatformCode: CodeInternal, Message: "解析消费日志失败", class: classNonRetryable, cause: err}
 	}
 	out := make([]LogEntry, 0, len(env.Items))

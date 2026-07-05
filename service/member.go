@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"strings"
 	"time"
 
 	"github.com/nexusapi-platform/enterprise/adapter/newapi"
@@ -300,12 +302,36 @@ func memberTokenGroup(m *model.Member) string {
 
 // SetKeyIPWhitelist 设自己 key 的 IP 白名单(E22,token allow_ips,支持单 IP/CIDR;就地更新不旋转 key)。
 // 拦截由 new-api 网关数据面执行,与平台可用性解耦(03 §3.4.2)。MVP 仅对本人。
+// validateAllowIPs 校验 IP 白名单(C11):逗号分隔,每段须为合法 IP 或 CIDR;空=不限。
+func validateAllowIPs(s string) error {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	for _, part := range strings.Split(s, ",") {
+		p := strings.TrimSpace(part)
+		if p == "" {
+			continue
+		}
+		if net.ParseIP(p) != nil {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(p); err == nil {
+			continue
+		}
+		return apperr.InvalidParam("IP 白名单格式非法(须为单 IP 或 CIDR,逗号分隔):" + p)
+	}
+	return nil
+}
+
 func (s *Service) SetKeyIPWhitelist(ctx context.Context, c session.Claims, orgID, memberID int64, allowIPs string) error {
 	if err := assertOrgScope(c, orgID); err != nil {
 		return err
 	}
 	if c.MemberID != memberID {
 		return apperr.Forbidden("仅可改本人 key 的 IP 白名单")
+	}
+	if err := validateAllowIPs(allowIPs); err != nil { // C11:IP/CIDR 格式校验(空=不限)
+		return err
 	}
 	m, err := s.store.GetMember(ctx, orgID, memberID)
 	if errors.Is(err, repo.ErrNotFound) {

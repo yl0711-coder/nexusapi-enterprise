@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/nexusapi-platform/enterprise/model"
 	"github.com/nexusapi-platform/enterprise/pkg/apperr"
@@ -23,6 +24,12 @@ func (s *Service) UpdateOrgSettings(ctx context.Context, c session.Claims, orgID
 	if name != nil {
 		if err := checkName("组织名称", *name, maxNameLen); err != nil {
 			return nil, err
+		}
+	}
+	// C11:时区须为合法 IANA 名(否则周期重置按组织时区会解析失败)。
+	if timezone != nil && *timezone != "" {
+		if _, err := time.LoadLocation(*timezone); err != nil {
+			return nil, apperr.InvalidParam("时区非法(须为 IANA 名,如 Asia/Shanghai)")
 		}
 	}
 	if defaultTierID != nil {
@@ -88,6 +95,10 @@ func (s *Service) SetApprovalRules(ctx context.Context, c session.Claims, orgID 
 	}
 	if err := assertRole(c, session.RoleOrgAdmin); err != nil {
 		return nil, err
+	}
+	// C11:审批阈值/自动过期天数不得为负。
+	if (autoMax != nil && *autoMax < 0) || (l1Max != nil && *l1Max < 0) || (autoDays != nil && *autoDays < 0) {
+		return nil, apperr.InvalidParam("审批阈值与自动过期天数不得为负")
 	}
 	if err := s.store.SetApprovalRules(ctx, orgID, autoMax, l1Max, autoDays); err != nil {
 		return nil, apperr.Internal("").WithCause(err)

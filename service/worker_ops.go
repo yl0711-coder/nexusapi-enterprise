@@ -7,6 +7,7 @@ import (
 
 	"github.com/nexusapi-platform/enterprise/adapter/newapi"
 	"github.com/nexusapi-platform/enterprise/model"
+	"github.com/nexusapi-platform/enterprise/pkg/apperr"
 	"github.com/nexusapi-platform/enterprise/repo"
 )
 
@@ -105,6 +106,31 @@ func (s *Service) auditSystem(ctx context.Context, orgID int64, action, targetTy
 	if err := s.store.WriteAudit(ctx, e); err != nil {
 		s.log.Error("worker 写审计失败", "action", action, "err", err)
 	}
+}
+
+// RecordWorkerFailure 把后台任务失败写入系统审计。它不替代业务函数内的精确告警,只兜住
+// worker 级持续失败(尤其 new-api 管理员 token 失效、上游不可达)不能只藏在容器日志里。
+func (s *Service) RecordWorkerFailure(ctx context.Context, workerName, step string, err error) {
+	if err == nil {
+		return
+	}
+	result := "failed"
+	detail := map[string]any{"worker": workerName, "step": step, "error": err.Error()}
+	var ae *apperr.Error
+	if errors.As(err, &ae) {
+		detail["code"] = ae.Code
+		if ae.Code == newapi.CodeUpstreamAuth {
+			result = "auth_failed"
+		}
+	}
+	var ue *newapi.UpstreamError
+	if errors.As(err, &ue) {
+		detail["code"] = ue.PlatformCode
+		if ue.PlatformCode == newapi.CodeUpstreamAuth {
+			result = "auth_failed"
+		}
+	}
+	s.auditSystem(ctx, 0, "worker_failed", "worker", nil, detail, result)
 }
 
 // 模型2:删除 ReconcileOrphans —— 它是 model1(员工=newapi user)的孤儿"用户"扫描兜底。

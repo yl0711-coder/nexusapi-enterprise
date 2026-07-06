@@ -44,33 +44,40 @@ func (w *ReconcileWorker) Run(ctx context.Context) {
 				drifts, err := w.svc.ReconcileDiscounts(rc)
 				if err != nil {
 					w.log.Error("折扣对账失败(下轮重试)", "err", err)
+					w.svc.RecordWorkerFailure(ctx, "reconcile", "discounts", err)
 				} else if len(drifts) == 0 {
 					w.log.Debug("折扣对账:无漂移")
 				}
 				// 计费对账(守恒真账版):对上个完整小时比对 new-api.logs vs usage_ledger,少收即告警。
 				if berr := w.svc.ReconcileBilling(rc); berr != nil {
 					w.log.Error("计费对账失败(下轮重试)", "err", berr)
+					w.svc.RecordWorkerFailure(ctx, "reconcile", "billing", berr)
 				}
 				// 余额-台账对账(GZ-01 D4):校验 company_balance.total_consumed == Σusage_ledger,兜住少收盲区。
 				if lerr := w.svc.ReconcileBalanceLedger(rc); lerr != nil {
 					w.log.Error("余额-台账对账失败(下轮重试)", "err", lerr)
+					w.svc.RecordWorkerFailure(ctx, "reconcile", "balance_ledger", lerr)
 				}
 				// 模型2 escrow 对账(R5 F4):窗口纠偏(桶1 vs newapi quota+used 自愈入账/续充/退款的写残窗)
 				// + 守恒断言(已释放+托管==充值−退款)。observe 下 ReconcileEscrow 内部短路。
 				if eerr := w.svc.ReconcileEscrow(rc); eerr != nil {
 					w.log.Error("escrow 对账失败(下轮重试)", "err", eerr)
+					w.svc.RecordWorkerFailure(ctx, "reconcile", "escrow", eerr)
 				}
 				// 回填-台账对账安全网(24-§9):已回填组织 SUM(ledger) vs new-api stat 权威值,漂移即告警(只读)。
 				if berr := w.svc.ReconcileBackfillLedger(rc); berr != nil {
 					w.log.Error("回填-台账对账失败(下轮重试)", "err", berr)
+					w.svc.RecordWorkerFailure(ctx, "reconcile", "backfill_ledger", berr)
 				}
 				// B6a:订阅旁路再断言(v2)——钱包组织周期重设 wallet_only + 告警 active 订阅。
 				if werr := w.svc.ReassertWalletOnly(rc); werr != nil {
 					w.log.Error("订阅旁路再断言失败(下轮重试)", "err", werr)
+					w.svc.RecordWorkerFailure(ctx, "reconcile", "wallet_only", werr)
 				}
 				// 逐条明细保留清理(24-§6:默认 0=永久保留跳过;配天数才清)。只删本库,housekeeping,不涉钱。
 				if perr := w.svc.PurgeOldUsageDetail(rc); perr != nil {
 					w.log.Error("用量明细保留清理失败(下轮重试)", "err", perr)
+					w.svc.RecordWorkerFailure(ctx, "reconcile", "purge_usage_detail", perr)
 				}
 			})
 		}

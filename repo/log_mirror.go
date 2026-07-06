@@ -130,10 +130,19 @@ func (s *Store) AdvanceLogMirrorCursor(ctx context.Context, orgID, cursorTS, cur
 		`INSERT INTO org_newapi_log_cursor (org_id, cursor_ts, cursor_log_id, last_run_at)
 		 VALUES (?, ?, ?, CURRENT_TIMESTAMP(3))
 		 ON DUPLICATE KEY UPDATE
-		   cursor_ts = GREATEST(cursor_ts, VALUES(cursor_ts)),
-		   cursor_log_id = GREATEST(cursor_log_id, VALUES(cursor_log_id)),
+		   cursor_log_id = IF(VALUES(cursor_ts) > cursor_ts OR (VALUES(cursor_ts) = cursor_ts AND VALUES(cursor_log_id) > cursor_log_id), VALUES(cursor_log_id), cursor_log_id),
+		   cursor_ts = IF(VALUES(cursor_ts) > cursor_ts OR (VALUES(cursor_ts) = cursor_ts AND VALUES(cursor_log_id) > cursor_log_id), VALUES(cursor_ts), cursor_ts),
 		   last_run_at = CURRENT_TIMESTAMP(3)`,
 		orgID, cursorTS, cursorLogID)
+	return err
+}
+
+func (s *Store) TouchLogMirrorCursor(ctx context.Context, orgID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO org_newapi_log_cursor (org_id, cursor_ts, cursor_log_id, last_run_at)
+		 VALUES (?, 0, 0, CURRENT_TIMESTAMP(3))
+		 ON DUPLICATE KEY UPDATE last_run_at = CURRENT_TIMESTAMP(3)`,
+		orgID)
 	return err
 }
 

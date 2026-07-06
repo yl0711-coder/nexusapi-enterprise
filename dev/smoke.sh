@@ -4,11 +4,12 @@
 set -uo pipefail
 
 H="http://localhost:18080"
-SESSION_KEY="dev-only-session-signing-key-32bytes!!"   # 与 run-server.sh 一致(仅 dev)
+NEWAPI_H="${NEWAPI_H:-http://localhost:13000}"
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  \033[32mPASS\033[0m %s\n' "$*"; }
 bad()  { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
 hdr()  { printf '\n=== %s ===\n' "$*"; }
+die()  { printf '  \033[31mFATAL\033[0m %s\n' "$*" >&2; exit 1; }
 
 # req METHOD PATH TOKEN BODY  -> 设全局 CODE / BODY
 req() {
@@ -18,35 +19,79 @@ req() {
   CODE="$(curl "${args[@]}")"; BODY="$(cat /tmp/smk_b)"
 }
 field() { printf '%s' "$BODY" | grep -oE "\"$1\":(\"[^\"]*\"|[0-9]+)" | head -1 | sed -E "s/\"$1\"://; s/\"//g"; }
+login_token() { # email password
+  req POST /api/v1/auth/login "" "{\"email\":\"$1\",\"password\":\"$2\"}"
+  [ "$CODE" = 200 ] || die "登录失败 email=$1 CODE=$CODE BODY=$BODY"
+  field token
+}
 
-b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
-mint_token() { # mid oid role tid
-  local now exp payload p sig
-  now="$(date +%s)"; exp=$((now+3600))
-  payload="{\"mid\":$1,\"oid\":$2,\"role\":\"$3\",\"tid\":$4,\"iat\":$now,\"exp\":$exp}"
-  p="$(printf '%s' "$payload" | b64url)"
-  sig="$(printf '%s' "$p" | openssl dgst -sha256 -hmac "$SESSION_KEY" -binary | b64url)"
-  printf '%s.%s' "$p" "$sig"
+newapi_admin_token_from_server() {
+  docker inspect nexus-ent-dev --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+    | sed -n 's/^NEWAPI_ADMIN_TOKEN=//p' | head -1
+}
+
+newapi_req() { # METHOD PATH BODY
+  local m="$1" p="$2" b="${3:-}" tok args
+  tok="$(newapi_admin_token_from_server)"
+  [ -n "$tok" ] || die "未从 nexus-ent-dev 读取到 NEWAPI_ADMIN_TOKEN；请先执行 bash dev/run-server.sh"
+  args=(-fsS -X "$m" "$NEWAPI_H$p" -H "Authorization: Bearer $tok" -H "New-Api-User: 1" -H 'Content-Type: application/json')
+  [ -n "$b" ] && args+=(-d "$b")
+  curl "${args[@]}"
+}
+
+json_escape() {
+  node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.stringify(s)))'
+}
+
+ensure_org_usable_group() { # user_group token_group
+  local user_group="$1" token_group="$2" raw value escaped resp
+  command -v node >/dev/null 2>&1 || die "缺少 node，无法安全合并 new-api option JSON"
+  raw="$(newapi_req GET /api/option/ '' 2>/dev/null)" || die "读取 new-api option 失败；若刚跑过 seed/smoke，请重跑 bash dev/run-server.sh 刷新管理员 token"
+  value="$(USER_GROUP="$user_group" TOKEN_GROUP="$token_group" node -e '
+let s = "";
+process.stdin.on("data", d => s += d);
+process.stdin.on("end", () => {
+  const j = JSON.parse(s || "{}");
+  const rows = Array.isArray(j.data) ? j.data : [];
+  const row = rows.find(x => x.key === "group_ratio_setting.group_special_usable_group");
+  let m = {};
+  if (row && row.value) {
+    try { m = JSON.parse(row.value); } catch { m = {}; }
+  }
+  const ug = process.env.USER_GROUP;
+  const tg = process.env.TOKEN_GROUP;
+  if (!m[ug]) m[ug] = {};
+  m[ug][tg] = "platform";
+  process.stdout.write(JSON.stringify(m));
+});' <<<"$raw")" || die "合并 group_special_usable_group JSON 失败"
+  escaped="$(printf '%s' "$value" | json_escape)"
+  resp="$(newapi_req PUT /api/option/ "{\"key\":\"group_ratio_setting.group_special_usable_group\",\"value\":$escaped}" 2>/dev/null)" || die "写入 new-api 可用分组失败"
+  printf '%s' "$resp" | grep -q '"success":true' || die "写入 new-api 可用分组未成功：$resp"
 }
 
 SLUG="demo-$(date +%s)"
+ORG_GROUP="grp-$SLUG"
 
 hdr "1) 运营方登录"
 req POST /api/v1/auth/login "" "{\"email\":\"ops@nexus.local\",\"password\":\"OpsPass123\"}"
 OP_TOK="$(field token)"
 [ "$CODE" = 200 ] && [ -n "$OP_TOK" ] && ok "登录 200,拿到会话 token" || bad "登录失败 CODE=$CODE BODY=$BODY"
 
-hdr "2) 运营方建客户组织(连带建组织管理员)"
-req POST /api/v1/organizations "$OP_TOK" "{\"name\":\"演示公司\",\"slug\":\"$SLUG\",\"admin_email\":\"admin@$SLUG.com\"}"
-ORG_ID="$(field id)"; ADMIN_PW="$(field admin_initial_password)"
-[ "$CODE" = 201 ] && [ -n "$ORG_ID" ] && [ -n "$ADMIN_PW" ] && ok "建组织 201,org_id=$ORG_ID,管理员初始密码已回显一次" || bad "建组织失败 CODE=$CODE BODY=$BODY"
+hdr "2) 预配组织用户分组可用模型分组"
+ensure_org_usable_group "$ORG_GROUP" "vip"
+ok "已在 new-api 预配 $ORG_GROUP 可用模型分组 vip"
 
-hdr "3) 组织管理员登录"
+hdr "3) 运营方建客户组织(连带建组织管理员)"
+req POST /api/v1/organizations "$OP_TOK" "{\"name\":\"演示公司\",\"slug\":\"$SLUG\",\"admin_email\":\"admin@$SLUG.com\",\"newapi_user_group\":\"$ORG_GROUP\"}"
+ORG_ID="$(field id)"; ADMIN_PW="$(field admin_initial_password)"
+[ "$CODE" = 201 ] && [ -n "$ORG_ID" ] && [ -n "$ADMIN_PW" ] && ok "建组织 201,org_id=$ORG_ID,管理员初始密码已回显一次" || die "建组织失败 CODE=$CODE BODY=$BODY"
+
+hdr "4) 组织管理员登录"
 req POST /api/v1/auth/login "" "{\"email\":\"admin@$SLUG.com\",\"password\":\"$ADMIN_PW\"}"
 AD_TOK="$(field token)"
-[ "$CODE" = 200 ] && [ -n "$AD_TOK" ] && ok "管理员登录 200" || bad "管理员登录失败 CODE=$CODE BODY=$BODY"
+[ "$CODE" = 200 ] && [ -n "$AD_TOK" ] && ok "管理员登录 200" || die "管理员登录失败 CODE=$CODE BODY=$BODY"
 
-hdr "4) 管理员建团队 + 层级 + 设默认层级"
+hdr "5) 管理员建团队 + 层级 + 设默认层级"
 req POST "/api/v1/organizations/$ORG_ID/teams" "$AD_TOK" "{\"name\":\"研发一组\"}"
 TEAM_ID="$(field id)"; [ "$CODE" = 201 ] && ok "建团队 201 team_id=$TEAM_ID" || bad "建团队 CODE=$CODE BODY=$BODY"
 req POST "/api/v1/organizations/$ORG_ID/tiers" "$AD_TOK" "{\"name\":\"标准档\",\"model_set\":[\"gpt-5-mini\",\"claude-sonnet-4-5-20250929\"],\"newapi_group\":\"default\",\"monthly_limit\":25000000}"
@@ -54,33 +99,36 @@ TIER_ID="$(field id)"; [ "$CODE" = 201 ] && ok "建层级 201 tier_id=$TIER_ID" 
 req POST "/api/v1/tiers/$TIER_ID/default" "$AD_TOK" ""
 [ "$CODE" = 200 ] && ok "设默认层级 200" || bad "设默认 CODE=$CODE BODY=$BODY"
 
-hdr "5) US-01 开通成员(真机代发 key,打 dev new-api)"
+hdr "6) US-01 开通成员(真机代发 key,打 dev new-api)"
 req POST "/api/v1/organizations/$ORG_ID/members" "$AD_TOK" "{\"name\":\"钱晨\",\"team_id\":$TEAM_ID,\"tier_id\":$TIER_ID}"
-MEMBER_ID="$(field member_id)"; APIKEY="$(field api_key)"; MASKED="$(field key_masked)"; NUID="$(field newapi_user_id)"
-if [ "$CODE" = 201 ] && [ -n "$APIKEY" ] && [ -n "$NUID" ]; then
-  ok "开通成员 201 member_id=$MEMBER_ID newapi_user_id=$NUID"
+MEMBER_ID="$(field member_id)"; APIKEY="$(field api_key)"; MASKED="$(field key_masked)"; MEMBER_EMAIL="$(field login_email)"; MEMBER_PW="$(field initial_password)"
+if [ "$CODE" = 201 ] && [ -n "$MEMBER_ID" ] && [ -n "$APIKEY" ] && [ -n "$MEMBER_EMAIL" ] && [ -n "$MEMBER_PW" ]; then
+  ok "开通成员 201 member_id=$MEMBER_ID,成员登录账号已回显一次"
   printf '       明文 key(仅此一次): %s\n       脱敏: %s\n' "$APIKEY" "$MASKED"
-else bad "开通成员 CODE=$CODE BODY=$BODY"; fi
+else die "开通成员 CODE=$CODE BODY=$BODY"; fi
 
-hdr "6) 成员列表(必须脱敏:明文 key 绝不出现)"
+hdr "6.1) 成员真实登录"
+M_TOK="$(login_token "$MEMBER_EMAIL" "$MEMBER_PW")"
+[ -n "$M_TOK" ] && ok "成员登录 200"
+
+hdr "7) 成员列表(必须脱敏:明文 key 绝不出现)"
 req GET "/api/v1/organizations/$ORG_ID/members?page=1&page_size=20" "$AD_TOK" ""
 if [ "$CODE" = 200 ] && ! printf '%s' "$BODY" | grep -q "$APIKEY"; then
   ok "列表 200 且无明文 key(只见脱敏串)"
 else bad "列表泄露明文 key 或失败 CODE=$CODE"; fi
 
-hdr "7) 成员详情"
+hdr "8) 成员详情"
 req GET "/api/v1/members/$MEMBER_ID" "$AD_TOK" ""
 [ "$CODE" = 200 ] && ok "详情 200 status=$(field status) bootstrap_state=$(field bootstrap_state)" || bad "详情 CODE=$CODE BODY=$BODY"
 
-hdr "8) 成员本人轮换 key(自签成员会话)"
-M_TOK="$(mint_token "$MEMBER_ID" "$ORG_ID" member "$TEAM_ID")"
+hdr "9) 成员本人轮换 key(真实成员会话)"
 req POST "/api/v1/members/$MEMBER_ID/key:rotate" "$M_TOK" ""
 NEWKEY="$(field api_key)"
 if [ "$CODE" = 200 ] && [ -n "$NEWKEY" ] && [ "$NEWKEY" != "$APIKEY" ]; then
   ok "轮换 200,得到不同的新 key:$NEWKEY"
 else bad "轮换 CODE=$CODE BODY=$BODY"; fi
 
-hdr "9) RBAC 越权判定"
+hdr "10) RBAC 越权判定"
 req POST "/api/v1/organizations/$ORG_ID/members" "$OP_TOK" "{\"name\":\"x\",\"tier_id\":$TIER_ID}"
 [ "$CODE" = 403 ] && ok "运营方直接开通成员 → 403(E05,需走支持会话)" || bad "应 403 得 $CODE"
 req POST "/api/v1/organizations/$ORG_ID/members" "$M_TOK" "{\"name\":\"x\",\"tier_id\":$TIER_ID}"
@@ -90,51 +138,77 @@ req GET "/api/v1/organizations/999999/members" "$AD_TOK" ""
 req GET /api/v1/me "" ""
 [ "$CODE" = 401 ] && ok "无 token 访问 → 401" || bad "应 401 得 $CODE"
 
-hdr "10) 里程碑2 额度执行:调额(US-03)"
+hdr "11) 里程碑2 额度执行:调额(US-03)"
 req POST "/api/v1/members/$MEMBER_ID/quota:adjust" "$AD_TOK" "{\"delta_quota\":5000000,\"duration\":\"today\",\"reason\":\"赶项目\"}"
 GRANT_ID="$(field grant_id)"; NEWCAP="$(field new_cap_quota)"
 [ "$CODE" = 200 ] && [ -n "$GRANT_ID" ] && ok "调额 200,new_cap_quota=$NEWCAP grant_id=$GRANT_ID" || bad "调额 CODE=$CODE BODY=$BODY"
 
-hdr "11) 列临时权限 + 撤销(回退)"
+hdr "12) 列临时权限 + 撤销(回退)"
 req GET "/api/v1/members/$MEMBER_ID/grants" "$AD_TOK" ""
 [ "$CODE" = 200 ] && ok "列 grants 200 total=$(field total)" || bad "列 grants CODE=$CODE"
 req DELETE "/api/v1/grants/$GRANT_ID" "$AD_TOK" ""
 [ "$CODE" = 200 ] && ok "撤销 grant 200(override 回退基线)" || bad "撤销 CODE=$CODE BODY=$BODY"
 
-hdr "12) 临时账号有效期 account_ttl(US-04a)"
+hdr "13) 临时账号有效期 account_ttl(US-04a)"
 EXP="$(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)"
 req POST "/api/v1/members/$MEMBER_ID/grants" "$AD_TOK" "{\"type\":\"account_ttl\",\"expire_at\":\"$EXP\",\"reason\":\"实习生\"}"
 [ "$CODE" = 201 ] && ok "设 account_ttl 201(到期由 worker 反向停号)" || bad "account_ttl CODE=$CODE BODY=$BODY"
 
-hdr "13) 停用 / 恢复成员(US-05)"
+hdr "14) 停用 / 恢复成员(US-05)"
 req POST "/api/v1/members/$MEMBER_ID/status" "$AD_TOK" "{\"enabled\":false}"
 [ "$CODE" = 200 ] && ok "停用 200 status=$(field status)" || bad "停用 CODE=$CODE BODY=$BODY"
 req POST "/api/v1/members/$MEMBER_ID/status" "$AD_TOK" "{\"enabled\":true}"
 [ "$CODE" = 200 ] && ok "恢复 200 status=$(field status)" || bad "恢复 CODE=$CODE BODY=$BODY"
+M_TOK="$(login_token "$MEMBER_EMAIL" "$MEMBER_PW")"
+ok "恢复后重新登录成员账号(状态变更会作废旧会话)"
 
-hdr "14) RBAC:成员自己调额 → 403(只有管理员/团队负责人可调)"
+hdr "15) RBAC:成员自己调额 → 403(只有管理员/团队负责人可调)"
 req POST "/api/v1/members/$MEMBER_ID/quota:adjust" "$M_TOK" "{\"delta_quota\":1,\"duration\":\"today\"}"
 [ "$CODE" = 403 ] && ok "成员调额 → 403" || bad "应 403 得 $CODE"
 
-hdr "15) 里程碑3a 计费:充值入账(US-08,运营方)"
+hdr "16) 里程碑3a 计费:充值入账(US-08,运营方)"
 TR="TR-$(date +%s)-$RANDOM"
 req POST "/api/v1/organizations/$ORG_ID/recharges" "$OP_TOK" "{\"amount_quota\":10000000,\"transfer_no\":\"$TR\",\"note\":\"Q2预付\"}"
 BAL_AFTER="$(field balance_quota_after)"
-[ "$CODE" = 201 ] && [ "$BAL_AFTER" = 10000000 ] && ok "入账 201,balance_after=$BAL_AFTER" || bad "入账 CODE=$CODE BODY=$BODY"
+FUNDING_ENABLED=1
+if [ "$CODE" = 201 ] && [ "$BAL_AFTER" = 10000000 ]; then
+  ok "入账 201,balance_after=$BAL_AFTER"
+elif [ "$CODE" = 404 ]; then
+  FUNDING_ENABLED=0
+  ok "v1 funding 默认关闭:入账端点返回 404"
+else
+  bad "入账 CODE=$CODE BODY=$BODY"
+fi
 req GET "/api/v1/organizations/$ORG_ID/balance" "$AD_TOK" ""
 [ "$CODE" = 200 ] && ok "余额查询 200 balance_quota=$(field balance_quota)" || bad "余额查询 CODE=$CODE"
 req POST "/api/v1/organizations/$ORG_ID/recharges" "$OP_TOK" "{\"amount_quota\":10000000,\"transfer_no\":\"$TR\"}"
-[ "$CODE" = 409 ] && ok "入账幂等:重复 transfer_no → 409" || bad "应 409 得 $CODE"
+if [ "$FUNDING_ENABLED" = 1 ]; then
+  [ "$CODE" = 409 ] && ok "入账幂等:重复 transfer_no → 409" || bad "应 409 得 $CODE"
+else
+  [ "$CODE" = 404 ] && ok "funding 关闭时重复入账仍隐藏端点 → 404" || bad "应 404 得 $CODE"
+fi
 req POST "/api/v1/organizations/$ORG_ID/recharges" "$AD_TOK" "{\"amount_quota\":1,\"transfer_no\":\"X\"}"
-[ "$CODE" = 403 ] && ok "动钱红线:组织管理员入账 → 403" || bad "应 403 得 $CODE"
+if [ "$FUNDING_ENABLED" = 1 ]; then
+  [ "$CODE" = 403 ] && ok "动钱红线:组织管理员入账 → 403" || bad "应 403 得 $CODE"
+else
+  [ "$CODE" = 404 ] && ok "funding 关闭时组织管理员入账也隐藏端点 → 404" || bad "应 404 得 $CODE"
+fi
 
-hdr "16) 申请充值(US-09,组织管理员,不改余额)"
+hdr "17) 申请充值(US-09,组织管理员,不改余额)"
 req POST "/api/v1/organizations/$ORG_ID/recharge-requests" "$AD_TOK" "{\"type\":\"topup\",\"amount_quota\":5000000,\"note\":\"补预付\"}"
-[ "$CODE" = 201 ] && ok "申请充值 201 status=$(field status)" || bad "申请充值 CODE=$CODE BODY=$BODY"
+if [ "$FUNDING_ENABLED" = 1 ]; then
+  [ "$CODE" = 201 ] && ok "申请充值 201 status=$(field status)" || bad "申请充值 CODE=$CODE BODY=$BODY"
+else
+  [ "$CODE" = 404 ] && ok "v1 funding 默认关闭:申请充值端点返回 404" || bad "应 404 得 $CODE"
+fi
 req POST "/api/v1/organizations/$ORG_ID/recharge-requests" "$M_TOK" "{\"type\":\"topup\",\"amount_quota\":1}"
-[ "$CODE" = 403 ] && ok "成员申请充值 → 403(计费子集仅组织管理员)" || bad "应 403 得 $CODE"
+if [ "$FUNDING_ENABLED" = 1 ]; then
+  [ "$CODE" = 403 ] && ok "成员申请充值 → 403(计费子集仅组织管理员)" || bad "应 403 得 $CODE"
+else
+  [ "$CODE" = 404 ] && ok "funding 关闭时成员申请充值也隐藏端点 → 404" || bad "应 404 得 $CODE"
+fi
 
-hdr "17) 里程碑3b 计费开关(逐组织灰度,仅运营方)"
+hdr "18) 里程碑3b 计费开关(逐组织灰度,仅运营方)"
 req PATCH "/api/v1/organizations/$ORG_ID/billing-settings" "$OP_TOK" "{\"billing_enabled\":true,\"hard_stop_enabled\":false,\"low_watermark_quota\":1000000}"
 [ "$CODE" = 200 ] && ok "运营方开计费 200 billing_enabled=$(field billing_enabled)" || bad "开计费 CODE=$CODE BODY=$BODY"
 req GET "/api/v1/organizations/$ORG_ID/billing-settings" "$AD_TOK" ""
@@ -144,7 +218,7 @@ req PATCH "/api/v1/organizations/$ORG_ID/billing-settings" "$AD_TOK" "{\"billing
 # 关回去,避免 dev 误扣(本地无真实用量,但保持干净)
 req PATCH "/api/v1/organizations/$ORG_ID/billing-settings" "$OP_TOK" "{\"billing_enabled\":false}" >/dev/null
 
-hdr "18) 里程碑3c 计价/折扣联动(总折扣,仅运营方)"
+hdr "19) 里程碑3c 计价/折扣联动(总折扣,仅运营方)"
 req PUT "/api/v1/organizations/$ORG_ID/pricing" "$OP_TOK" "{\"mode\":\"total\",\"discount_pct\":0.8}"
 [ "$CODE" = 200 ] && ok "配总折扣 200(写 new-api 分组特殊倍率 GroupGroupRatio)" || bad "配折扣 CODE=$CODE BODY=$BODY"
 req GET "/api/v1/organizations/$ORG_ID/pricing" "$AD_TOK" ""
@@ -152,7 +226,7 @@ req GET "/api/v1/organizations/$ORG_ID/pricing" "$AD_TOK" ""
 req PUT "/api/v1/organizations/$ORG_ID/pricing" "$AD_TOK" "{\"mode\":\"total\",\"discount_pct\":0.5}"
 [ "$CODE" = 403 ] && ok "组织管理员配折扣 → 403(客户只读,仅运营方可配)" || bad "应 403 得 $CODE"
 
-hdr "19) 里程碑4 申请-审批 + 通知(成员自助)"
+hdr "20) 里程碑4 申请-审批 + 通知(成员自助)"
 req POST "/api/v1/approvals" "$M_TOK" "{\"amount_quota\":10000000,\"duration\":\"today\",\"reason\":\"赶工\"}"
 [ "$CODE" = 201 ] && [ "$(field state)" = auto_approved ] && ok "小额申请自动通过 201(即时下发)" || bad "自动通过 CODE=$CODE BODY=$BODY"
 req GET "/api/v1/notifications" "$M_TOK" ""
@@ -167,7 +241,7 @@ req POST "/api/v1/approvals/$BIG_ID/decide" "$AD_TOK" "{\"approved\":true}"
 req POST "/api/v1/approvals/$BIG_ID/decide" "$AD_TOK" "{\"approved\":true}"
 [ "$CODE" = 200 ] && ok "组织管理员二审 200 state=$(field state)(终批+下发)" || bad "二审 CODE=$CODE BODY=$BODY"
 
-hdr "20) 里程碑5 用量看板 + 运营方三层支持"
+hdr "21) 里程碑5 用量看板 + 运营方三层支持"
 req GET "/api/v1/organizations/$ORG_ID/usage?since_hours=24" "$AD_TOK" ""
 [ "$CODE" = 200 ] && ok "组织用量看板 200" || bad "用量 CODE=$CODE"
 req POST "/api/v1/organizations/$ORG_ID/support-sessions" "$OP_TOK" "{\"scope\":\"readonly\",\"ttl_seconds\":600,\"reason\":\"排障\"}"
@@ -181,11 +255,12 @@ req POST "/api/v1/support-sessions/$SUP_ID/close" "$OP_TOK" ""
 [ "$CODE" = 200 ] && ok "结束支持会话 200" || bad "结束 CODE=$CODE"
 
 # 放最后:此步会调 GET /api/user/token 旋转 root token,放末尾避免作废 server 持有的管理员 token。
-hdr "21) 零侵入核对:new-api 侧真建了该用户"
-NU="$(curl -s "http://localhost:13000/api/user/search?keyword=o${ORG_ID}m${MEMBER_ID}" \
+hdr "22) 零侵入核对:new-api 侧真建了该用户"
+ORG_NEWAPI_USERNAME="$(docker exec dev-mysql-1 mysql -uroot -pdevroot -N -B nexus -e "SELECT COALESCE(newapi_username,'') FROM organization WHERE id=$ORG_ID" 2>/dev/null | head -1)"
+NU="$(curl -s "http://localhost:13000/api/user/search?keyword=${ORG_NEWAPI_USERNAME}" \
   -H "Authorization: Bearer $(curl -s -c /tmp/j -X POST http://localhost:13000/api/user/login -H 'Content-Type: application/json' -d '{"username":"root","password":"RootPass123"}' >/dev/null; curl -s -b /tmp/j -H 'New-Api-User: 1' http://localhost:13000/api/user/token | grep -oE '"data":"[^"]+"' | sed -E 's/.*:"([^"]+)"/\1/')" \
-  -H 'New-Api-User: 1' 2>/dev/null | grep -oE "\"username\":\"o${ORG_ID}m${MEMBER_ID}\"" | head -1)"
-[ -n "$NU" ] && ok "new-api 侧存在用户 $NU(平台经官方 API 真建,非 mock)" || bad "未在 new-api 找到该用户"
+  -H 'New-Api-User: 1' 2>/dev/null | grep -oE "\"username\":\"${ORG_NEWAPI_USERNAME}\"" | head -1)"
+[ -n "$ORG_NEWAPI_USERNAME" ] && [ -n "$NU" ] && ok "new-api 侧存在组织共享用户 $NU(平台经官方 API 真建,非 mock)" || bad "未在 new-api 找到组织共享用户 username=$ORG_NEWAPI_USERNAME"
 
 printf '\n==== 联调结果: \033[32m%d 通过\033[0m / \033[31m%d 失败\033[0m ====\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

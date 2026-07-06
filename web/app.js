@@ -433,22 +433,63 @@ async function openTokenMappings(id) {
   } catch (e) { toast(e.message); }
 }
 async function openNewapiLogs(id) {
+  S.logMirror = { orgId: id, page: 1, size: 50, type: "", member: "", request: "" };
+  await renderNewapiLogs();
+}
+async function renderNewapiLogs() {
+  const st = S.logMirror || { orgId: S.orgId, page: 1, size: 50, type: "", member: "", request: "" };
+  const q = new URLSearchParams({ page: String(st.page || 1), page_size: String(st.size || 50) });
+  if (st.type !== "" && st.type != null) q.set("type", st.type);
+  if (st.member) q.set("member_id", st.member);
+  if (st.request) q.set("request_id", st.request.trim());
   try {
-    const d = await api("GET", "/organizations/" + id + "/newapi-logs?page=1&page_size=50", null);
+    const d = await api("GET", "/organizations/" + st.orgId + "/newapi-logs?" + q.toString(), null);
+    const p = d.page || {};
+    const total = p.total || 0, page = p.page || st.page || 1, size = p.page_size || st.size || 50;
+    const maxPage = Math.max(1, Math.ceil(total / size));
     const rows = (d.items || []).map(x => `<tr>
       <td class="mini">${fmtTs(x.log_ts)}</td>
       <td>${esc(logTypeName(x.log_type))}</td>
       <td>${esc(x.model_name || "-")}</td>
       <td class="mini">${esc(x.token_name || "-")}</td>
+      <td class="right mini">${x.member_id || "-"}</td>
       <td class="right">${x.quota || 0}</td>
       <td class="mini">${esc(x.request_id || "-")}</td>
       <td class="mini">${esc((x.content || "").slice(0, 160))}</td>
     </tr>`).join("");
     modal("new-api 完整日志镜像",
-      `<div class="note">只读排障视图:来自后台定时镜像,不参与余额和扣费。最新日志可能有数十秒延迟。</div>
-       <table class="kvtable"><tr><td class="k">时间</td><td class="k">类型</td><td class="k">模型</td><td class="k">令牌</td><td class="right k">Quota</td><td class="k">Request ID</td><td class="k">内容/错误</td></tr>${rows || '<tr><td colspan="7" class="empty">暂无日志</td></tr>'}</table>`,
+      `<div class="note">只读排障视图:来自后台定时镜像,不参与余额和扣费。最新日志通常会有 1 分钟以上延迟；如出现镜像失败或窗口过大,系统会写入审计日志。</div>
+       <div class="toolbar" style="margin-bottom:10px;gap:8px;flex-wrap:wrap">
+        <select class="fsel" id="nl_type"><option value="">全部类型</option>${[1, 2, 3, 4, 5].map(v => `<option value="${v}"${String(st.type) === String(v) ? " selected" : ""}>${esc(logTypeName(v))}</option>`).join("")}</select>
+        <input id="nl_member" class="fsel" style="width:120px" value="${esc(st.member || "")}" placeholder="member_id">
+        <input id="nl_req" class="fsel" style="width:260px" value="${esc(st.request || "")}" placeholder="Request ID">
+        <button class="btn sm" onclick="applyNewapiLogFilter()">筛选</button>
+        <button class="btn sm" onclick="resetNewapiLogFilter()">重置</button>
+       </div>
+       <table class="kvtable"><tr><td class="k">时间</td><td class="k">类型</td><td class="k">模型</td><td class="k">令牌</td><td class="right k">成员</td><td class="right k">Quota</td><td class="k">Request ID</td><td class="k">内容/错误</td></tr>${rows || '<tr><td colspan="8" class="empty">暂无日志</td></tr>'}</table>
+       <div class="pager" style="justify-content:flex-end;margin-top:10px"><span class="mini">共 ${total} 条 · 第 ${page}/${maxPage} 页</span>
+        <button onclick="gotoNewapiLogPage(${page - 1})" ${page <= 1 ? "disabled" : ""}>上一页</button>
+        <button onclick="gotoNewapiLogPage(${page + 1})" ${page >= maxPage ? "disabled" : ""}>下一页</button></div>`,
       `<button class="btn pri" onclick="closeM()">关闭</button>`);
   } catch (e) { toast(e.message); }
+}
+function applyNewapiLogFilter() {
+  if (!S.logMirror) return;
+  S.logMirror.type = val("nl_type");
+  S.logMirror.member = val("nl_member").trim();
+  S.logMirror.request = val("nl_req").trim();
+  S.logMirror.page = 1;
+  renderNewapiLogs();
+}
+function resetNewapiLogFilter() {
+  if (!S.logMirror) return;
+  S.logMirror.type = ""; S.logMirror.member = ""; S.logMirror.request = ""; S.logMirror.page = 1;
+  renderNewapiLogs();
+}
+function gotoNewapiLogPage(page) {
+  if (!S.logMirror || page < 1) return;
+  S.logMirror.page = page;
+  renderNewapiLogs();
 }
 function logTypeName(t) {
   return ({ 1: "充值", 2: "消费", 3: "管理", 4: "系统", 5: "错误" })[Number(t)] || ("类型 " + (t || 0));

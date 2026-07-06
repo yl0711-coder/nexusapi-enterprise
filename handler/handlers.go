@@ -236,12 +236,12 @@ func (h *Handler) handleReimportTokens(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, err)
 		return
 	}
-	imported, failed, err := h.svc.ReimportOrgTokens(r.Context(), c, orgID)
+	imported, skipped, failed, err := h.svc.ReimportOrgTokens(r.Context(), c, orgID)
 	if err != nil {
 		writeErr(w, r, err)
 		return
 	}
-	writeOK(w, r, http.StatusOK, map[string]any{"imported": imported, "failed": failed})
+	writeOK(w, r, http.StatusOK, map[string]any{"imported": imported, "skipped": skipped, "failed": failed})
 }
 
 // handleGetBackfill 读历史回填状态(24-§9:回填中 / 已同步·起点 / 失败)。运营方 + org_admin。

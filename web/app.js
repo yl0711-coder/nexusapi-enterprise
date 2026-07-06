@@ -370,6 +370,8 @@ async function enterOrg(id, name) {
         : `<button class="btn danger" onclick="confirmHardStop(${id})">硬停(风控)</button>`}
       ${org.newapi_created_by_platform === false ? `<button class="btn" onclick="doReimport(${id})">重新导入令牌</button>` : ""}
       ${bf && bf.status && bf.status !== "none" ? `<button class="btn" onclick="doRequeueBackfill(${id})">重新回填</button>` : ""}
+      <button class="btn" onclick="openTokenMappings(${id})">令牌映射</button>
+      <button class="btn" onclick="openNewapiLogs(${id})">完整日志</button>
       <button class="btn" onclick="openSupport(${id})">支持会话</button>
     </div>
     ${bf && bf.status && bf.status !== "none" ? `<div class="panel"><div class="ph">历史用量回填</div><div class="pb">${backfillLine(bf)}</div></div>` : ""}
@@ -409,8 +411,47 @@ async function doHardStop(id, stop) {
 async function doReimport(id) {
   try {
     const d = await api("POST", "/organizations/" + id + "/import-tokens", null);
-    toast(`重新导入完成:新导入 ${d.imported || 0} 个,失败 ${d.failed || 0} 个`); enterOrg(id, S.org.name);
+    toast(`重新导入完成:新导入 ${d.imported || 0} 个,已存在 ${d.skipped || 0} 个,失败 ${d.failed || 0} 个`); enterOrg(id, S.org.name);
   } catch (e) { toast(e.message); }
+}
+async function openTokenMappings(id) {
+  try {
+    const d = await api("GET", "/organizations/" + id + "/token-mappings", null);
+    const rows = (d.items || []).map(x => `<tr>
+      <td>${esc(x.display_name || x.login_email || "-")}${x.member_deleted ? ' <span class="mini">(已离职)</span>' : ""}</td>
+      <td class="mini">${esc(x.member_status || "-")}</td>
+      <td>${esc(x.token_name || "-")}</td>
+      <td class="mini">${esc(x.key_masked || "-")}</td>
+      <td class="right">${x.newapi_token_id || 0}</td>
+      <td>${x.is_current ? pill("当前", "ok") : pill("历史", "mut")}</td>
+      <td class="mini">${esc(x.token_status || "-")}</td>
+    </tr>`).join("");
+    modal("员工 - new-api 令牌映射",
+      `<div class="note">只读排障视图:用于把 new-api 日志里的 token_id 追到企业成员和平台 key 槽。历史 token 保留用于旧日志归因。</div>
+       <table class="kvtable"><tr><td class="k">成员</td><td class="k">成员状态</td><td class="k">令牌名</td><td class="k">Key</td><td class="right k">new-api token_id</td><td class="k">版本</td><td class="k">令牌状态</td></tr>${rows || '<tr><td colspan="7" class="empty">暂无映射</td></tr>'}</table>`,
+      `<button class="btn pri" onclick="closeM()">关闭</button>`);
+  } catch (e) { toast(e.message); }
+}
+async function openNewapiLogs(id) {
+  try {
+    const d = await api("GET", "/organizations/" + id + "/newapi-logs?page=1&page_size=50", null);
+    const rows = (d.items || []).map(x => `<tr>
+      <td class="mini">${fmtTs(x.log_ts)}</td>
+      <td>${esc(logTypeName(x.log_type))}</td>
+      <td>${esc(x.model_name || "-")}</td>
+      <td class="mini">${esc(x.token_name || "-")}</td>
+      <td class="right">${x.quota || 0}</td>
+      <td class="mini">${esc(x.request_id || "-")}</td>
+      <td class="mini">${esc((x.content || "").slice(0, 160))}</td>
+    </tr>`).join("");
+    modal("new-api 完整日志镜像",
+      `<div class="note">只读排障视图:来自后台定时镜像,不参与余额和扣费。最新日志可能有数十秒延迟。</div>
+       <table class="kvtable"><tr><td class="k">时间</td><td class="k">类型</td><td class="k">模型</td><td class="k">令牌</td><td class="right k">Quota</td><td class="k">Request ID</td><td class="k">内容/错误</td></tr>${rows || '<tr><td colspan="7" class="empty">暂无日志</td></tr>'}</table>`,
+      `<button class="btn pri" onclick="closeM()">关闭</button>`);
+  } catch (e) { toast(e.message); }
+}
+function logTypeName(t) {
+  return ({ 1: "充值", 2: "消费", 3: "管理", 4: "系统", 5: "错误" })[Number(t)] || ("类型 " + (t || 0));
 }
 async function openDiscount(id) {
   let cur = {}; try { cur = await api("GET", "/organizations/" + id + "/pricing", null); } catch (e) {}

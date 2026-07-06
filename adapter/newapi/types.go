@@ -112,6 +112,8 @@ type NewapiAdapter interface {
 	ReadConsumptionLogs(ctx context.Context, sinceUnix, untilUnix int64, page, pageSize int) ([]LogEntry, int, error)
 	// ReadConsumptionLogsByUsername 同上但按 new-api username 精确过滤,供历史日志回填只拉单个企业用户(24-§7.2)。
 	ReadConsumptionLogsByUsername(ctx context.Context, username string, sinceUnix, untilUnix int64, page, pageSize int) ([]LogEntry, int, error)
+	// ReadAllLogsByUsername 按 username 拉完整日志(type=0),只供企业后台排障镜像,不参与计费。
+	ReadAllLogsByUsername(ctx context.Context, username string, sinceUnix, untilUnix int64, page, pageSize int) ([]AllLogEntry, int, error)
 	// SumConsumedQuotaByUsername 用 /api/log/stat 取该 username 截至 untilUnix 的权威总消耗,供回填-台账对账告警(24-§9)。
 	SumConsumedQuotaByUsername(ctx context.Context, username string, untilUnix int64) (int64, error)
 

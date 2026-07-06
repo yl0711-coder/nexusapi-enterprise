@@ -54,6 +54,12 @@ func (w *SettlementWorker) Run(ctx context.Context) {
 					w.log.Error("历史回填分片失败(保持 running,下轮从 cursor_ts 续)", "err", berr)
 				}
 				bcancel()
+				// 完整日志镜像只服务排障,不进 settlement 账本。独立短超时,失败只告警下轮补。
+				lc, lcancel := context.WithTimeout(ctx, 20*time.Second)
+				if lerr := w.svc.RunLogMirrorSlice(lc); lerr != nil {
+					w.log.Error("new-api 完整日志镜像失败(保持 running,下轮续)", "err", lerr)
+				}
+				lcancel()
 			})
 		}
 	}

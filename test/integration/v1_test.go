@@ -238,9 +238,9 @@ func TestIntegration_AssociateOrg(t *testing.T) {
 		t.Fatalf("🔴重复关联同一 new-api 用户应拒")
 	}
 	// ⑤ 幂等重导:再跑 0 新增。
-	imp, failed, rerr := svc.ReimportOrgTokens(ctx, opc, res.Org.ID)
-	if rerr != nil || imp != 0 || failed != 0 {
-		t.Fatalf("重导应幂等 0 新增,实 imported=%d failed=%d err=%v", imp, failed, rerr)
+	imp, skipped, failed, rerr := svc.ReimportOrgTokens(ctx, opc, res.Org.ID)
+	if rerr != nil || imp != 0 || skipped != 2 || failed != 0 {
+		t.Fatalf("重导应幂等 0 新增且跳过已导入,实 imported=%d skipped=%d failed=%d err=%v", imp, skipped, failed, rerr)
 	}
 	t.Logf("门B 真账 ok: 校验闸(坏token/串号/重复=拒)+导入2成员(继承名)+池子 %d 分文不动(#6红线)+关联组织读求和余额非0+重导幂等", entQuota)
 }
@@ -423,7 +423,7 @@ func TestIntegration_LedgerRescueLateCommit(t *testing.T) {
 	var curTS int64
 	_ = store.DB().QueryRowContext(ctx, `SELECT last_settled_ts FROM settlement_cursor WHERE org_id=0`).Scan(&curTS)
 	seedConsumptionLogTok(t, newapiSQLDSN, int64(cred.NewapiUserID), tokenID, "gpt-edge", 2_000_000, curTS) // created_at==since
-	time.Sleep(7 * time.Second) // 让 until(now−lag5s) 越过 since,主窗口张开(否则窗口为空提前返回,边界行读不到)
+	time.Sleep(7 * time.Second)                                                                             // 让 until(now−lag5s) 越过 since,主窗口张开(否则窗口为空提前返回,边界行读不到)
 	if _, err := svc.RunSettlement(ctx); err != nil {
 		t.Fatalf("边界结算失败: %v", err)
 	}

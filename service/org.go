@@ -187,7 +187,7 @@ func (s *Service) CreateOrg(ctx context.Context, c session.Claims, in CreateOrgI
 			}
 			return nil, apperr.Internal("").WithCause(werr)
 		}
-		imported, importFailed = s.importOrgTokens(ctx, orgID, assocCred, a.NamePolicy)
+		imported, _, importFailed = s.importOrgTokens(ctx, orgID, assocCred, a.NamePolicy)
 
 		// 历史日志全量回填(24-§7.3):关联成功 → 快照全局 forward 边界 B、插 pending 任务(worker 串行回填)。
 		// 非阻断:回填是报表补全(v1 不涉钱),失败不掀翻已成功的关联,可经运营方"重新回填"补。
@@ -202,7 +202,7 @@ func (s *Service) CreateOrg(ctx context.Context, c session.Claims, in CreateOrgI
 	}
 	s.audit(ctx, c, orgID, "create_org", "organization", &orgID, map[string]any{
 		"name": in.Name, "slug": in.Slug, "admin_email": in.AdminEmail,
-		"mode": map[bool]string{true: "associated", false: "created"}[in.Associate != nil],
+		"mode":     map[bool]string{true: "associated", false: "created"}[in.Associate != nil],
 		"imported": imported, "import_failed": importFailed,
 	})
 
@@ -214,16 +214,16 @@ func (s *Service) CreateOrg(ctx context.Context, c session.Claims, in CreateOrgI
 // 幂等:SELECT-then-skip(uk_key_token_newapi 已有行=已导入,跳过)——**绝不裸 INSERT 撞唯一键**(insertKeyTokenTx
 // 是普通 INSERT,F-C 教训);重跑安全,失败的下次"重新导入"补齐。只读导入:分组/模型限制/状态带过来**不改动**、
 // 明文 key 拿不到只存脱敏(员工继续用旧 key);失败复用 F-A 补偿纪律(标失败+释放邮箱),**绝不删企业令牌**(企业资产)。
-func (s *Service) importOrgTokens(ctx context.Context, orgID int64, cred newapi.MemberCred, namePolicy string) (imported, failed int) {
+func (s *Service) importOrgTokens(ctx context.Context, orgID int64, cred newapi.MemberCred, namePolicy string) (imported, skipped, failed int) {
 	org, oerr := s.store.GetOrganization(ctx, orgID)
 	if oerr != nil {
 		s.log.Error("导入:读组织失败", "org_id", orgID, "err", oerr)
-		return 0, 0
+		return 0, 0, 0
 	}
 	tokens, lerr := s.upstream.ListUserTokens(ctx, cred)
 	if lerr != nil {
 		s.log.Error("导入:拉取令牌列表失败(可重新导入)", "org_id", orgID, "err", lerr)
-		return 0, 0
+		return 0, 0, 0
 	}
 	for _, t := range tokens {
 		if _, _, found, aerr := s.store.GetMemberByNewapiTokenID(ctx, int64(t.ID)); aerr != nil {
@@ -231,6 +231,7 @@ func (s *Service) importOrgTokens(ctx context.Context, orgID int64, cred newapi.
 			failed++
 			continue
 		} else if found {
+			skipped++
 			continue // 已导入(幂等重跑)
 		}
 		// A4(五路验收 WB-1):导入的 new-api 令牌名是**外部数据**,须过与 checkName 等价的清洗(挡 <>"'`\+控制字符+截断),
@@ -268,8 +269,8 @@ func (s *Service) importOrgTokens(ctx context.Context, orgID int64, cred newapi.
 		}
 		imported++
 	}
-	s.log.Info("门B 令牌导入完成", "org_id", orgID, "total", len(tokens), "imported", imported, "failed", failed)
-	return imported, failed
+	s.log.Info("门B 令牌导入完成", "org_id", orgID, "total", len(tokens), "imported", imported, "skipped", skipped, "failed", failed)
+	return imported, skipped, failed
 }
 
 // HardStopOrg v1 运维硬停/解除(20-§4/19-F4,运营方风控):硬停 = **禁用该组织的 new-api 用户**
@@ -326,27 +327,27 @@ func (s *Service) HardStopOrg(ctx context.Context, c session.Claims, orgID int64
 }
 
 // ReimportOrgTokens 门B"重新导入"(运营方,幂等):导入中途失败/后续补齐用。只补建缺的,已导入的跳过。
-func (s *Service) ReimportOrgTokens(ctx context.Context, c session.Claims, orgID int64) (imported, failed int, err error) {
+func (s *Service) ReimportOrgTokens(ctx context.Context, c session.Claims, orgID int64) (imported, skipped, failed int, err error) {
 	if err := assertRole(c, session.RoleOperator); err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	org, gerr := s.store.GetOrganization(ctx, orgID)
 	if errors.Is(gerr, repo.ErrNotFound) {
-		return 0, 0, apperr.NotFound("组织不存在")
+		return 0, 0, 0, apperr.NotFound("组织不存在")
 	}
 	if gerr != nil {
-		return 0, 0, apperr.Internal("").WithCause(gerr)
+		return 0, 0, 0, apperr.Internal("").WithCause(gerr)
 	}
 	if org.CreatedByPlatform {
-		return 0, 0, apperr.InvalidParam("仅关联型组织支持重新导入")
+		return 0, 0, 0, apperr.InvalidParam("仅关联型组织支持重新导入")
 	}
 	cred, cerr := s.orgCred(ctx, orgID)
 	if cerr != nil {
-		return 0, 0, cerr
+		return 0, 0, 0, cerr
 	}
-	imported, failed = s.importOrgTokens(ctx, orgID, cred, "inherit")
-	s.audit(ctx, c, orgID, "reimport_tokens", "organization", &orgID, map[string]any{"imported": imported, "failed": failed})
-	return imported, failed, nil
+	imported, skipped, failed = s.importOrgTokens(ctx, orgID, cred, "inherit")
+	s.audit(ctx, c, orgID, "reimport_tokens", "organization", &orgID, map[string]any{"imported": imported, "skipped": skipped, "failed": failed})
+	return imported, skipped, failed, nil
 }
 
 // GetOrg 取组织详情(运营方任意 / 组织管理员本组织)。

@@ -18,7 +18,7 @@ type Handler struct {
 	signer  *session.Signer
 	log     *slog.Logger
 	version string
-	mvpMode bool // 改动⑥:MVP 灰度封锁(mvpGate 路由白名单 + /me 透出 mvp_mode 给前端藏菜单)
+	mvpMode bool            // 改动⑥:MVP 灰度封锁(mvpGate 路由白名单 + /me 透出 mvp_mode 给前端藏菜单)
 	authLim *attemptLimiter // A2:登录/改密账号级失败退避(应用层纵深)
 }
 
@@ -51,11 +51,13 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/organizations", h.requireAuth(h.handleCreateOrg))
 	mux.HandleFunc("GET /api/v1/organizations/{id}", h.requireAuth(h.handleGetOrg))
 	mux.HandleFunc("PATCH /api/v1/organizations/{id}", h.requireAuth(h.handleUpdateOrg))
-	mux.HandleFunc("POST /api/v1/organizations/{id}/archive", h.requireAuth(h.handleArchiveOrg))           // T12 归档
-	mux.HandleFunc("POST /api/v1/organizations/{id}/unarchive", h.requireAuth(h.handleUnarchiveOrg))       // T12 取消归档
+	mux.HandleFunc("POST /api/v1/organizations/{id}/archive", h.requireAuth(h.handleArchiveOrg))                // T12 归档
+	mux.HandleFunc("POST /api/v1/organizations/{id}/unarchive", h.requireAuth(h.handleUnarchiveOrg))            // T12 取消归档
 	mux.HandleFunc("POST /api/v1/organizations/{id}/import-tokens", h.requireAuth(h.handleReimportTokens))      // 门B 重新导入(运营方,幂等)
-	mux.HandleFunc("GET /api/v1/organizations/{id}/backfill", h.requireAuth(h.handleGetBackfill))                // 历史回填状态(24-§9)
-	mux.HandleFunc("POST /api/v1/organizations/{id}/backfill/requeue", h.requireAuth(h.handleRequeueBackfill))   // 重新回填(运营方,幂等)
+	mux.HandleFunc("GET /api/v1/organizations/{id}/backfill", h.requireAuth(h.handleGetBackfill))               // 历史回填状态(24-§9)
+	mux.HandleFunc("GET /api/v1/organizations/{id}/newapi-logs", h.requireAuth(h.handleOrgNewapiLogs))          // new-api 完整日志镜像(运营排障)
+	mux.HandleFunc("GET /api/v1/organizations/{id}/token-mappings", h.requireAuth(h.handleOrgTokenMappings))    // 员工 ↔ new-api token 映射(运营排障)
+	mux.HandleFunc("POST /api/v1/organizations/{id}/backfill/requeue", h.requireAuth(h.handleRequeueBackfill))  // 重新回填(运营方,幂等)
 	mux.HandleFunc("POST /api/v1/organizations/{id}/hard-stop", h.requireAuth(h.handleHardStop(true)))          // 运维硬停(禁用 org 用户)
 	mux.HandleFunc("POST /api/v1/organizations/{id}/hard-stop-release", h.requireAuth(h.handleHardStop(false))) // 解除硬停
 	mux.HandleFunc("GET /api/v1/organizations/{id}/approval-rules", h.requireAuth(h.handleGetApprovalRules))
@@ -100,9 +102,9 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/grants/{id}", h.requireAuth(h.handleRevokeGrant))
 	mux.HandleFunc("POST /api/v1/members/{id}/password:reset", h.requireAuth(h.handleResetMemberPassword)) // C22 重置成员登录密码
 	mux.HandleFunc("POST /api/v1/members/{id}/status", h.requireAuth(h.handleSetMemberStatus))
-	mux.HandleFunc("POST /api/v1/members/{id}/offboard", h.requireAuth(h.handleOffboardMember))                    // 离职(删token+软删)
-	mux.HandleFunc("POST /api/v1/members/{id}/restore", h.requireAuth(h.handleRestoreMember))                      // 恢复入职
-	mux.HandleFunc("GET /api/v1/organizations/{id}/members/offboarded", h.requireAuth(h.handleListOffboarded))     // 离职列表
+	mux.HandleFunc("POST /api/v1/members/{id}/offboard", h.requireAuth(h.handleOffboardMember))                // 离职(删token+软删)
+	mux.HandleFunc("POST /api/v1/members/{id}/restore", h.requireAuth(h.handleRestoreMember))                  // 恢复入职
+	mux.HandleFunc("GET /api/v1/organizations/{id}/members/offboarded", h.requireAuth(h.handleListOffboarded)) // 离职列表
 
 	// 计费(里程碑3a):余额 / 入账 / 申请充值(钱进 + 只读 + 告警;扣费 3b 下一轮)。
 	mux.HandleFunc("GET /api/v1/organizations/{id}/balance", h.requireAuth(h.handleGetBalance))

@@ -182,6 +182,9 @@ type Member struct {
 	KeyRotation          int
 	BootstrapState       string
 	SessionEpoch         int // A3:会话代次;禁用/降级/改密/硬停自增,令旧平台 token 立即失效
+	// 架构B(0030):成员=各自 new-api user(平台托管服务账号)。凭证密文不进本结构(单独 repo 方法取,防密文到处传)。
+	NewapiUserID   *int64  // 成员自己的 new-api user id(nil=未开通/旧A版数据)
+	NewapiUsername *string // 成员 new-api 用户名(日志按 username 查、401 自愈重登用)
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
 }

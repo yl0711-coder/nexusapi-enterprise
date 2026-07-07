@@ -30,6 +30,7 @@ const (
 	stepReadLogs    = "ReadConsumptionLogs"
 	stepGetOption   = "GetOption"
 	stepSetOption   = "SetOption"
+	stepStatus      = "GetStatus" // 架构B:读 /api/status(QuotaPerUnit 启动自检)
 )
 
 // Config 配置 adapter 的 Executor 单出口行为。零值有合理默认(见 normalize)。

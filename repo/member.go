@@ -430,13 +430,15 @@ func (s *Store) ListAllMembers(ctx context.Context, f MemberFilter) ([]MemberOve
 // memberSelect 模型2:不含 newapi_user_id/access_token_enc/member_password_enc(已从 member 移除,归 organization)。
 const memberSelect = `SELECT id, org_id, team_id, login_email, display_name, role, tier_id, newapi_group,
 	status, expire_at, platform_password_hash, bootstrapped_at,
-	newapi_token_id, key_masked, key_rotation, bootstrap_state, session_epoch, created_at, updated_at FROM member`
+	newapi_token_id, key_masked, key_rotation, bootstrap_state, session_epoch,
+	newapi_user_id, newapi_username, created_at, updated_at FROM member`
 
 func scanMember(r rowScanner) (*model.Member, error) {
 	var m model.Member
 	err := r.Scan(&m.ID, &m.OrgID, &m.TeamID, &m.LoginEmail, &m.DisplayName, &m.Role, &m.TierID, &m.NewapiGroup,
 		&m.Status, &m.ExpireAt, &m.PlatformPasswordHash, &m.BootstrappedAt,
-		&m.NewapiTokenID, &m.KeyMasked, &m.KeyRotation, &m.BootstrapState, &m.SessionEpoch, &m.CreatedAt, &m.UpdatedAt)
+		&m.NewapiTokenID, &m.KeyMasked, &m.KeyRotation, &m.BootstrapState, &m.SessionEpoch,
+		&m.NewapiUserID, &m.NewapiUsername, &m.CreatedAt, &m.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

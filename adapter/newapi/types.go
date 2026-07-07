@@ -16,6 +16,8 @@ type QuotaMode string
 
 const (
 	// QuotaOverride 写绝对值(override = 到 0 即硬停),天然幂等。
+	// Deprecated: 架构B(31-ADR §4.2)禁用 override 做划账/硬停——override 不刷新额度缓存(60s 陈旧)。
+	// 划账一律走 Increase/DecreaseUserQuota(quota_guard.go);硬停用 SetUserStatus(disable)。仅保留常量防编译断裂,严禁新增引用。
 	QuotaOverride QuotaMode = "override"
 	// QuotaAdd 增量。
 	QuotaAdd QuotaMode = "add"
@@ -91,7 +93,11 @@ type NewapiAdapter interface {
 	DeleteToken(ctx context.Context, cred MemberCred, tokenID int) error
 
 	// 额度/状态走 user_id(管理员身份,不冒充):
-	ManageUserQuota(ctx context.Context, userID int, mode QuotaMode, quota int64) error // override/add/subtract
+	ManageUserQuota(ctx context.Context, userID int, mode QuotaMode, quota int64) error // override/add/subtract(裸引擎,业务勿直用)
+	// 架构B 划账护栏入口(quota_guard.go,33 §3.1):业务一律走这两个,不直调 ManageUserQuota。
+	IncreaseUserQuota(ctx context.Context, userID int, amountRaw int64) error          // 加额,写后≤int32 预检
+	DecreaseUserQuota(ctx context.Context, userID int, amountRaw int64) (int64, error) // 减额,clamp≥0,返实际扣减
+	GetQuotaPerUnit(ctx context.Context) (float64, error)                              // 读 /api/status 实际 QuotaPerUnit(启动自检)
 	GetUserQuota(ctx context.Context, userID int) (quota int64, err error)              // 读 org user 当前剩余额度(模型2 读穿余额=桶1)
 	SetUserStatus(ctx context.Context, userID int, enabled bool) error                  // enable/disable
 

@@ -19,19 +19,18 @@ type Handler struct {
 	signer         *session.Signer
 	log            *slog.Logger
 	version        string
-	mvpMode        bool            // 改动⑥:MVP 灰度封锁(mvpGate 路由白名单 + /me 透出 mvp_mode 给前端藏菜单)
 	authLim        *attemptLimiter // A2:登录/改密账号级失败退避(应用层纵深)
 	gatewayBaseURL string          // F3(28):对客户展示的 API 接入地址(纯展示,可选;未配置则 mykey 不显示接入示例)
 }
 
 // New 构造 Handler。
-func New(svc *service.Service, signer *session.Signer, log *slog.Logger, version string, mvpMode bool) *Handler {
+func New(svc *service.Service, signer *session.Signer, log *slog.Logger, version string) *Handler {
 	if log == nil {
 		log = slog.Default()
 	}
 	markStarted(time.Now().Unix()) // /metrics uptime 起点
 	// NEXUS_GATEWAY_BASE_URL 在此直读(非注入):纯展示字段,不影响任何逻辑;避免为它改 New 签名波及调用方。
-	return &Handler{svc: svc, signer: signer, log: log, version: version, mvpMode: mvpMode,
+	return &Handler{svc: svc, signer: signer, log: log, version: version,
 		authLim: newAttemptLimiter(), gatewayBaseURL: os.Getenv("NEXUS_GATEWAY_BASE_URL")}
 }
 
@@ -158,10 +157,9 @@ func (h *Handler) Routes() http.Handler {
 	// /api/v1/* 之外的路径走内嵌静态前端;/ 返回 index.html。
 	mux.Handle("GET /", http.FileServerFS(web.FS))
 
-	// 中间件链:request_id → 安全头 → 访问日志/指标 → recover → body 上限 → MVP 封锁闸 → mux
-	// (GZ-05 安全头挂最外层;P2 body 上限在 recover 内、闸/mux 外:超限读 body 时报错,recover 兜底;
-	// 改动⑥ mvpGate 紧贴 mux:非白名单写操作 404)。
-	return withRequestID(securityHeaders(h.accessLog(h.recoverPanic(maxBodyBytes(h.mvpGate(mux))))))
+	// 中间件链:request_id → 安全头 → 访问日志/指标 → recover → body 上限 → mux
+	// (GZ-05 安全头挂最外层;P2 body 上限在 recover 内、mux 外:超限读 body 时报错,recover 兜底)。
+	return withRequestID(securityHeaders(h.accessLog(h.recoverPanic(maxBodyBytes(mux)))))
 }
 
 func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {

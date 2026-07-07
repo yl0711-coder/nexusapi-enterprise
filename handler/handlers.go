@@ -120,17 +120,15 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, err)
 		return
 	}
-	// 改动⑥-2:/me 透出 mvp_mode,前端据此藏掉本期封锁的菜单/按钮(真正拦截以后端 mvpGate 为准)。
 	// A3(28):透出本人组织状态,员工"我的用量·当前状态"显示真实状态(组织硬停等),不再硬编码"正常"。
 	// F3(28):透出 API 接入地址(纯展示,未配置则前端不显示接入示例)。
 	// 组长契约增补(33 §12-①):顶层回传 quota_per_unit——member/org_admin 靠它做 raw↔美元换算。
 	writeOK(w, r, http.StatusOK, struct {
 		memberView
-		MvpMode        bool   `json:"mvp_mode"`
 		OrgStatus      string `json:"org_status,omitempty"`
 		GatewayBaseURL string `json:"gateway_base_url,omitempty"`
 		QuotaPerUnit   int64  `json:"quota_per_unit"`
-	}{toMemberView(m), h.mvpMode, h.svc.MyOrgStatus(r.Context(), c), h.gatewayBaseURL, h.svc.QuotaPerUnitSetting(r.Context())})
+	}{toMemberView(m), h.svc.MyOrgStatus(r.Context(), c), h.gatewayBaseURL, h.svc.QuotaPerUnitSetting(r.Context())})
 }
 
 // ---- 组织 ----

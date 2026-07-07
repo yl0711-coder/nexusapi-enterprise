@@ -104,19 +104,10 @@ func run(log *slog.Logger) error {
 		},
 	}, nil)
 
-	// MVP 灰度模式(改动⑥):NEXUS_MVP_MODE=true → 观测模式(结算只落账不扣钱/不停服)+ 路由白名单封锁。
-	// v1 裁定A(20-§2.1):observe 唯一职责=额度执行机器休眠;建令牌已剥离(开通一律真建)。
-	mvpMode := os.Getenv("NEXUS_MVP_MODE") == "true"
-	if mvpMode {
-		log.Info("MVP 灰度模式已开启:观测模式(额度执行机器休眠) + 路由白名单封锁(非白名单写操作 404)")
-	}
 	// v1 escrow 休眠总闸(20-§9):默认 false=平台不经手钱(充值/退款/续充/escrow对账/计费对账全禁);v2 才开。
+	// 架构B:MVP 观测模式(NEXUS_MVP_MODE / ObserveMode / mvpGate)已整体退役——成员额度由 new-api 原生双扣、
+	// 平台经 Transfer 划账,不再有"额度执行机器休眠"的观测挡位。
 	fundingEnabled := os.Getenv("NEXUS_PLATFORM_FUNDING_ENABLED") == "true"
-	// A9(硬不变式):funding 蕴含非 observe——观测期平台绝不经手钱。误配即拒启动,
-	// 防 escrow对账/AutoRefill/applyRecharge 只受 fundingEnabled 门控、在"观测期"对 user.quota add/subtract。
-	if fundingEnabled && mvpMode {
-		return errors.New("配置互斥(A9):NEXUS_PLATFORM_FUNDING_ENABLED 与 NEXUS_MVP_MODE 不可同时为 true(观测期平台不得经手钱),请关闭其一")
-	}
 	if fundingEnabled {
 		log.Info("平台经手钱已开启(v2 escrow):入账/续充/退款/对账生效")
 	} else {
@@ -134,7 +125,7 @@ func run(log *slog.Logger) error {
 
 	svc := service.New(service.Deps{
 		Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log,
-		ObserveMode: mvpMode, FundingEnabled: fundingEnabled,
+		FundingEnabled: fundingEnabled,
 		Leadership: service.NewEnvLeadership(workerEnabled), // B5
 		// 历史回填限速旋钮(24-§4.5):默认 8 窗口/tick、5 页/秒,量小够用;大回填靠分片多 tick 排空。
 		BackfillWindowsPerTick: atoiOr("NEXUS_BACKFILL_WINDOWS_PER_TICK", 8),
@@ -167,7 +158,7 @@ func run(log *slog.Logger) error {
 		startWorker(&workerWG, func() { worker.NewReconcileWorker(svc, log, rv).Run(workerCtx) })
 	}
 
-	h := handler.New(svc, signer, log, version, mvpMode)
+	h := handler.New(svc, signer, log, version)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           h.Routes(),

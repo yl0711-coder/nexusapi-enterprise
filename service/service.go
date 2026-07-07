@@ -59,6 +59,10 @@ type Service struct {
 
 	// leadership B5:leader-only 写工作(结算/回填/托管对账)的准入决策支点;v1=envLeadership,v2 换 leaseLeadership。
 	leadership Leadership
+
+	// ledger 钱核心进程内运行态(架构B 阶段1,BE②:订阅补满桶去重/恒等式扫描限频/负漂移双轮确认)。
+	// 零值可用(懒初始化);单 leader 进程语义,多节点前随选主重造(见 ledger.go)。
+	ledger ledgerRuntime
 }
 
 // Deps 是构造 Service 的依赖集合。

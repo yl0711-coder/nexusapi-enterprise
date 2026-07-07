@@ -1,7 +1,7 @@
 /* NexusAPI 企业管理平台 · 生产前端 SPA(接 /api/v1 真后端)。
    设计沿用原型 app.css;数据全来自真实 API(非 mock)。按 /me 的角色拼装菜单与视图。 */
 "use strict";
-const S = { token: localStorage.getItem("nx_token") || "", me: null, role: "", view: "", org: null, orgId: 0, mvp: false, win: 168, gran: "day" };
+const S = { token: localStorage.getItem("nx_token") || "", me: null, role: "", view: "", org: null, orgId: 0, win: 168, gran: "day", qpu: 500000, psettings: null };
 // 品牌/支持集中常量(运营定稿前用占位;company/doc 含"待定"时前端优雅降级不露占位)。改这一处全局生效。
 const BRAND = { product: "企业管理台", company: "(公司名待定)", support: "support@example.com", doc: "(文档地址待定)" };
 const brandCompany = () => BRAND.company.includes("待定") ? "" : BRAND.company;
@@ -11,7 +11,12 @@ const WIN_ALL = 263520; // C4:=后端 maxUsageWindowHours(24*366*30≈30年),口
 function winLabel(h) { return ({ 168: "近 7 天", 720: "近 30 天", 2160: "近 90 天", [WIN_ALL]: "全部历史" })[h] || ("近 " + Math.round(h / 24) + " 天"); }
 // A5:余额接口失败显示"暂不可用"占位,不把失败当真实 $0.00(否则误导客户误判欠费/停服)。
 // 取数处 catch 返回 {__err:true},渲染走此函数区分"真 0"与"取数失败"。
-function balMoney(b) { return (b && b.__err) ? "暂不可用" : money((b && b.available_quota) || 0); }
+// 架构B:余额对象为 /orgs/:id/balance 形态(treasury_raw);兼容旧 available_quota 形态。
+function balMoney(b) {
+  if (!b || b.__err) return "暂不可用";
+  const t = rawOf(b, "treasury_raw", "treasury_quota_raw", "available_quota");
+  return t != null ? money(t) : "暂不可用";
+}
 function winSelect() {
   return `<select class="fsel" onchange="S.win=+this.value;renderView()">`
     + [168, 720, 2160, WIN_ALL].map(h => `<option value="${h}"${S.win === h ? " selected" : ""}>${winLabel(h)}</option>`).join("")
@@ -124,7 +129,24 @@ async function api(method, path, body) {
   if (j.code !== 0 && j.code !== undefined) throw new Error(j.message || ("请求失败 " + r.status));
   return j.data;
 }
-const money = q => "$" + (q / 500000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); // quota→美元(锚定 500000=$1),统一两位
+// 架构B 单位口径(31-ADR §3):内部/API 全 raw quota;换算只在 UI 边界一次——显示 ÷quota_per_unit、输入 ×quota_per_unit。
+// quota_per_unit 不硬编码:boot 时从 GET /platform-settings 拉(S.qpu),500000 仅为拉取失败时的兜底。
+const money = q => "$" + ((Number(q) || 0) / (S.qpu || 500000)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const usd2raw = usd => Math.round((Number(usd) || 0) * (S.qpu || 500000)); // 输入边界:美元 → raw
+// rawOf:契约金额字段一律 *_raw(int64);字段名逐一容错取第一个非空值,取不到返回 null(显示 "-",不冒充 $0)。
+const rawOf = (o, ...ks) => { for (const k of ks) { if (o && o[k] != null && o[k] !== "") return Number(o[k]); } return null; };
+const normList = d => Array.isArray(d) ? d : ((d && (d.list || d.items)) || []);
+function setErr(id, msg) { const el = document.getElementById(id); if (el) el.textContent = msg || ""; }
+async function loadQpu() {
+  // 33 §3.5:FE 用 /platform-settings 的 quota_per_unit 换算美元;契约把该端点列在 operator 下,
+  // 非 operator 角色若被 403 则回退 /me 附带值,再兜底 500000(缺口已记交付说明,待组长裁定)。
+  try {
+    const ps = await api("GET", "/platform-settings", null);
+    if (ps) { S.psettings = ps; const v = Number(ps.quota_per_unit); if (v > 0) { S.qpu = v; return; } }
+  } catch (e) {}
+  const v = Number(S.me && S.me.quota_per_unit);
+  if (v > 0) S.qpu = v;
+}
 // esc:HTML 文本/双引号属性转义(用于可见文本、title=、value= 等 HTML 上下文)。
 // 安全审计 2026-06-30 修正:esc 仅适用 HTML 上下文,绝不可用于内联事件处理器(onclick="…")里的 JS 字符串参数——
 // HTML 解析器会先把 &#39; 解码回 ',字符串被闭合可注入任意 JS(经典嵌套上下文坑;原"&#39; 能堵 onclick"判断为误)。
@@ -134,7 +156,7 @@ const esc = s => String(s == null ? "" : s).replace(/[&<>"'`]/g, c => ({ "&": "&
 // 产物只含 反斜杠/x/u/十六进制,无 ' " < > & → HTML 解码后原样保留,JS 里是字面字符、不闭合字符串。用于 onclick 等内联处理器参数。
 const jsstr = s => String(s == null ? "" : s).replace(/[^a-zA-Z0-9_]/g, c => { const n = c.charCodeAt(0); return n < 256 ? "\\x" + n.toString(16).padStart(2, "0") : "\\u" + n.toString(16).padStart(4, "0"); });
 const roleCN = r => ({ operator: "运营方", org_admin: "组织管理员", team_leader: "团队负责人", member: "成员" }[r] || r);
-const memberStatusCN = s => ({ active: "启用", disabled: "禁用", offboarded: "离职" }[s] || s || "-");
+const memberStatusCN = s => ({ active: "启用", disabled: "停用", offboarded: "离职", provisioning: "开通中", quarantined: "开通异常" }[s] || s || "-");
 // D2(28):计费模式中文化,不再对客户/运营直出英文枚举。
 const billingModeCN = s => ({ wallet: "余额钱包", prepaid: "预充值", postpaid: "后付费", subscription: "订阅" }[s] || s || "-");
 
@@ -164,19 +186,20 @@ async function boot() {
   S.me = await api("GET", "/me", null);
   document.getElementById("login").classList.add("hide"); // 自动登录路径也要隐藏登录浮层
   S.role = S.me.role; S.orgId = S.me.org_id;
-  S.mvp = !!S.me.mvp_mode; // 改动⑥-2:MVP 灰度,前端藏掉钱/控入口(真正拦截以后端 mvpGate 为准)
+  // 架构B:mvpGate 机制退役(33 §12 增补),/me 的 mvp_mode 阶段2 移除;前端按"全功能"口径,不再读该字段。
+  await loadQpu(); // 架构B:金额换算基准(quota_per_unit),进 UI 前拿到
   const def = { operator: "orgs", org_admin: "dash", team_leader: "members", member: "myusage" }[S.role];
   S.view = def;
   renderShell(); renderSide(); renderView();
 }
 
-// v1 观测管理版(20-§2.1 裁定A):额度申请/审批/tier 限额属 v2 配额功能,前端隐藏(approvals/myreq 不在菜单);
-// billing 改纯"余额"(充值在 new-api,平台无充值入口,19-F6)。
+// 架构B(29-PRD v4 / 33 §3.5):org_admin=成员/档位/余额与账本/模型广场;member=自管令牌/额度与账本/模型广场;
+// operator 加平台账本 + 平台设置(money_freeze 等)。mykey(A 版单 key 页)退役,由「我的令牌」取代。
 const NAV = {
-  operator: [{ grp: "运营" }, { v: "orgs", ic: "▦", t: "客户组织" }, { v: "employees", ic: "☷", t: "员工管理" }, { v: "oplogs", ic: "▤", t: "使用日志" }],
-  org_admin: [{ grp: "管理" }, { v: "dash", ic: "◧", t: "概览" }, { v: "members", ic: "☷", t: "成员" }, { v: "teams", ic: "▣", t: "团队" }, { v: "tiers", ic: "◆", t: "可用模型档位" }, { v: "logs", ic: "▤", t: "使用日志" }, { v: "billing", ic: "¥", t: "余额" }, { v: "mynotif", ic: "✉", t: "通知" }],
+  operator: [{ grp: "运营" }, { v: "orgs", ic: "▦", t: "客户组织" }, { v: "employees", ic: "☷", t: "员工管理" }, { v: "oplogs", ic: "▤", t: "使用日志" }, { v: "pledger", ic: "▤", t: "平台账本" }, { v: "psettings", ic: "⚙", t: "平台设置" }],
+  org_admin: [{ grp: "管理" }, { v: "dash", ic: "◧", t: "概览" }, { v: "members", ic: "☷", t: "成员" }, { v: "teams", ic: "▣", t: "团队" }, { v: "tiers", ic: "◆", t: "额度档位" }, { v: "marketplace", ic: "▦", t: "模型广场" }, { v: "billing", ic: "¥", t: "余额与账本" }, { v: "logs", ic: "▤", t: "使用日志" }, { v: "mynotif", ic: "✉", t: "通知" }],
   team_leader: [{ grp: "团队" }, { v: "members", ic: "☷", t: "团队成员" }],
-  member: [{ grp: "我的" }, { v: "myusage", ic: "▦", t: "我的用量" }, { v: "mykey", ic: "⚿", t: "我的 API Key" }, { v: "logs", ic: "▤", t: "使用日志" }, { v: "mynotif", ic: "✉", t: "通知" }],
+  member: [{ grp: "我的" }, { v: "myusage", ic: "▦", t: "我的用量" }, { v: "mytokens", ic: "⚿", t: "我的令牌" }, { v: "mybalance", ic: "¥", t: "额度与账本" }, { v: "marketplace", ic: "▦", t: "模型广场" }, { v: "logs", ic: "▤", t: "使用日志" }, { v: "mynotif", ic: "✉", t: "通知" }],
 };
 
 function renderShell() {
@@ -219,7 +242,11 @@ const NAV_IC = (() => {
     billing: w('<circle cx="12" cy="12" r="9"></circle><path d="M9 9l3 4 3-4M12 13v5M9.5 15h5"></path>'),
     mynotif: w('<rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M3 7l9 6 9-6"></path>'),
     myusage: w('<path d="M4 20V10M10 20V4M16 20v-8M21 20H3"></path>'),
-    mykey: w('<circle cx="8" cy="14" r="4"></circle><path d="M11 11l9-9M16 6l3 3"></path>'),
+    mytokens: w('<circle cx="8" cy="14" r="4"></circle><path d="M11 11l9-9M16 6l3 3"></path>'),
+    mybalance: w('<circle cx="12" cy="12" r="9"></circle><path d="M9 9l3 4 3-4M12 13v5M9.5 15h5"></path>'),
+    marketplace: w('<path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4z"></path><circle cx="16.5" cy="16.5" r="3.5"></circle>'),
+    pledger: w('<path d="M5 3h14v18l-3-2-2 2-2-2-2 2-2-2-3 2z"></path><path d="M9 8h6M9 12h6"></path>'),
+    psettings: w('<circle cx="12" cy="12" r="3.2"></circle><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5 5l2.1 2.1M16.9 16.9 19 19M19 5l-2.1 2.1M7.1 16.9 5 19"></path>'),
   };
 })();
 function renderSide() {
@@ -293,21 +320,19 @@ function copyText(text, label) {
 function copyBtn(text, label) {
   return `<button class="icon-btn copy-btn" title="复制${esc(label || "")}" aria-label="复制${esc(label || "")}" onclick="copyText('${jsstr(text)}','${jsstr(label || "内容")}')"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="10" height="10" rx="2"></rect><path d="M5 15V7a2 2 0 0 1 2-2h8"></path></svg></button>`;
 }
-// revealMemberKey:点"复制完整"→ 调揭示端点即时取明文(平台不存明文)→ 弹框展示 + 复制(27-§3.2)。
+// revealTokenKey:成员本人对自己令牌"复制完整"→ POST /me/tokens/:id/key:reveal 即时取明文(平台不存明文)。
 // 走弹框而非直接写剪贴板:clipboard.writeText 需在用户手势同步栈,await 后调用 Safari 会失效;弹框内复制按钮点击是新手势,稳。
-// 运营方无此入口;后端 RevealKey 再兜底(operator 403、越权 403、离职/禁用 403)。
-async function revealMemberKey(memberID, name) {
+// 仅成员本人可揭示(assertSelf);运营方无此入口;后端再兜底(挡 SupportSession、越权 403)。
+// 架构B:A 版成员级 /members/:id/key:reveal 已退役(org_admin 复制成员 key 的端点缺口见交付说明)。
+async function revealTokenKey(tokenID, name) {
   try {
-    const d = await api("POST", "/members/" + memberID + "/key:reveal", null);
-    modal("完整 API Key" + (name ? (" · " + name) : ""),
-      `<div class="note">明文 Key,复制后请妥善保管;平台不留存明文,如泄露请轮换。</div>
-       <div class="keybox"><span>${esc(d.api_key)}</span>${copyBtn(d.api_key, "API Key")}</div>`,
+    const d = await api("POST", "/me/tokens/" + tokenID + "/key:reveal", null);
+    const k = (d && (d.key || d.api_key)) || "";
+    modal("完整令牌 Key" + (name ? (" · " + name) : ""),
+      `<div class="note">明文 Key,复制后请妥善保管;平台不留存明文。Key 不可修改,如需更换请删除该令牌后重建。</div>
+       <div class="keybox"><span>${esc(k)}</span>${copyBtn(k, "API Key")}</div>`,
       `<button class="btn pri" onclick="closeM()">完成</button>`);
   } catch (e) { toast(e.message); }
-}
-// revealKeyBtn:脱敏串旁的"复制完整"入口(员工本人 / 组织管理员本组织成员)。运营方视图不放此按钮。
-function revealKeyBtn(memberID, name) {
-  return `<button class="btn micro reveal-key" onclick="revealMemberKey(${memberID},'${jsstr(name || "")}')">复制完整</button>`;
 }
 // 空状态引导:图标 + 标题 + 说明 +(可选)行动按钮。表格内用时外层包 <td colspan>。
 function emptyState(icon, title, desc, btnText, onclick) {
@@ -371,7 +396,7 @@ VIEWS.orgs = async () => {
     <td><span class="lk" style="display:inline-block;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle" title="${esc(o.name)}" onclick="enterOrg(${o.id},'${jsstr(o.name)}')">${esc(o.name)}</span><div class="mini">${esc(o.slug)}</div></td>
     <td>${pill(o.status, o.status === "active" ? "ok" : o.status === "low" ? "warn" : "bad")}${o.archived ? ' <span class="tag">已归档</span>' : ''}</td>
     <td>${esc(o.timezone)}</td><td>${esc(billingModeCN(o.billing_mode))}</td>
-    <td class="right"><span class="btn sm" onclick="enterOrg(${o.id},'${jsstr(o.name)}')">进入</span> ${o.archived
+    <td class="right"><span class="btn sm" onclick="openOrgTreasury(${o.id},'${jsstr(o.name)}')">金库</span> <span class="btn sm" onclick="enterOrg(${o.id},'${jsstr(o.name)}')">进入</span> ${o.archived
       ? `<span class="btn sm" onclick="doArchiveOrg(${o.id},'${jsstr(o.name)}',false)">取消归档</span>`
       : `<span class="btn sm" onclick="doArchiveOrg(${o.id},'${jsstr(o.name)}',true)">归档</span>`}</td></tr>`).join("");
   return head("客户组织", "运营方:管理所有客户组织、入账、计费灰度、支持会话")
@@ -479,10 +504,10 @@ async function enterOrg(id, name) {
       + `<div class="crumb"><span class="lk" onclick="go('orgs')">客户组织</span><span class="sep">/</span><b>${esc(name)}</b></div>
          <div class="panel"><div class="pb"><div class="empty">正在载入「${esc(name)}」…</div></div></div>`;
   }
-  // v1(20-§9):充值在 new-api 完成,平台无充值/续充入口(escrow 休眠);运营方看实时余额 + 硬停(风控)+ 门B 重新导入。
+  // 架构B:金库余额走 /orgs/:id/balance(读求和,escrow 已退役);充值仍在 new-api 侧对金库 user 代充。
   const [org, eb, bf] = await Promise.all([
     api("GET", "/organizations/" + id, null),
-    api("GET", "/organizations/" + id + "/escrow-balance", null).catch(() => ({ __err: true })),
+    api("GET", "/orgs/" + id + "/balance", null).catch(() => ({ __err: true })),
     api("GET", "/organizations/" + id + "/backfill", null).catch(() => ({ status: "none" })),
   ]);
   const mem = await api("GET", "/organizations/" + id + "/members?page=1&page_size=20", null);
@@ -500,7 +525,7 @@ async function enterOrg(id, name) {
       <div class="org-status">${pill(org.status, org.status === "active" ? "ok" : hardStopped ? "bad" : "warn")}</div>
     </div>
     <div class="cards">
-      ${kpi("实时余额", balMoney(eb), "实时读 new-api 余额")}
+      ${kpi("金库余额", balMoney(eb), "组织金库实时余额(读求和走 DB)")}
       ${kpi("组织状态", pill(org.status, org.status === "active" ? "ok" : hardStopped ? "bad" : "warn"), hardStopped ? "组织级硬停中" : "正常服务中")}
       ${kpi("成员数", (mem.pagination || {}).total || (mem.list || []).length || 0, "API 使用成员")}
     </div>
@@ -533,7 +558,7 @@ async function renderOrgCurrentTab() {
       if (!S.orgDetail) {
         const [org, eb, bf, mem] = await Promise.all([
           api("GET", "/organizations/" + S.orgId, null),
-          api("GET", "/organizations/" + S.orgId + "/escrow-balance", null).catch(() => ({ __err: true })),
+          api("GET", "/orgs/" + S.orgId + "/balance", null).catch(() => ({ __err: true })),
           api("GET", "/organizations/" + S.orgId + "/backfill", null).catch(() => ({ status: "none" })),
           api("GET", "/organizations/" + S.orgId + "/members?page=1&page_size=20", null),
         ]);
@@ -576,7 +601,7 @@ function renderOrgOverviewPanel(org, eb, bf, mem) {
       <div class="ph">组织概览</div>
       <div class="pb">
         <table class="kvtable">
-          <tr><td class="k">实时余额</td><td><b>${balMoney(eb)}</b></td></tr>
+          <tr><td class="k">金库余额</td><td><b>${balMoney(eb)}</b></td></tr>
           <tr><td class="k">组织状态</td><td>${pill(org.status, org.status === "active" ? "ok" : hardStopped ? "bad" : "warn")}</td></tr>
           <tr><td class="k">成员数</td><td>${memberTotal}</td></tr>
           <tr><td class="k">计费方式</td><td>${esc(billingModeCN(org.billing_mode || "-"))}</td></tr>
@@ -1025,8 +1050,8 @@ VIEWS.dash = async () => {
   }
   const win = S.win, wl = winLabel(win);
   const reqs = [api("GET", "/organizations/" + id + "/usage?since_hours=" + win, null)];
-  // v1 M5(20-§3):客户余额=读求和(实时读 new-api 池子,available_quota);订阅组织显示"订阅计费"。
-  reqs.push(api("GET", "/organizations/" + id + "/balance", null).catch(() => ({ __err: true })));
+  // 架构B(31-ADR §2):组织余额 = 金库 + Σ成员,读求和走 /orgs/:id/balance;概览 KPI 展示金库余额。
+  reqs.push(api("GET", "/orgs/" + id + "/balance", null).catch(() => ({ __err: true })));
   // M2:用量趋势(折线图);失败不拖垮看板,降级空序列。
   reqs.push(api("GET", "/organizations/" + id + "/usage/timeseries?since_hours=" + win + "&granularity=" + S.gran, null).catch(() => ({ series: [] })));
   const [usage, bal, ts] = await Promise.all(reqs);
@@ -1052,13 +1077,13 @@ VIEWS.dash = async () => {
     const attrs = tid > 0 ? `class="bar lk" onclick="openTeamUsage(${tid},'${jsstr(nm)}')" title="查看该团队成员/模型明细"` : `class="bar"`;
     return `<div ${attrs} data-q="${esc(nm.toLowerCase())}"><span class="nm">${esc(nm)}</span><span class="track"><span class="fill" style="width:${Math.max(4, Math.round(b.consumed_quota / maxt * 100))}%"></span></span><span class="vv">${money(b.consumed_quota)}</span></div>`;
   }).join("") || `<div class="empty">${wl}暂无用量(或未建团队)</div>`;
-  // v1 M5:可用余额=读求和(实时);订阅计费组织不显示数字(池子不反映其消费,显示会误导)。
-  const balCards = bal.billing_kind === "subscription"
-    ? kpi("可用余额", "订阅计费", "该组织按订阅计费,无钱包余额")
-    : kpi("可用余额", balMoney(bal), "实时读取(充值请联系运营方)");
+  // 架构B:金库余额 KPI + 金库低预警条(低于阈值后端置 low 标记;文案按 29-PRD §4.9)。
+  const balCards = kpi("金库余额", balMoney(bal), "组织金库实时余额(充值请联系运营方)");
+  const lowBar = (!bal.__err && (bal.low === true || bal.treasury_low === true))
+    ? `<div class="note" style="background:var(--warnbg);border-color:#fde68a;color:#92400e;margin:0 0 14px"><b>组织余额不足,请联系管理员充值。</b>金库偏低时,开通成员 / 划拨额度 / 订阅补满可能失败。</div>` : "";
   const srch = (iid, cid, ph) => `<input id="${iid}" placeholder="${ph}" oninput="filterEls('${iid}','${cid}')" style="float:right;width:150px;padding:2px 8px;font-size:12px">`;
   // 数据安全承诺条(仅客户 org_admin);文案站得住:MVP 下成员 key 员工自助建、平台不经手,观测不扣款。
-  const safebar = S.role === "org_admin" ? `<div class="safebar">本平台仅统计您的用量,不接触您的 API 密钥;观测期不扣款,数据仅用于用量统计。</div>` : "";
+  const safebar = S.role === "org_admin" ? `<div class="safebar">额度与消费以 new-api 实际扣费为准;平台负责金库划拨与用量统计,不经手您的请求内容与令牌明文。</div>` : "";
   // 新组织上手清单:v1 无全期消耗字段(company_balance 降级),改用「当前窗口零消耗且无任何用量条目」近似判断。
   const showOnboard = S.role === "org_admin" && (usage.total_quota || 0) === 0 && mem.length === 0;
   const onboard = showOnboard ? `<div class="panel onboard"><div class="ph">快速上手</div><div class="pb">
@@ -1066,8 +1091,8 @@ VIEWS.dash = async () => {
     <div class="ob-row"><span class="ob-n">2</span><div><b>(可选)建团队</b><div class="mini">想按团队看用量就先建团队,再把员工归入</div></div><button class="btn sm" onclick="go('teams')">建团队</button></div>
     <div class="ob-row"><span class="ob-n">3</span><div><b>查看用量</b><div class="mini">员工开始调用后,这里会显示按团队 / 员工 / 模型的用量</div></div></div>
   </div></div>` : "";
-  return head("概览", "公司可用余额 + 用量")
-    + safebar
+  return head("概览", "组织金库余额 + 用量")
+    + safebar + lowBar
     + `<div class="toolbar"><div class="spacer"></div><button class="btn" onclick="downloadUsageCsv()">导出CSV(员工名·美元)</button><span class="mini">时间窗</span>${winSelect()}</div>
     <div class="cards">
       ${kpi(wl + "消耗", money(usage.total_quota), "按实际调用量统计")}${balCards}
@@ -1078,42 +1103,46 @@ VIEWS.dash = async () => {
     <div class="panel"><div class="ph">员工用量排行(${wl})· 点员工看明细${srch("memSearch", "memBars", "搜员工…")}</div><div class="pb" id="memBars" style="max-height:340px;overflow:auto">${mbars}</div></div>
     <div class="panel"><div class="ph">按模型用量(${wl})${srch("modSearch", "modBars", "搜模型…")}</div><div class="pb" id="modBars" style="max-height:340px;overflow:auto">${bars}</div></div>`;
 };
+// 架构B 成员页(29-PRD §4.3 / 33 §3.5):成员=独立 new-api user,持硬限额;列表含 额度/已用/剩余(美元显示)。
+// 端点:GET /orgs/:id/members(分页);操作:quota:grant 划拨 / status 停用启用 / offboard 离职退额 / restore 恢复重新分配。
 VIEWS.members = async () => {
   const id = S.orgId;
-  const showOff = !!S.membersShowOffboarded;
   const mf = S.memberFilter || { q: "", team: "", status: "" };
   const mq = new URLSearchParams({ page: String(S.membersPage || 1), page_size: "50" });
   if (mf.q) mq.set("q", mf.q);
   if (mf.team) mq.set("team_id", mf.team);
   if (mf.status) mq.set("status", mf.status);
-  const reqs = [
-    api("GET", "/organizations/" + id + "/members?" + mq.toString(), null),
-    api("GET", "/organizations/" + id + "/teams", null).catch(() => []),
-  ];
-  if (showOff) reqs.push(api("GET", "/organizations/" + id + "/members/offboarded?page=1&page_size=50", null).catch(() => ({ list: [] })));
-  const res = await Promise.all(reqs);
-  const d = res[0], teams = res[1], off = showOff ? (res[2] || { list: [] }) : { list: [] };
+  const [d, teams] = await Promise.all([
+    api("GET", "/orgs/" + id + "/members?" + mq.toString(), null),
+    api("GET", "/organizations/" + id + "/teams", null).catch(() => []), // 团队端点续用(33 §5)
+  ]);
   S.teamsCache = teams || []; // 供调团队弹窗
   const tmap = {}; (teams || []).forEach(t => tmap[t.id] = t.name);
   // 管理类账号(运营方/组织管理员)不进"成员"列表(M7);只列 API 使用成员。
-  const rows = (d.list || []).filter(m => m.role !== "org_admin" && m.role !== "operator").map(m => `<tr>
-    <td>${esc(m.display_name || m.login_email)}<div class="mini">${esc(m.login_email)}</div></td>
-    <td>${m.team_id ? esc(tmap[m.team_id] || ("团队#" + m.team_id)) : '<span class="mini">未分组</span>'}</td>
-    <td>${pill(memberStatusCN(m.status), m.status === "active" ? "ok" : "mut")}</td>
-    <td class="mini"><span class="cell-clip" title="${esc(m.key_masked || "-")}">${esc(m.key_masked || "-")}</span>${revealKeyBtn(m.id, m.display_name || m.login_email)}</td>
-    <td class="right table-actions">
-      ${S.mvp ? "" : `<span class="btn sm" onclick="openAdjust(${m.id})">调额</span>`}
-      <span class="btn sm" onclick="openMemberLogs(${m.id},'${jsstr(m.display_name || m.login_email)}')">日志</span>
-      <span class="btn sm" onclick="toggleMember(${m.id},${m.status !== "active"})">${m.status === "active" ? "禁用" : "启用"}</span>
-      <span class="btn sm" onclick="openMemberMore(${m.id},'${jsstr(m.display_name || m.login_email)}','${jsstr(m.display_name || "")}',${m.team_id || 0})">更多</span>
-    </td></tr>`).join("");
-  const offRows = showOff ? (off.list || []).map(m => `<tr>
-    <td>${esc(m.display_name || m.login_email)}<div class="mini">${esc(m.login_email)}</div></td>
-    <td><span class="tag">已离职</span></td>
-    <td class="mini">key 已失效</td>
-    <td class="right"><span class="btn sm" onclick="doRestoreMember(${m.id},'${jsstr(m.display_name || m.login_email)}')">恢复入职</span></td>
-  </tr>`).join("") : "";
-  // A6:成员分页(page_size=50)——>50 成员时显示总数 + 上/下页,确保全量可达(客户端搜索只筛已加载行,不够)。
+  const rows = (d.list || []).filter(m => m.role !== "org_admin" && m.role !== "operator").map(m => {
+    const nm = m.display_name || m.login_email || ("成员#" + m.id);
+    const remain = rawOf(m, "quota_raw", "remaining_raw", "remain_raw");
+    const used = rawOf(m, "used_raw", "used_quota_raw");
+    const granted = rawOf(m, "granted_raw", "total_granted_raw");
+    const off = m.status === "offboarded";
+    const zero = !off && remain != null && remain <= 0;
+    const acts = off
+      ? `<span class="btn sm pri" onclick="openRestore(${m.id},'${jsstr(nm)}')">恢复入职</span>`
+      : `<span class="btn sm" onclick="openGrant(${m.id},'${jsstr(nm)}')">划拨额度</span>
+         <span class="btn sm" onclick="openMemberLogs(${m.id},'${jsstr(nm)}')">日志</span>
+         <span class="btn sm" onclick="toggleMember(${m.id},${m.status !== "active"})">${m.status === "active" ? "停用" : "启用"}</span>
+         <span class="btn sm" onclick="openMemberMore(${m.id},'${jsstr(nm)}','${jsstr(m.display_name || "")}',${m.team_id || 0})">更多</span>`;
+    return `<tr>
+      <td><span class="cell-clip" title="${esc(nm)}">${esc(nm)}</span><div class="mini">${esc(m.login_email || "")}</div></td>
+      <td>${m.team_id ? esc(tmap[m.team_id] || ("团队#" + m.team_id)) : '<span class="mini">未分组</span>'}</td>
+      <td>${m.tier_name ? esc(m.tier_name) : '<span class="mini">-</span>'}</td>
+      <td class="right">${granted != null ? money(granted) : "-"}</td>
+      <td class="right">${used != null ? money(used) : "-"}</td>
+      <td class="right">${remain != null ? `<b>${money(remain)}</b>` : "-"}${zero ? '<div class="mini" style="color:var(--bad)">额度已用完,请联系管理员</div>' : ""}</td>
+      <td>${pill(memberStatusCN(m.status), m.status === "active" ? "ok" : off ? "bad" : "mut")}</td>
+      <td class="right table-actions">${acts}</td></tr>`;
+  }).join("");
+  // A6:成员分页(page_size=50)——>50 成员时显示总数 + 上/下页,确保全量可达(不静默截断)。
   const memTotal = (d.pagination || {}).total || (d.list || []).length;
   const memPage = S.membersPage || 1, memPages = Math.max(1, Math.ceil(memTotal / 50));
   const memPager = memTotal > 50
@@ -1122,19 +1151,17 @@ VIEWS.members = async () => {
         <button class="btn sm" ${memPage >= memPages ? "disabled" : ""} onclick="goMembersPage(1)">下一页</button></div>`
     : "";
   const teamOpts = (teams || []).filter(t => t.status !== "archived").map(t => `<option value="${t.id}"${String(mf.team) === String(t.id) ? " selected" : ""}>${esc(t.name)}</option>`).join("");
-  return head(S.role === "team_leader" ? "团队成员" : "成员", "员工即企业 API Key 使用主体;禁用=暂停当前 Key,启用即通;离职=Key 失效并转离职列表")
+  return head(S.role === "team_leader" ? "团队成员" : "成员", "成员 = 独立服务账号,持硬限额(额度由组织金库划拨,自管令牌);停用=令牌暂停、额度保留;离职=停用并退额回金库")
     + `<div class="toolbar log-filter" style="gap:8px;flex-wrap:wrap">
-      <input id="mf_q" class="fsel" value="${esc(mf.q || "")}" placeholder="搜索姓名 / 登录名 / Key">
+      <input id="mf_q" class="fsel" value="${esc(mf.q || "")}" placeholder="搜索姓名 / 登录名">
       <select id="mf_team" class="fsel"><option value="">全部团队</option>${teamOpts}</select>
-      <select id="mf_status" class="fsel"><option value="">全部状态</option><option value="active"${mf.status === "active" ? " selected" : ""}>启用</option><option value="disabled"${mf.status === "disabled" ? " selected" : ""}>禁用</option></select>
+      <select id="mf_status" class="fsel"><option value="">全部状态</option><option value="active"${mf.status === "active" ? " selected" : ""}>启用</option><option value="disabled"${mf.status === "disabled" ? " selected" : ""}>停用</option><option value="offboarded"${mf.status === "offboarded" ? " selected" : ""}>离职</option></select>
       <button class="btn sm" onclick="applyMemberFilter()">筛选</button>
       <button class="btn sm" onclick="resetMemberFilter()">重置</button>
       <div class="spacer"></div>
-      <label class="mini" style="margin-left:12px;cursor:pointer"><input type="checkbox" ${showOff ? "checked" : ""} onclick="S.membersShowOffboarded=this.checked;renderView()"> 显示离职</label>
-      ${S.mvp ? "" : `<button class="btn" onclick="openBulk()">批量导入</button>`}<button class="btn pri" onclick="openAddMember()">+ 开通成员</button></div>
-    <div class="panel"><div class="table-scroll"><table class="kvtable member-table"><colgroup><col class="m-name"><col class="m-team"><col class="m-status"><col class="m-key"><col class="m-actions"></colgroup><thead><tr><th>成员</th><th>团队</th><th>状态</th><th>Key(脱敏)</th><th></th></tr></thead>
-    <tbody>${rows || '<tr><td colspan=5>' + emptyState("☷", "还没有成员", "开通第一位员工,系统会生成登录凭证交付给他", "+ 开通成员", "openAddMember()") + '</td></tr>'}</tbody></table></div>${memPager}</div>`
-    + (showOff ? `<div class="panel"><div class="ph">离职成员(软删·可恢复)</div><div class="pb"><table><tbody>${offRows || '<tr><td class="empty">暂无离职成员</td></tr>'}</tbody></table></div></div>` : "");
+      <button class="btn pri" onclick="openAddMember()">+ 开通成员</button></div>
+    <div class="panel"><div class="table-scroll"><table class="kvtable member-table"><colgroup><col class="m-name"><col class="m-team"><col class="m-tier"><col class="m-granted"><col class="m-used"><col class="m-remain"><col class="m-status"><col class="m-actions"></colgroup><thead><tr><th>成员</th><th>团队</th><th>档位</th><th class="right">累计划入</th><th class="right">已用</th><th class="right">剩余额度</th><th>状态</th><th></th></tr></thead>
+    <tbody>${rows || '<tr><td colspan=8>' + emptyState("☷", "还没有成员", "开通第一位成员:选一个额度档位,从金库划拨初始额度", "+ 开通成员", "openAddMember()") + '</td></tr>'}</tbody></table></div>${memPager}</div>`;
 };
 function applyMemberFilter() {
   S.memberFilter = { q: val("mf_q").trim(), team: val("mf_team"), status: val("mf_status") };
@@ -1226,10 +1253,29 @@ function openMemberLogs(mid, name) {
 }
 function openMemberMore(mid, name, curName, curTid) {
   modal("成员更多操作 · " + name, `<div class="action-list compact-actions">
+    <div class="action-row"><div><b>成员详情</b><div class="mini">额度 / 已用 / 剩余 / 令牌数 / 档位。</div></div><button class="btn sm" onclick="openMemberDetail(${mid},'${jsstr(name)}')">查看</button></div>
     <div class="action-row"><div><b>修改显示名</b><div class="mini">用于报表、成员列表和排障识别。</div></div><button class="btn sm" onclick="openRename(${mid},'${jsstr(curName)}')">改名</button></div>
-    <div class="action-row"><div><b>调整团队</b><div class="mini">影响团队维度用量统计口径。</div></div><button class="btn sm" onclick="openChangeTeam(${mid},${curTid || 0})">调团队</button></div>
-    <div class="action-row danger-line"><div><b>离职</b><div class="mini">删除 API Key 并转入离职列表。临时停用请用“禁用”。</div></div><button class="btn sm danger" onclick="doOffboard(${mid},'${jsstr(name)}')">离职</button></div>
+    <div class="action-row"><div><b>调整团队</b><div class="mini">影响团队维度用量统计与“授权到团队”的档位范围。</div></div><button class="btn sm" onclick="openChangeTeam(${mid},${curTid || 0})">调团队</button></div>
+    <div class="action-row danger-line"><div><b>离职</b><div class="mini">停用其全部令牌,未用额度退回组织金库。临时停用请用“停用”。</div></div><button class="btn sm danger" onclick="doOffboard(${mid},'${jsstr(name)}')">离职</button></div>
   </div>`, `<button class="btn pri" onclick="closeM()">关闭</button>`);
+}
+// 成员详情(33 §3.5 GET /members/:id:额度/剩余/令牌数/档位)。
+async function openMemberDetail(mid, name) {
+  try {
+    const m = await api("GET", "/members/" + mid, null);
+    const remain = rawOf(m, "quota_raw", "remaining_raw", "remain_raw");
+    const used = rawOf(m, "used_raw", "used_quota_raw");
+    const granted = rawOf(m, "granted_raw", "total_granted_raw");
+    modal("成员详情 · " + name, `<table class="kvtable">
+      <tr><td class="k">状态</td><td>${pill(memberStatusCN(m.status), m.status === "active" ? "ok" : "mut")}</td></tr>
+      <tr><td class="k">档位</td><td>${esc(m.tier_name || "-")}</td></tr>
+      <tr><td class="k">累计划入</td><td>${granted != null ? money(granted) : "-"}</td></tr>
+      <tr><td class="k">已用</td><td>${used != null ? money(used) : "-"}</td></tr>
+      <tr><td class="k">剩余额度</td><td><b>${remain != null ? money(remain) : "-"}</b></td></tr>
+      <tr><td class="k">令牌数</td><td>${m.token_count != null ? m.token_count : "-"}</td></tr>
+    </table><div class="note">成员令牌由成员本人在「我的令牌」自管;组织管理员不代建/代改/代删(29-PRD §3 铁律)。</div>`,
+      `<button class="btn pri" onclick="closeM()">关闭</button>`);
+  } catch (e) { toast(e.message); }
 }
 function openChangeTeam(mid, curTid) {
   const topts = (S.teamsCache || []).filter(t => t.status !== "archived").map(t => `<option value="${t.id}" ${t.id === curTid ? "selected" : ""}>${esc(t.name)}</option>`).join("");
@@ -1242,67 +1288,59 @@ async function doChangeTeam(mid) {
   try { await api("PATCH", "/members/" + mid, { team_id: parseInt(val("ct_team")) }); closeM(); toast("已调整团队"); renderView(); }
   catch (e) { toast(e.message); }
 }
+// 建成员(33 §3.5 POST /orgs/:id/members):tier_id 必填=初始额度;金库不足整单失败(409 如实展示,不半成功)。
 async function openAddMember() {
   let tiers = [], teams = [];
-  try { tiers = (await api("GET", "/organizations/" + S.orgId + "/tiers", null)) || []; } catch (e) {}
+  try { tiers = normList(await api("GET", "/orgs/" + S.orgId + "/tiers", null)); } catch (e) {}
   try { teams = (await api("GET", "/organizations/" + S.orgId + "/teams", null)) || []; } catch (e) {}
-  const opts = tiers.map(t => `<option value="${t.id}">${esc(t.name)}${t.is_default ? "(默认)" : ""}</option>`).join("");
+  const opts = tiers.map(t => `<option value="${t.id}">${esc(t.name)} · ${esc(tierQuotaLabel(t))}${t.is_default ? "(默认)" : ""}</option>`).join("");
   const topts = (teams || []).filter(t => t.status !== "archived").map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join("");
   modal("开通成员", `<div class="fld"><label>姓名</label><input id="am_n" placeholder="钱晨"></div>
-    <div class="fld"><label>登录名(真实邮箱/用户名,可选)</label><input id="am_e" placeholder="留空则自动生成"></div>
+    <div class="fld"><label>登录邮箱(可选)</label><input id="am_e" placeholder="留空则自动生成"></div>
     <div class="fld"><label>团队(可选)</label><select id="am_team"><option value="">未分组</option>${topts}</select></div>
-    <div class="fld"><label>可用模型档位</label><select id="am_t">${opts || `<option value="">(先建档位)</option>`}</select></div>
-    <div class="note">登录名留空将自动生成。系统将为该员工建账号、代发 API Key、下发可用模型档位;登录邮箱与初始密码开通后回显一次。</div>`,
+    <div class="fld"><label>初始额度档位(必选)</label><select id="am_t">${opts || `<option value="">(请先到「额度档位」建档位)</option>`}</select></div>
+    <div class="note">开通即从组织金库为其划拨初始额度(所选档位额度);<b>金库余额不足会开通失败</b>,请先联系运营方充值。成员登录后在「我的令牌」自助创建 API 令牌。登录邮箱与初始密码开通后回显一次。</div>
+    <div class="errline" id="am_err"></div>`,
     `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doAddMember()">开通成员</button>`);
 }
 async function doAddMember() {
+  const name = val("am_n").trim();
+  const tid = parseInt(val("am_t"), 10) || 0;
+  if (!name) { setErr("am_err", "请填写姓名"); return; }
+  if (!tid) { setErr("am_err", "必须选择初始额度档位(决定初始划拨额度)"); return; }
   try {
-    const body = { name: val("am_n") };
-    const em = val("am_e").trim(); if (em) body.email = em; // T11:自定义登录名,留空后端 fallback
-    const t = val("am_t"); if (t) body.tier_id = parseInt(t);
-    const tm = val("am_team"); if (tm) body.team_id = parseInt(tm); // F2-1:开通时选团队(留空=未分组)
-    const d = await api("POST", "/organizations/" + S.orgId + "/members", body);
-    const keyRow = d.api_key
-      ? `<tr><td class="k">API Key</td><td><b>${esc(d.api_key)}</b> <span class="lk" onclick="navigator.clipboard&&navigator.clipboard.writeText('${jsstr(d.api_key)}');toast('已复制')">复制</span></td></tr>`
-      : `<tr><td class="k">API Key</td><td class="mini">已代发,员工登录后在“我的 API Key”查看并复制</td></tr>`; // A1:自助建 key 已下线,key 全程平台代发
-    modal("已开通 · 交付登录凭证", `<div class="note">以下凭证仅此一次显示,请交付员工本人,首次登录后请改密:</div>
+    const body = { name, tier_id: tid };
+    const em = val("am_e").trim(); if (em) body.email = em; // 留空后端自动生成
+    const tm = val("am_team"); if (tm) body.team_id = parseInt(tm, 10);
+    const d = await api("POST", "/orgs/" + S.orgId + "/members", body);
+    modal("已开通 · 交付登录凭证", `<div class="note">以下凭证仅此一次显示,请交付成员本人,首次登录后请改密:</div>
       <table class="kvtable">
         <tr><td class="k">登录邮箱</td><td>${esc(d.login_email)}</td></tr>
         <tr><td class="k">初始密码</td><td><b>${esc(d.initial_password)}</b></td></tr>
-        ${keyRow}
+        <tr><td class="k">API 令牌</td><td class="mini">成员登录后在「我的令牌」自助创建(分组限被授权范围)</td></tr>
       </table>`,
       `<button class="btn pri" onclick="closeM();renderView()">完成</button>`);
-  } catch (e) { toast(e.message); }
+  } catch (e) { setErr("am_err", e.message); toast(e.message); } // 金库不足等 409 原文展示
 }
-async function openBulk() {
-  let tiers = []; try { tiers = (await api("GET", "/organizations/" + S.orgId + "/tiers", null)) || []; } catch (e) {}
-  const opts = tiers.map(t => `<option value="${t.id}">${esc(t.name)}${t.is_default ? "(默认)" : ""}</option>`).join("");
-  modal("批量导入成员", `<div class="fld"><label>姓名(每行一个)</label><textarea id="bk_t" rows="6" placeholder="张三&#10;李四&#10;王五"></textarea></div>
-    <div class="fld"><label>统一档位</label><select id="bk_tier">${opts}</select></div>
-    <div class="note">逐个限速代发 key,逐行返回结果;同批重名跳过;部分失败不回滚已成功行。</div>`,
-    `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doBulk()">导入</button>`);
+// 追加划拨(33 §3.5 POST /members/:id/quota:grant):美元输入 → ×quota_per_unit 转 raw;走 Transfer 守恒记账。
+async function openGrant(mid, name) {
+  const bal = await api("GET", "/orgs/" + S.orgId + "/balance", null).catch(() => null);
+  const tre = bal ? rawOf(bal, "treasury_raw", "treasury_quota_raw") : null;
+  modal("划拨额度 · " + name, `
+    ${tre != null ? `<div class="note" style="margin-top:0">组织金库当前余额:<b>${money(tre)}</b></div>` : ""}
+    <div class="fld"><label>划拨金额(美元)</label><input id="gr_a" type="number" min="0" step="0.01" placeholder="10"></div>
+    <div class="fld"><label>原因(可选)</label><input id="gr_r" placeholder="赶项目临时追加"></div>
+    <div class="note">从组织金库划拨到该成员额度(金库减、成员加,每笔入分配账本);金库余额不足会失败。</div>
+    <div class="errline" id="gr_err"></div>`,
+    `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doGrant(${mid})">确认划拨</button>`);
 }
-async function doBulk() {
+async function doGrant(mid) {
+  const usd = parseFloat(val("gr_a"));
+  if (!(usd > 0)) { setErr("gr_err", "金额必须为正数"); return; }
   try {
-    const names = val("bk_t").split("\n").map(s => s.trim()).filter(Boolean);
-    const t = val("bk_tier"); const body = { names }; if (t) body.tier_id = parseInt(t);
-    const d = await api("POST", "/organizations/" + S.orgId + "/members:bulk", body);
-    const rows = (d.results || []).map(r => `<tr><td>${esc(r.name)}</td><td>${r.ok ? pill("成功", "ok") : pill("失败", "bad") + " " + esc(r.error || "")}</td></tr>`).join("");
-    modal("批量导入结果", `<div class="note">成功 ${d.success} · 失败 ${d.failed}</div><table>${rows}</table>`, `<button class="btn pri" onclick="closeM();renderView()">完成</button>`);
-  } catch (e) { toast(e.message); }
-}
-function openAdjust(mid) {
-  modal("临时调额", `<div class="fld"><label>调整量(美元,可负)</label><input id="aj_a" type="number" placeholder="10"></div>
-    <div class="fld"><label>生效时长</label><select id="aj_d"><option value="today">今日</option><option value="3d">3 天</option><option value="week">本周</option></select></div>
-    <div class="fld"><label>原因</label><input id="aj_r" placeholder="赶项目"></div>`,
-    `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doAdjust(${mid})">确认下发</button>`);
-}
-async function doAdjust(mid) {
-  try {
-    const usd = parseFloat(val("aj_a")) || 0;
-    await api("POST", "/members/" + mid + "/quota:adjust", { delta_quota: Math.round(usd * 500000), duration: val("aj_d"), reason: val("aj_r") });
-    closeM(); toast("已下发(到期自动回退)"); renderView();
-  } catch (e) { toast(e.message); }
+    await api("POST", "/members/" + mid + "/quota:grant", { amount_raw: usd2raw(usd), reason: val("gr_r").trim() || "manual_grant" });
+    closeM(); toast("已划拨 " + money(usd2raw(usd))); renderView();
+  } catch (e) { setErr("gr_err", e.message); toast(e.message); }
 }
 function openRename(mid, cur) {
   modal("修改成员显示名", `<div class="fld"><label>显示名</label><input id="rn_n" value="${esc(cur)}" placeholder="张三"></div>
@@ -1314,37 +1352,59 @@ async function doRename(mid) {
   catch (e) { toast(e.message); }
 }
 async function toggleMember(mid, enable) {
-  // 模型2 R5后:禁用=把 token 置禁用状态(**key 保留、启用即通、近实时生效**),不是删。删除走「离职」。
+  // 架构B:停用 = disable 成员 user(全部令牌近实时暂停,~60s TTL),额度保留;非 override(31-ADR §4.5)。
   if (!enable) {
-    return dangerConfirm("确认禁用员工?", `<p>禁用后该员工当前 API Key 会暂停调用,但 Key 本身保留。</p>
-      <p>后续重新启用后,仍使用同一枚 Key 恢复调用。若员工已经离职,请使用“离职”。</p>`,
-      "确认禁用", `doToggleMember(${mid},false)`);
+    return dangerConfirm("确认停用成员?", `<p>停用后该成员的<b>全部令牌</b>会暂停调用(约 1 分钟内生效),额度保留不动。</p>
+      <p>重新启用后即恢复调用。若成员已离职,请使用“离职”(会退回未用额度)。</p>`,
+      "确认停用", `doToggleMember(${mid},false)`);
   }
   return doToggleMember(mid, true);
 }
 async function doToggleMember(mid, enable) {
-  try { await api("POST", "/members/" + mid + "/status", { enabled: enable }); closeM(); toast(enable ? "已启用(同 key,立即通)" : "已禁用(key 保留,启用即通)"); renderView(); }
+  try { await api("POST", "/members/" + mid + "/status", { enabled: enable }); closeM(); toast(enable ? "已启用(令牌恢复调用)" : "已停用(全部令牌暂停,额度保留)"); renderView(); }
   catch (e) { toast(e.message); }
 }
-// 离职(危险):删 token + 软删转离职列表(与禁用区分清楚)。
+// 离职(涉钱,危险):disable-first → 静默 → 未用额度退回金库(33 §3.2 OffboardMember)。
 async function doOffboard(mid, name) {
-  return dangerConfirm("确认员工离职?", `<p>确认让「${esc(name)}」离职?</p>
-    <p>离职会删除该员工 API Key,调用立即失效,并转入离职列表。资料和历史记录保留,可恢复入职,但恢复后需要重建新 Key,旧 Key 不可恢复。</p>
-    <p>若只是临时停用,请使用“禁用”。</p>`, "确认离职", `doOffboardConfirmed(${mid})`);
+  return dangerConfirm("确认成员离职?", `<p>确认让「${esc(name)}」离职?</p>
+    <p>离职会:<b>停用其全部令牌</b>(调用近实时失效)→ 将其<b>未用完的额度退回组织金库</b>(每笔入分配账本)。</p>
+    <p>资料与历史记录保留;之后可“恢复入职”,但需重新选择档位、从金库重新划拨额度(不自动恢复原额度)。</p>
+    <p>若只是临时停用,请使用“停用”。</p>`, "确认离职", `doOffboardConfirmed(${mid})`);
 }
 async function doOffboardConfirmed(mid) {
-  try { await api("POST", "/members/" + mid + "/offboard", null); closeM(); toast("已离职(key 失效,转离职列表)"); renderView(); }
+  try { await api("POST", "/members/" + mid + "/offboard", null); closeM(); toast("已离职(令牌已停用,未用额度退回金库)"); renderView(); }
   catch (e) { toast(e.message); }
 }
-// 恢复入职:清软删置 active(员工自助重建 key,新 key)。
-async function doRestoreMember(mid, name) {
-  // A1(28):恢复时平台自动重建新 Key(不再依赖员工自助);统一走品牌 dangerConfirm。
-  dangerConfirm("恢复入职?", `<p>恢复「${esc(name)}」入职?</p><p>恢复后系统自动为其生成新 API Key(旧 Key 不可恢复),员工登录即可查看并复制。</p>`,
-    "确认恢复", `doRestoreMemberConfirmed(${mid})`);
+// 恢复入职(33 §3.5 POST /members/:id/restore {tier_id}):跟新建一样重新分配额度(离职已退额,不自动恢复)。
+async function openRestore(mid, name) {
+  let tiers = []; try { tiers = normList(await api("GET", "/orgs/" + S.orgId + "/tiers", null)); } catch (e) {}
+  const opts = tiers.map(t => `<option value="${t.id}">${esc(t.name)} · ${esc(tierQuotaLabel(t))}</option>`).join("");
+  modal("恢复入职 · " + name, `<div class="fld"><label>额度档位(必选)</label><select id="rs_t">${opts || `<option value="">(请先到「额度档位」建档位)</option>`}</select></div>
+    <div class="note">离职时额度已退回金库;恢复 = 跟新建一样,按所选档位从金库<b>重新划拨</b>额度。金库余额不足会失败。</div>
+    <div class="errline" id="rs_err"></div>`,
+    `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doRestore(${mid})">确认恢复</button>`);
 }
-async function doRestoreMemberConfirmed(mid) {
-  try { await api("POST", "/members/" + mid + "/restore", null); closeM(); toast("已恢复入职(新 Key 已生成)"); renderView(); }
-  catch (e) { toast(e.message); }
+async function doRestore(mid) {
+  const tid = parseInt(val("rs_t"), 10) || 0;
+  if (!tid) { setErr("rs_err", "请选择额度档位"); return; }
+  try { await api("POST", "/members/" + mid + "/restore", { tier_id: tid }); closeM(); toast("已恢复入职(额度已按档位重新划拨)"); renderView(); }
+  catch (e) { setErr("rs_err", e.message); toast(e.message); }
+}
+// 运营方:组织列表"金库"入口(GET /orgs/:id/balance 读求和实时值;operator 只看,不代充)。
+async function openOrgTreasury(id, name) {
+  try {
+    const b = await api("GET", "/orgs/" + id + "/balance", null);
+    const tre = rawOf(b, "treasury_raw", "treasury_quota_raw");
+    const msum = rawOf(b, "members_total_raw", "members_sum_raw", "members_quota_raw");
+    const totalRaw = rawOf(b, "total_raw");
+    const total = totalRaw != null ? totalRaw : ((tre != null && msum != null) ? tre + msum : null);
+    modal("组织金库 · " + name, `<table class="kvtable">
+      <tr><td class="k">金库余额</td><td><b>${tre != null ? money(tre) : "-"}</b></td></tr>
+      <tr><td class="k">成员额度合计</td><td>${msum != null ? money(msum) : "-"}</td></tr>
+      <tr><td class="k">组织总余额</td><td>${total != null ? money(total) : "-"}</td></tr></table>
+      <div class="note">读求和实时读 new-api(走 DB 不读缓存)。代充请在 new-api 侧对金库 user <b>增量代充</b>,单次不超 $4294(int32 上限,33 §8 运维注记)。</div>`,
+      `<button class="btn" onclick="closeM();S.pledgerOrg='${jsstr(String(id))}';S.pledgerPage=1;go('pledger')">查看该组织流水</button><button class="btn pri" onclick="closeM()">关闭</button>`);
+  } catch (e) { toast(e.message); }
 }
 VIEWS.teams = async () => {
   const d = await api("GET", "/organizations/" + S.orgId + "/teams", null);
@@ -1393,112 +1453,228 @@ async function openTeamUsage(tid, name) {
       `<button class="btn pri" onclick="closeM()">关闭</button>`);
   } catch (e) { toast(e.message); }
 }
+/* ---------- 架构B 档位(31-ADR §5 / 33 §3.5):额度型 + 额度 + 周期 + 分组 + 可用模型;授权到成员/团队 ---------- */
+const periodCN = p => ({ daily: "每日", weekly: "每周", monthly: "每月" })[p] || (p || "-");
+function tierQuotaLabel(t) {
+  const amt = money(rawOf(t, "amount_raw") || 0);
+  return t.quota_type === "subscription" ? ("订阅 " + amt + " / " + periodCN(t.reset_period)) : ("固定 " + amt);
+}
+function grantLabel(g, members, teams) {
+  const tt = g.target_type || g.type || "";
+  if (tt === "all") return "全员";
+  if (tt === "team") { const t = (teams || S.teamsCache || []).find(x => x.id === Number(g.target_id)); return "团队:" + (g.target_name || (t && t.name) || ("#" + g.target_id)); }
+  return "成员:" + (g.target_name || ("#" + g.target_id));
+}
+function grantChips(t) {
+  const gs = t.grants || [];
+  if (!gs.length) return '<span class="mini">未授权</span>';
+  return gs.slice(0, 3).map(g => `<span class="tag">${esc(grantLabel(g))}</span>`).join("") + (gs.length > 3 ? `<span class="mini"> 等 ${gs.length} 条</span>` : "");
+}
 VIEWS.tiers = async () => {
-  const d = await api("GET", "/organizations/" + S.orgId + "/tiers", null);
-  S.tiersCache = d || []; // 供编辑弹窗回填
-  try { S.billingGroups = (await api("GET", "/pricing/groups", null)) || []; } catch (e) { S.billingGroups = []; } // T17-6 计费分组
-  // 改动⑦补丁(灰度前阻断·产品总监逮出):MVP 下层级页藏掉钱字段(月额度/基础倍率/折后价),
-  // 只留层级名 + 模型分组 + 模型集(setup 部分,管理员要靠它把成员映射到模型分组);别藏整菜单否则没法建层级。
-  const rows = (d || []).map(t => `<tr><td>${esc(t.name)}${t.is_default ? ' <span class="tag">默认</span>' : ""}</td>
-    <td>${t.newapi_group ? esc(t.newapi_group) : '<span class="mini">默认</span>'}</td>
-    ${S.mvp ? "" : `<td>${t.monthly_limit_quota != null ? money(t.monthly_limit_quota) + " / 月" : '<span class="mini">不限</span>'}</td>`}
-    <td>${(t.model_set || []).map(m => `<span class="mcap">${esc(m)}</span>`).join("") || '<span class="mini">继承组织默认</span>'}</td>
-    <td class="right"><span class="btn sm" onclick="openEditTier(${t.id})">编辑</span> <span class="btn sm danger" onclick="doDeleteTier(${t.id},'${jsstr(t.name)}')">删除</span></td></tr>`).join("");
-  const tierColspan = S.mvp ? 4 : 5;
-  return head("可用模型档位", S.mvp ? "可复用档位 = 一组可用模型 + 模型清单(决定成员能调用哪些模型)" : "可复用档位 = 计费分组 + 模型清单 + 月额度")
+  const d = normList(await api("GET", "/orgs/" + S.orgId + "/tiers", null));
+  S.tiersCache = d; // 供编辑/授权弹窗回填
+  // 分组下拉数据源 = 组织模型广场(GET /orgs/:id/marketplace,分组+倍率;33 §12 增补②)。
+  try { S.orgGroups = marketGroups(await api("GET", "/orgs/" + S.orgId + "/marketplace", null)); } catch (e) { S.orgGroups = []; }
+  const rows = d.map(t => {
+    const sub = t.quota_type === "subscription";
+    return `<tr><td>${esc(t.name)}${t.is_default ? ' <span class="tag">默认</span>' : ""}</td>
+      <td>${sub ? pill("订阅 · " + periodCN(t.reset_period), "ok") : pill("固定/单次", "mut")}</td>
+      <td class="right"><b>${money(rawOf(t, "amount_raw") || 0)}</b>${sub ? `<div class="mini">每${periodCN(t.reset_period)}补满到该值</div>` : ""}</td>
+      <td>${t.group ? `<span class="group-badge" title="${esc(t.group)}">${esc(t.group)}</span>` : '<span class="mini">-</span>'}</td>
+      <td>${(t.model_limits || t.model_set || []).map(m => `<span class="mcap">${esc(m)}</span>`).join("") || '<span class="mini">分组内全部模型</span>'}</td>
+      <td>${grantChips(t)}</td>
+      <td class="right table-actions">
+        <span class="btn sm" onclick="openTierGrants(${t.id},'${jsstr(t.name)}')">授权</span>
+        <span class="btn sm" onclick="openEditTier(${t.id})">编辑</span>
+        <span class="btn sm danger" onclick="doDeleteTier(${t.id},'${jsstr(t.name)}')">删除</span></td></tr>`;
+  }).join("");
+  return head("额度档位", "档位 = 额度型 + 额度 + 周期 + 分组 + 可用模型;开通 / 恢复成员时按档位从金库划拨额度")
     + `<div class="tier-intro">
         <div class="tier-intro-t">档位是什么</div>
-        <div class="tier-intro-b">档位 = 一张“员工套餐模板卡”,预先设好【计费分组 + 可用模型清单${S.mvp ? "" : " + 月额度"}】。建档时<b>不会产生任何实际变更</b>,只是存一张模板;真正生效是在<b>开通员工、发 Key 那一刻</b>,把这张卡的内容下发到该员工的 Key 上。计费分组是从平台已有分组里<b>选</b>(企业侧不新建分组)。</div>
+        <div class="tier-intro-b">档位是组织给成员配额度的<b>套餐</b>:【固定/单次】一次划一笔,用完组织再给;【订阅/周期】每日/每周/每月把成员额度<b>补满到目标值</b>(没用完不累积,组织只付实际消耗)。额度必设、必须正数、<b>没有“无上限”</b>——它就是成员刷不掉的硬限额。分组 + 可用模型决定成员建令牌时能选的范围;档位需先<b>授权</b>到成员或团队,成员建令牌的分组只能从被授权档位里选。</div>
       </div>
       <div class="toolbar"><button class="btn pri" onclick="openCreateTier()">+ 新建档位</button></div>
-    <div class="panel"><div class="table-scroll"><table><thead><tr><th>档位</th><th>模型分组</th>${S.mvp ? "" : "<th>月额度</th>"}<th>模型清单</th><th></th></tr></thead><tbody>${rows || `<tr><td colspan=${tierColspan}>${emptyState("◆", "还没有可用模型档位", "先建一个档位,决定成员能调用哪些模型", "+ 新建档位", "openCreateTier()")}</td></tr>`}</tbody></table></div></div>`;
+    <div class="panel"><div class="table-scroll"><table class="tier-table"><colgroup><col class="t-name"><col class="t-type"><col class="t-amount"><col class="t-group"><col class="t-models"><col class="t-grants"><col class="t-actions"></colgroup><thead><tr><th>档位</th><th>额度型</th><th class="right">额度</th><th>分组</th><th>可用模型</th><th>已授权</th><th></th></tr></thead><tbody>${rows || `<tr><td colspan=7>${emptyState("◆", "还没有额度档位", "先建档位(额度型+额度+分组+模型),开通成员时必选一个作为初始额度", "+ 新建档位", "openCreateTier()")}</td></tr>`}</tbody></table></div></div>`;
 };
-// groupSelectHTML 计费分组下拉(T17-6):来源实时拉的 /pricing/groups,选项带基础倍率;空=回落默认。
-function groupSelectHTML(selId, selected) {
-  const opts = [`<option value="">默认(回落组织默认${S.mvp ? "分组" : "/标准价"})</option>`].concat(
-    (S.billingGroups || []).map(g => `<option value="${esc(g.group)}" ${g.group === selected ? "selected" : ""}>${esc(g.group)}${S.mvp ? "" : `(基础倍率 ${g.ratio})`}</option>`));
-  return `<div class="fld"><label>模型分组(决定成员可用哪些模型${S.mvp ? "" : "与收费倍率"})</label>
-    <select id="${selId}" onchange="tierGroupHint('${selId}')">${opts.join("")}</select>
-    <div class="mini" id="${selId}_hint" style="margin-top:4px"></div></div>`;
+// 档位表单(建/编辑共用):额度型二选一(无无上限)、额度美元必填正数、周期仅订阅、分组=组织广场分组、可用模型可选。
+function tierFormHTML(p, t) {
+  t = t || {};
+  const sub = t.quota_type === "subscription";
+  const amtRaw = rawOf(t, "amount_raw");
+  const gopts = ['<option value="">(请选择分组)</option>'].concat(
+    (S.orgGroups || []).map(g => `<option value="${esc(g.group)}"${g.group === (t.group || "") ? " selected" : ""}>${esc(g.group)}${g.ratio != null ? `(倍率 ${esc(String(g.ratio))})` : ""}</option>`)).join("");
+  return `<div class="fld"><label>档位名称</label><input id="${p}_n" value="${esc(t.name || "")}" placeholder="标准档"></div>
+    <div class="fld"><label>额度型(二选一,无“无上限”)</label><select id="${p}_qt" onchange="document.getElementById('${p}_rpwrap').style.display=this.value==='subscription'?'':'none'">
+      <option value="fixed"${!sub ? " selected" : ""}>固定/单次(用完组织再给)</option>
+      <option value="subscription"${sub ? " selected" : ""}>订阅/周期(到期补满到目标,不累积)</option></select></div>
+    <div class="fld"><label>额度(美元,必填、正数;即成员硬限额)</label><input id="${p}_a" type="number" min="0" step="0.01" value="${amtRaw != null ? (amtRaw / (S.qpu || 500000)) : ""}" placeholder="150"></div>
+    <div id="${p}_rpwrap" style="display:${sub ? "" : "none"}"><div class="fld"><label>重置周期(自然边界,按组织时区)</label><select id="${p}_rp">
+      ${["daily", "weekly", "monthly"].map(x => `<option value="${x}"${(t.reset_period || "monthly") === x ? " selected" : ""}>${periodCN(x)}</option>`).join("")}</select></div></div>
+    <div class="fld"><label>分组(决定计价档与可用模型范围)</label><select id="${p}_g">${gopts}</select></div>
+    <div class="fld"><label>可用模型(逗号分隔,留空=分组内全部模型)</label><input id="${p}_m" value="${esc((t.model_limits || t.model_set || []).join(","))}" placeholder="gpt-4o,claude-sonnet-4-5"></div>
+    <div class="errline" id="${p}_err"></div>`;
 }
-function tierGroupHint(selId) {
-  const g = document.getElementById(selId).value;
-  const hint = document.getElementById(selId + "_hint");
-  if (!g) { hint.innerHTML = S.mvp ? "回落组织默认分组,所选模型须在该分组可用范围内" : "回落组织默认分组,所选模型须在该分组可用范围内"; return; }
-  const bg = (S.billingGroups || []).find(x => x.group === g);
-  if (!bg) { hint.innerHTML = ""; return; }
-  const ms = (bg.models || []);
-  const modelsTxt = `可用模型(${ms.length}):${ms.slice(0, 12).map(esc).join("、")}${ms.length > 12 ? " …" : ""}`;
-  // MVP:只展示可用模型,藏基础倍率/折后价(钱结构不给客户管理员看)。
-  hint.innerHTML = S.mvp ? `${modelsTxt}<br>所选模型须在该范围内(否则保存被拦)`
-    : `基础倍率 <b>${bg.ratio}</b> · ${modelsTxt}<br>模型清单须 ⊆ 该可用模型(否则保存被拦);折后价 = 基础倍率 × 客户折扣%`;
+function readTierForm(p) {
+  if (!val(p + "_n").trim()) return { err: "请填写档位名称" };
+  const usd = parseFloat(val(p + "_a"));
+  if (!(usd > 0)) return { err: "额度必须为正数(0 = 没有额度不能用,不是无限,不能填 0)" };
+  const g = val(p + "_g");
+  if (!g) return { err: "请选择分组" };
+  const qt = val(p + "_qt");
+  const body = {
+    name: val(p + "_n").trim(), quota_type: qt, amount_raw: usd2raw(usd), group: g,
+    model_limits: val(p + "_m").split(",").map(s => s.trim()).filter(Boolean),
+  };
+  if (qt === "subscription") body.reset_period = val(p + "_rp");
+  return { body };
+}
+function openCreateTier() {
+  modal("新建档位", tierFormHTML("ti") + `<div class="note">建档只是存套餐模板,此刻不动钱;开通/恢复成员选中它时才从金库划拨。成员额度受平台成员帽约束(默认 $1000,超帽会被拒)。</div>`,
+    `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doCreateTier()">创建</button>`);
+}
+async function doCreateTier() {
+  const r = readTierForm("ti"); if (r.err) { setErr("ti_err", r.err); return; }
+  try { await api("POST", "/orgs/" + S.orgId + "/tiers", r.body); closeM(); toast("已创建"); renderView(); }
+  catch (e) { setErr("ti_err", e.message); }
 }
 function openEditTier(tid) {
   const t = (S.tiersCache || []).find(x => x.id === tid); if (!t) return;
-  const ms = (t.model_set || []).join(",");
-  const mq = t.monthly_limit_quota != null ? (t.monthly_limit_quota / 500000) : "";
-  modal("编辑档位", `<div class="fld"><label>档位名称</label><input id="te_n" value="${esc(t.name)}"></div>
-    ${groupSelectHTML("te_g", t.newapi_group || "")}
-    ${S.mvp ? "" : `<div class="fld"><label>月额度(美元,成员当期上限基线)</label><input id="te_q" type="number" value="${mq}"></div>`}
-    <div class="fld"><label>模型清单(逗号分隔,留空=继承组织默认分组的可用模型)<span class="tip" title="决定该档位成员能调用哪些大模型,例如 GPT / Claude 系列" onclick="toast(this.title)">?</span></label><input id="te_m" value="${esc(ms)}"></div>
-    <div class="note">${S.mvp ? "改后该档位成员的可用模型清单随之更新。" : "改后引用该档位的成员当期上限按新档重算下发;改计费分组=改计价档(动钱相邻)。"}</div>`,
+  modal("编辑档位", tierFormHTML("te", t) + `<div class="note">订阅档改额度/周期,自下个周期起按新目标补满;固定档改额度不追溯已划拨成员(需要再给用「划拨额度」)。改分组会影响该档位成员建令牌时可选的分组。</div>`,
     `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doEditTier(${tid})">保存</button>`);
-  tierGroupHint("te_g");
 }
 async function doEditTier(tid) {
-  try {
-    const ms = val("te_m").split(",").map(s => s.trim()).filter(Boolean);
-    const body = { name: val("te_n"), model_set: ms, newapi_group: val("te_g") || null };
-    const q = parseFloat(val("te_q")); if (q > 0) body.monthly_limit = Math.round(q * 500000); // 留空=不改
-    await api("PUT", "/tiers/" + tid, body); closeM(); toast("已保存"); renderView();
-  } catch (e) { toast(e.message); }
+  const r = readTierForm("te"); if (r.err) { setErr("te_err", r.err); return; }
+  try { await api("PUT", "/tiers/" + tid, r.body); closeM(); toast("已保存"); renderView(); }
+  catch (e) { setErr("te_err", e.message); }
 }
 async function doDeleteTier(tid, name) {
-  // 28-建议批:删除是最重操作,统一走品牌 dangerConfirm(原来反而用最弱的原生 confirm)。
-  dangerConfirm("确认删除档位?", `<p>确认删除档位「${esc(name)}」?</p><p>被成员引用或为默认档将无法删除;删除不影响已开通成员的现有 Key。</p>`,
+  dangerConfirm("确认删除档位?", `<p>确认删除档位「${esc(name)}」?</p><p>被成员引用或为默认档将无法删除;删除不回收已划拨给成员的额度。</p>`,
     "确认删除", `doDeleteTierConfirmed(${tid})`);
 }
 async function doDeleteTierConfirmed(tid) {
   try { await api("DELETE", "/tiers/" + tid, null); closeM(); toast("已删除"); renderView(); }
   catch (e) { toast(e.message); }
 }
-function openCreateTier() {
-  modal("新建档位", `<div class="note">建档只是<b>存一张模板卡</b>,此刻不产生实际变更;开通员工时才把它下发到员工 Key 生效。</div>
-    <div class="fld"><label>档位名称</label><input id="ti_n" placeholder="标准档"></div>
-    ${groupSelectHTML("ti_g", "")}
-    ${S.mvp ? "" : `<div class="fld"><label>月额度(美元,成员当期上限基线)</label><input id="ti_q" type="number" placeholder="50"></div>`}
-    <div class="fld"><label>模型清单(逗号分隔,留空=继承组织默认分组的可用模型)<span class="tip" title="决定该档位成员能调用哪些大模型,例如 GPT / Claude 系列" onclick="toast(this.title)">?</span></label><input id="ti_m" placeholder="gpt-4o,claude-sonnet-4-5-20250929"></div>
-    <div class="note">${S.mvp ? "模型分组决定成员可用哪些模型;所选模型须在该分组可用范围内(否则保存被拦)。" : "模型分组决定可用模型与计价;所选模型须在该分组可用范围内(否则保存被拦)。"}</div>`,
-    `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doCreateTier()">创建</button>`);
-  tierGroupHint("ti_g");
+// 档位授权(33 §3.5 POST/DELETE /tiers/:id/grants,target=member/team):全员 / 指定成员 / 指定团队。
+// 注:现有授权清单随 tier.grants 带出、"全员"target_type=all —— 两处契约未明写,已记交付说明待组长裁定。
+async function openTierGrants(tid, name) {
+  const t = (S.tiersCache || []).find(x => x.id === tid) || {};
+  let members = [], teams = S.teamsCache || [];
+  try { members = (await api("GET", "/orgs/" + S.orgId + "/members?page=1&page_size=200", null)).list || []; } catch (e) {}
+  if (!teams.length) { try { teams = (await api("GET", "/organizations/" + S.orgId + "/teams", null)) || []; } catch (e) {} }
+  const grants = t.grants || [];
+  const cur = grants.length
+    ? grants.map(g => `<span class="tag">${esc(grantLabel(g, members, teams))} <span class="lk" onclick="doDeleteGrant(${tid},${Number(g.id) || 0},'${jsstr(g.target_type || g.type || "")}',${Number(g.target_id) || 0})" title="取消该授权">×</span></span>`).join(" ")
+    : '<span class="mini">尚未授权;未被授权的成员不能被配到此档位、也选不到它的分组</span>';
+  const mopts = members.filter(m => m.status !== "offboarded" && m.role !== "org_admin" && m.role !== "operator").map(m => `<option value="${m.id}">${esc(m.display_name || m.login_email)}</option>`).join("");
+  const topts = (teams || []).filter(x => x.status !== "archived").map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join("");
+  modal("档位授权 · " + name, `
+    <div class="fld"><label>已授权</label><div>${cur}</div></div>
+    <div class="fld"><label>授权对象</label><select id="tg_type" onchange="document.getElementById('tg_mwrap').style.display=this.value==='member'?'':'none';document.getElementById('tg_twrap').style.display=this.value==='team'?'':'none'">
+      <option value="member">指定成员</option><option value="team">指定团队</option><option value="all">全员</option></select></div>
+    <div class="fld" id="tg_mwrap"><label>成员</label><select id="tg_m">${mopts || '<option value="">(暂无成员)</option>'}</select></div>
+    <div class="fld" id="tg_twrap" style="display:none"><label>团队</label><select id="tg_t">${topts || '<option value="">(暂无团队)</option>'}</select></div>
+    <div class="note">成员建令牌时,分组<b>只能</b>从被授权档位覆盖的分组里选(31-ADR §5 护栏);成员可选的档位 = 被授权的并集。</div>
+    <div class="errline" id="tg_err"></div>`,
+    `<button class="btn" onclick="closeM()">关闭</button><button class="btn pri" onclick="doAddGrant(${tid})">添加授权</button>`);
 }
-async function doCreateTier() {
-  try {
-    const ms = val("ti_m").split(",").map(s => s.trim()).filter(Boolean);
-    const body = { name: val("ti_n"), model_set: ms };
-    const g = val("ti_g"); if (g) body.newapi_group = g;
-    const q = parseFloat(val("ti_q")); if (q > 0) body.monthly_limit = Math.round(q * 500000);
-    await api("POST", "/organizations/" + S.orgId + "/tiers", body); closeM(); toast("已创建"); renderView();
-  } catch (e) { toast(e.message); }
+async function doAddGrant(tid) {
+  const type = val("tg_type");
+  const body = { target_type: type };
+  if (type === "member") body.target_id = parseInt(val("tg_m"), 10) || 0;
+  if (type === "team") body.target_id = parseInt(val("tg_t"), 10) || 0;
+  if (type !== "all" && !body.target_id) { setErr("tg_err", "请选择授权对象"); return; }
+  try { await api("POST", "/tiers/" + tid + "/grants", body); closeM(); toast("已授权"); renderView(); }
+  catch (e) { setErr("tg_err", e.message); }
 }
-// v1 裁定A(20-§2.1):额度审批(VIEWS.approvals/decide)与申请增额(VIEWS.myreq)前端隐藏——v2 配额功能,从 git 历史恢复。
+async function doDeleteGrant(tid, gid, type, targetId) {
+  const body = gid > 0 ? { grant_id: gid } : { target_type: type, target_id: targetId };
+  try { await api("DELETE", "/tiers/" + tid + "/grants", body); closeM(); toast("已取消授权"); renderView(); }
+  catch (e) { toast(e.message); }
+}
+/* ---------- 架构B 余额与账本(31-ADR §15):金库 + 各成员额度 + 划拨流水;方向绿=金库→成员入账、橙=退额 ---------- */
+function ledgerReasonCN(r) {
+  return ({
+    initial: "初始额度", initial_grant: "初始额度", grant: "追加划拨", manual_grant: "追加划拨",
+    topup: "订阅补满", subscription_topup: "订阅补满", offboard_refund: "离职退额", refund: "退额",
+    restore: "恢复分配", restore_grant: "恢复分配", reconcile: "对账补齐",
+  })[String(r || "").toLowerCase()] || (r || "-");
+}
+// 方向推断:优先 direction 字段;否则按 reason 语义 / 金额符号(契约 0031 未明写方向字段,缺口见交付说明)。
+function ledgerDir(x) {
+  const d = String(x.direction || "").toLowerCase();
+  if (d) return (d === "refund" || d === "out" || d === "member_to_org" || d === "to_treasury") ? "out" : "in";
+  const r = String(x.reason || "").toLowerCase();
+  if (r.indexOf("refund") >= 0 || r.indexOf("offboard") >= 0 || r.indexOf("退") >= 0) return "out";
+  if (Number(rawOf(x, "amount_raw")) < 0) return "out";
+  return "in";
+}
+function ledgerStatusPill(s) {
+  s = String(s || "applied");
+  return s === "applied" ? pill("已入账", "ok") : s === "pending" ? pill("处理中", "warn") : pill("失败", "bad");
+}
+// ledgerRows:三视角共用流水行。view=org(组织流水)/me(成员到账)/platform(全平台)。
+function ledgerRows(list, view) {
+  const cols = view === "platform" ? 7 : view === "me" ? 5 : 6;
+  if (!list || !list.length) return `<tr><td colspan="${cols}" class="empty">暂无划拨流水</td></tr>`;
+  return list.map(x => {
+    const dir = ledgerDir(x);
+    const amt = Math.abs(Number(rawOf(x, "amount_raw")) || 0);
+    const who = x.member_name || x.member_display_name || (x.member_id ? "成员#" + x.member_id : "-");
+    const dirHtml = view === "me"
+      ? (dir === "in" ? `<span class="ldg-in">到账(金库 → 我)</span>` : `<span class="ldg-out">退回金库</span>`)
+      : (dir === "in" ? `<span class="ldg-in">金库 → 成员</span>` : `<span class="ldg-out">成员 → 金库</span>`);
+    const amtHtml = dir === "in" ? `<span class="ldg-in">+${money(amt)}</span>` : `<span class="ldg-out">-${money(amt)}</span>`;
+    const cells = [`<td class="mini">${fmtTs(x.created_at)}</td>`];
+    if (view === "platform") cells.push(`<td><span class="cell-clip" title="${esc(x.org_name || ("组织#" + (x.org_id || "-")))}">${esc(x.org_name || ("组织#" + (x.org_id || "-")))}</span></td>`);
+    if (view !== "me") cells.push(`<td><span class="cell-clip" title="${esc(who)}">${esc(who)}</span></td>`);
+    cells.push(`<td>${dirHtml}</td>`, `<td class="right">${amtHtml}</td>`, `<td class="mini">${esc(ledgerReasonCN(x.reason))}</td>`, `<td>${ledgerStatusPill(x.status)}</td>`);
+    return `<tr>${cells.join("")}</tr>`;
+  }).join("");
+}
+function goLedgerPage(p) { S.ledgerPage = Math.max(1, p); renderView(); }
 VIEWS.billing = async () => {
   const id = S.orgId;
-  // v1(19-F3/F6):余额=读求和实时读 new-api;充值在 new-api 完成,平台无充值入口/不记充值流水;
-  // 藏价(19-F7):不展示折扣/倍率/计费设置。订阅计费组织显示"订阅计费(无钱包余额)"。
-  const [bal, usage] = await Promise.all([
-    api("GET", "/organizations/" + id + "/balance", null).catch(() => ({ __err: true })),
-    api("GET", "/organizations/" + id + "/usage?since_hours=" + S.win, null).catch(() => ({ total_quota: 0, by_model: [] })),
+  const page = S.ledgerPage || 1;
+  const [bal, led] = await Promise.all([
+    api("GET", "/orgs/" + id + "/balance", null).catch(() => ({ __err: true })),
+    api("GET", "/orgs/" + id + "/ledger?page=" + page + "&page_size=50", null).catch(() => ({ list: [], pagination: {} })),
   ]);
-  const isSub = bal.billing_kind === "subscription";
-  const balCards = isSub
-    ? kpi("计费方式", "订阅计费", "该组织按订阅计费,无钱包余额;用量报表照常")
-    : kpi("可用余额", balMoney(bal), "实时读取,消费即时反映");
-  return head("余额", isSub ? "订阅计费组织:无钱包余额,用量见概览" : "可用余额实时读取;充值请联系运营方")
-    + `<div class="cards">${balCards}${kpi(winLabel(S.win) + "消耗", money(usage.total_quota || 0), "来自当前组织调用记录")}${kpi("涉及模型", String((usage.by_model || []).length), winLabel(S.win))}</div>
-    <div class="panel"><div class="ph">说明</div><div class="pb"><div class="note">
-      余额为实时值,员工调用后即时下降。${isSub ? "" : "需要充值请联系运营方。"}充值到账后此处自动反映,无需操作。
-    </div><div class="toolbar" style="margin-top:12px"><button class="btn" onclick="go('dash')">查看用量概览</button></div></div></div>`;
+  const tre = bal.__err ? null : rawOf(bal, "treasury_raw", "treasury_quota_raw", "available_quota");
+  const msum = bal.__err ? null : rawOf(bal, "members_total_raw", "members_sum_raw", "members_quota_raw");
+  const totalRaw = bal.__err ? null : rawOf(bal, "total_raw");
+  const total = totalRaw != null ? totalRaw : ((tre != null && msum != null) ? tre + msum : null);
+  const low = !bal.__err && (bal.low === true || bal.treasury_low === true);
+  const lowBar = low ? `<div class="note" style="background:var(--warnbg);border-color:#fde68a;color:#92400e;margin:0 0 14px"><b>组织余额不足,请联系管理员充值。</b>金库偏低时,开通成员 / 划拨额度 / 订阅补满可能失败。</div>` : "";
+  // 各成员额度:balance 若带 members 明细直接用,否则回退成员列表端点(同一 *_raw 口径)。
+  let mlist = (!bal.__err && (bal.members || bal.member_quotas)) || null;
+  if (!mlist) { try { mlist = (await api("GET", "/orgs/" + id + "/members?page=1&page_size=50", null)).list || []; } catch (e) { mlist = []; } }
+  const mrows = (mlist || []).filter(m => m.role !== "org_admin" && m.role !== "operator").map(m => {
+    const remain = rawOf(m, "quota_raw", "remaining_raw", "remain_raw");
+    const used = rawOf(m, "used_raw", "used_quota_raw");
+    const nm = m.display_name || m.name || m.login_email || ("成员#" + (m.member_id || m.id));
+    return `<tr><td><span class="cell-clip" title="${esc(nm)}">${esc(nm)}</span></td>
+      <td>${pill(memberStatusCN(m.status), m.status === "active" ? "ok" : "mut")}</td>
+      <td class="right">${used != null ? money(used) : "-"}</td>
+      <td class="right"><b>${remain != null ? money(remain) : "-"}</b></td></tr>`;
+  }).join("");
+  const list = led.list || led.items || [];
+  const ltotal = (led.pagination || led.page || {}).total || list.length;
+  const maxPage = Math.max(1, Math.ceil(ltotal / 50));
+  return head("余额与账本", "组织金库 + 各成员额度(读求和实时值)· 每笔金库↔成员划拨都有流水")
+    + lowBar
+    + `<div class="cards">
+      ${kpi("金库余额", tre != null ? money(tre) : "暂不可用", "组织的钱池子;充值请联系运营方")}
+      ${kpi("成员额度合计", msum != null ? money(msum) : "-", "已划到各成员、尚未消耗的额度")}
+      ${kpi("组织总余额", total != null ? money(total) : "-", "金库 + 成员额度合计")}
+    </div>
+    <div class="panel"><div class="ph">各成员额度</div><div class="pb"><div class="table-scroll"><table class="kvtable"><tr><td class="k">成员</td><td class="k">状态</td><td class="right k">已用</td><td class="right k">剩余额度</td></tr>${mrows || `<tr><td colspan="4" class="empty">暂无成员</td></tr>`}</table></div><div class="mini" style="margin-top:8px">此处最多显示 50 人;完整成员额度管理与翻页见「成员」页。</div></div></div>
+    <div class="panel"><div class="ph">划拨流水(分配账本)</div><div class="pb">
+      <div class="table-scroll"><table class="kvtable"><tr><td class="k">时间</td><td class="k">成员</td><td class="k">方向</td><td class="right k">金额</td><td class="k">原因</td><td class="k">状态</td></tr>${ledgerRows(list, "org")}</table></div>
+      <div class="pager" style="justify-content:flex-end;margin-top:10px"><span class="mini">共 ${ltotal} 笔 · 第 ${page}/${maxPage} 页</span>
+        <button onclick="goLedgerPage(${page - 1})" ${page <= 1 ? "disabled" : ""}>上一页</button>
+        <button onclick="goLedgerPage(${page + 1})" ${page >= maxPage ? "disabled" : ""}>下一页</button></div>
+    </div></div>`;
 };
 
 /* ===================== 成员 ===================== */
@@ -1536,37 +1712,254 @@ VIEWS.myusage = async () => {
     <div class="panel"><div class="ph">按模型</div><div class="pb">${bars}</div></div>
     <div class="panel"><div class="ph">最近调用(共 ${dTotal} 条,显示最近 ${dRecords.length})</div><div class="pb" style="max-height:360px;overflow:auto">${detailTable(dRecords)}</div></div>`;
 };
-VIEWS.mykey = async () => {
-  const m = await api("GET", "/members/" + S.me.id, null);
-  const key = m.key_masked || "-";
-  // F3(28):员工自助闭环——补接入地址 + 调用示例 + 本人可用范围,拿到 key 就知道怎么用、能调什么。
-  const gw = (S.me && S.me.gateway_base_url || "").replace(/\/+$/, "");
-  const gwBlock = gw ? `<div class="panel"><div class="ph">接入地址</div><div class="pb">
-      <table class="kvtable">
-        <tr><td class="k">Base URL</td><td><b>${esc(gw)}</b> ${copyBtn(gw, "接入地址")}</td></tr>
-        <tr><td class="k">OpenAI 兼容端点</td><td>${esc(gw)}/v1/chat/completions</td></tr>
-      </table>
-      <div class="note" style="margin-top:10px">调用示例(把 <b>&lt;你的Key&gt;</b> 换成上方"复制完整"取得的 Key):</div>
-      <pre class="codebox">curl ${esc(gw)}/v1/chat/completions \\
-  -H "Authorization: Bearer &lt;你的Key&gt;" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model":"${esc((m.model_set || [])[0] || "gpt-4o")}","messages":[{"role":"user","content":"你好"}]}'</pre>
-    </div></div>` : "";
-  const models = (m.model_set || []).map(x => `<span class="mcap">${esc(x)}</span>`).join("")
-    || '<span class="mini">按组织默认分组的可用范围</span>';
-  const rangeBlock = `<div class="panel"><div class="ph">我的可用范围</div><div class="pb"><table class="kvtable">
-      ${m.tier_name ? `<tr><td class="k">档位</td><td>${esc(m.tier_name)}</td></tr>` : ""}
-      <tr><td class="k">可用模型</td><td>${models}</td></tr>
-    </table></div></div>`;
-  return head("我的 API Key", "用于在 Claude Code、Codex、OpenAI SDK 等工具中访问本企业已开放的模型")
-    + `<div class="panel"><div class="pb">
-      <div class="keybox"><span>${esc(key)}</span>${revealKeyBtn(S.me.id, "我的 API Key")}</div>
-      <div class="note">页面只展示脱敏串;点"复制完整"可取本人明文 Key 用于配置工具。Key 由平台在开通时生成,生成后不可修改;如需更换 Key 请联系管理员。</div>
-      <div class="toolbar" style="margin-top:14px"><button class="btn" onclick="go('logs')">查看使用日志</button></div>
-    </div></div>` + gwBlock + rangeBlock;
+/* ===================== 架构B 成员自助:我的令牌 / 额度与账本 / 模型广场 ===================== */
+// marketGroups:规整模型广场返回(容错数组或 {groups}/{list};模型项容错字符串或对象)。倍率照 new-api 普通用户可见口径展示。
+function marketGroups(d) {
+  if (!d) return [];
+  const arr = Array.isArray(d) ? d : (d.groups || d.list || []);
+  return arr.map(g => ({
+    group: g.group || g.name || "",
+    ratio: g.ratio != null ? g.ratio : g.group_ratio,
+    desc: g.desc || g.description || "",
+    models: (g.models || []).map(m => (typeof m === "string" ? m : (m.model_name || m.name || m.model || ""))).filter(Boolean),
+  })).filter(g => g.group);
 }
-// A1(28-§阻断):员工 key 纯只读——自助建/轮换 key、改 IP 白名单已整体下线(前端函数删除,后端对 member 一律 403)。
-// key 生命周期全程平台/管理员驱动:开通建、离职删、恢复重建;员工侧只读查看 + 复制完整(revealKeyBtn)。
+// 我的令牌(29-PRD §4.4,交互对齐 new-api 令牌管理):成员像 new-api 用户一样自管多令牌。
+// 端点:GET/POST /me/tokens、PATCH/DELETE /me/tokens/:id、POST /me/tokens/:id/key:reveal;分组下拉=GET /me/marketplace。
+VIEWS.mytokens = async () => {
+  const page = S.tokPage || 1;
+  const [d, mk] = await Promise.all([
+    api("GET", "/me/tokens?page=" + page + "&page_size=50", null),
+    api("GET", "/me/marketplace", null).catch(() => null),
+  ]);
+  S.myGroups = marketGroups(mk);
+  const list = d.list || d.items || (Array.isArray(d) ? d : []);
+  S.tokCache = list;
+  const total = (d.pagination || {}).total || list.length;
+  const maxPage = Math.max(1, Math.ceil(total / 50));
+  // 令牌数上限(默认 2,超管可配):优先取 /me/tokens 返回值,回退 /me 附带值;取不到不前端拦(后端 count+insert 事务兜底)。
+  const limit = Number(d.token_limit != null ? d.token_limit : (d.limit != null ? d.limit : (S.me && S.me.member_token_limit))) || 0;
+  const atCap = limit > 0 && total >= limit;
+  const rows = list.map(t => {
+    const nm = t.name || "-";
+    const quota = rawOf(t, "quota_raw", "limit_raw");
+    const remain = rawOf(t, "remain_raw", "remaining_raw", "remain_quota_raw");
+    const usedP = rawOf(t, "period_used_raw", "used_raw", "used_quota_raw");
+    const on = !(t.status === "disabled" || t.status === 2 || t.enabled === false);
+    return `<tr>
+      <td><span class="cell-clip" title="${esc(nm)}">${esc(nm)}</span></td>
+      <td class="mini key-copy"><span class="cell-clip" title="${esc(t.key_masked || "-")}">${esc(t.key_masked || "-")}</span><button class="btn micro reveal-key" onclick="revealTokenKey(${t.id},'${jsstr(nm)}')">复制完整</button></td>
+      <td><span class="group-badge" title="${esc(t.group || "-")}">${esc(t.group || "-")}</span></td>
+      <td class="right">${quota != null ? money(quota) : '<span class="mini">随成员额度</span>'}</td>
+      <td class="right">${remain != null ? money(remain) : "-"}</td>
+      <td class="mini"><span class="cell-clip" title="${esc(t.allow_ips || "")}">${esc(t.allow_ips || "不限")}</span></td>
+      <td>${on ? pill("启用", "ok") : pill("停用", "mut")}</td>
+      <td class="right">${usedP != null ? money(usedP) : "-"}</td>
+      <td class="right table-actions">
+        <span class="btn sm" onclick="openEditToken(${t.id})">编辑</span>
+        <span class="btn sm danger" onclick="doDeleteToken(${t.id},'${jsstr(nm)}')">删除</span></td></tr>`;
+  }).join("");
+  const capNote = atCap
+    ? `<span class="mini" style="color:var(--warn)">已达令牌数上限(${total}/${limit});删除旧令牌后才能新建,需更高上限请联系管理员</span>`
+    : (limit > 0 ? `<span class="mini">令牌数 ${total}/${limit}</span>` : "");
+  const pager = total > 50
+    ? `<div class="pager" style="justify-content:flex-end;margin-top:10px"><span class="mini">共 ${total} 个 · 第 ${page}/${maxPage} 页</span>
+        <button onclick="goTokPage(${page - 1})" ${page <= 1 ? "disabled" : ""}>上一页</button>
+        <button onclick="goTokPage(${page + 1})" ${page >= maxPage ? "disabled" : ""}>下一页</button></div>` : "";
+  return head("我的令牌", "自管多个 API 令牌(交互对齐 new-api);分组只能选被授权范围;Key 不可改,换 Key = 删了重建")
+    + `<div class="toolbar">${capNote}<div class="spacer"></div><button class="btn pri" ${atCap ? "disabled" : ""} onclick="openCreateToken()">+ 新建令牌</button></div>
+    <div class="panel"><div class="table-scroll"><table class="kvtable token-self-table"><colgroup><col class="ts-name"><col class="ts-key"><col class="ts-group"><col class="ts-quota"><col class="ts-remain"><col class="ts-ip"><col class="ts-status"><col class="ts-used"><col class="ts-actions"></colgroup><tr><td class="k">令牌名</td><td class="k">Key</td><td class="k">分组</td><td class="right k">令牌额度</td><td class="right k">剩余</td><td class="k">IP 白名单</td><td class="k">状态</td><td class="right k">本期用量</td><td class="right k"></td></tr>${rows || `<tr><td colspan="9">${emptyState("⚿", "还没有令牌", "创建你的第一个 API 令牌;分组只能从被授权的档位分组里选", atCap ? "" : "+ 新建令牌", "openCreateToken()")}</td></tr>`}</table></div>${pager}</div>`;
+};
+function goTokPage(p) { S.tokPage = Math.max(1, p); renderView(); }
+// 令牌表单(建/编辑共用):分组下拉只列被授权分组(GET /me/marketplace);编辑不含名称与 Key(PATCH 契约仅 分组/额度/IP)。
+function tokenFormHTML(p, t) {
+  t = t || {};
+  const q = rawOf(t, "quota_raw", "limit_raw");
+  const gopts = (S.myGroups || []).map(g => `<option value="${esc(g.group)}"${g.group === (t.group || "") ? " selected" : ""}>${esc(g.group)}${g.ratio != null ? `(倍率 ${esc(String(g.ratio))})` : ""}</option>`).join("");
+  return `${t.id ? "" : `<div class="fld"><label>令牌名</label><input id="${p}_n" placeholder="my-dev-key"></div>`}
+    <div class="fld"><label>分组(仅列你被授权的分组)</label><select id="${p}_g">${gopts || '<option value="">(暂无被授权分组,请联系管理员配置档位授权)</option>'}</select></div>
+    <div class="fld"><label>令牌额度(美元,可选;留空=不单独限额,仅受你的成员总额度约束)</label><input id="${p}_q" type="number" min="0" step="0.01" value="${q != null ? (q / (S.qpu || 500000)) : ""}"></div>
+    <div class="fld"><label>IP 白名单(可选,逗号分隔;留空=不限)</label><input id="${p}_ip" value="${esc(t.allow_ips || "")}" placeholder="1.2.3.4,10.0.0.0/8"></div>
+    <div class="errline" id="${p}_err"></div>`;
+}
+function openCreateToken() {
+  modal("新建令牌", tokenFormHTML("tk") + `<div class="note">创建后 Key 仅可查看/复制、<b>不可修改</b>;换 Key = 删除后重建。</div>`,
+    `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doCreateToken()">创建</button>`);
+}
+async function doCreateToken() {
+  const name = val("tk_n").trim();
+  if (!name) { setErr("tk_err", "请填写令牌名"); return; }
+  const g = val("tk_g");
+  if (!g) { setErr("tk_err", "请选择分组(需管理员先把档位授权给你)"); return; }
+  const body = { name, group: g };
+  const qs = val("tk_q").trim();
+  if (qs !== "") {
+    const q = parseFloat(qs);
+    if (!(q > 0)) { setErr("tk_err", "令牌额度须为正数,或留空表示不单独限额"); return; }
+    body.quota_raw = usd2raw(q);
+  }
+  const ip = val("tk_ip").trim(); if (ip) body.allow_ips = ip;
+  try {
+    const d = await api("POST", "/me/tokens", body);
+    closeM();
+    const k = d && (d.key || d.api_key);
+    if (k) {
+      modal("令牌已创建", `<div class="note">请复制保存;之后也可在列表点“复制完整”再次获取。</div><div class="keybox"><span>${esc(k)}</span>${copyBtn(k, "API Key")}</div>`,
+        `<button class="btn pri" onclick="closeM();renderView()">完成</button>`);
+    } else { toast("已创建"); renderView(); }
+  } catch (e) { setErr("tk_err", e.message); } // 上限满/分组越权等错误原文展示
+}
+function openEditToken(tid) {
+  const t = (S.tokCache || []).find(x => x.id === tid); if (!t) return;
+  modal("编辑令牌 · " + (t.name || ""), tokenFormHTML("tke", t) + `<div class="note">Key 不可修改;如需更换 Key,请删除该令牌后重建(名称亦不在可改范围)。</div>`,
+    `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doEditToken(${tid})">保存</button>`);
+}
+async function doEditToken(tid) {
+  const g = val("tke_g");
+  if (!g) { setErr("tke_err", "请选择分组"); return; }
+  const body = { group: g, allow_ips: val("tke_ip").trim() };
+  const qs = val("tke_q").trim();
+  if (qs !== "") {
+    const q = parseFloat(qs);
+    if (!(q > 0)) { setErr("tke_err", "令牌额度须为正数,或留空表示不单独限额"); return; }
+    body.quota_raw = usd2raw(q);
+  }
+  try { await api("PATCH", "/me/tokens/" + tid, body); closeM(); toast("已保存"); renderView(); }
+  catch (e) { setErr("tke_err", e.message); }
+}
+function doDeleteToken(tid, name) {
+  dangerConfirm("确认删除令牌?", `<p>确认删除令牌「${esc(name)}」?</p><p>删除后该 Key <b>立即失效且不可恢复</b>,正在使用它的工具会调用失败。如只是暂时不用,可保留不动。</p>`,
+    "确认删除", `doDeleteTokenConfirmed(${tid})`);
+}
+async function doDeleteTokenConfirmed(tid) {
+  try { await api("DELETE", "/me/tokens/" + tid, null); closeM(); toast("已删除"); renderView(); }
+  catch (e) { toast(e.message); }
+}
+// 额度与账本(成员):GET /me/balance(额度/已用/剩余)+ GET /me/ledger(给自己的到账记录,31-ADR §15)。
+VIEWS.mybalance = async () => {
+  const page = S.ledgerPage || 1;
+  const [bal, led] = await Promise.all([
+    api("GET", "/me/balance", null).catch(() => ({ __err: true })),
+    api("GET", "/me/ledger?page=" + page + "&page_size=50", null).catch(() => ({ list: [], pagination: {} })),
+  ]);
+  const remain = bal.__err ? null : rawOf(bal, "quota_raw", "remaining_raw", "remain_raw");
+  const used = bal.__err ? null : rawOf(bal, "used_raw", "used_quota_raw");
+  const grantedRaw = bal.__err ? null : rawOf(bal, "granted_raw", "total_granted_raw");
+  const granted = grantedRaw != null ? grantedRaw : ((remain != null && used != null) ? remain + used : null);
+  const usedUp = remain != null && remain <= 0;
+  const bar = usedUp ? `<div class="note" style="background:var(--badbg);border-color:#fecaca;color:#7f1d1d;margin:0 0 14px"><b>额度已用完,请联系管理员。</b>额度用完后你的所有令牌调用都会被拒绝;管理员追加划拨后即恢复。</div>` : "";
+  const list = led.list || led.items || [];
+  const ltotal = (led.pagination || led.page || {}).total || list.length;
+  const maxPage = Math.max(1, Math.ceil(ltotal / 50));
+  return head("额度与账本", "你的额度 / 已用 / 剩余(实时),以及组织给你的每笔到账记录")
+    + bar
+    + `<div class="cards">
+      ${kpi("累计划入", granted != null ? money(granted) : "-", "组织金库累计划拨给你的额度")}
+      ${kpi("已用", used != null ? money(used) : "-", "按实际调用扣减")}
+      ${kpi("剩余额度", remain != null ? money(remain) : "暂不可用", usedUp ? "额度已用完,请联系管理员" : "任一令牌消费都从这里扣")}
+    </div>
+    <div class="panel"><div class="ph">到账记录</div><div class="pb">
+      <div class="table-scroll"><table class="kvtable"><tr><td class="k">时间</td><td class="k">方向</td><td class="right k">金额</td><td class="k">原因</td><td class="k">状态</td></tr>${ledgerRows(list, "me")}</table></div>
+      <div class="pager" style="justify-content:flex-end;margin-top:10px"><span class="mini">共 ${ltotal} 笔 · 第 ${page}/${maxPage} 页</span>
+        <button onclick="goLedgerPage(${page - 1})" ${page <= 1 ? "disabled" : ""}>上一页</button>
+        <button onclick="goLedgerPage(${page + 1})" ${page >= maxPage ? "disabled" : ""}>下一页</button></div>
+    </div></div>`;
+};
+// 模型广场(29-PRD §4.6):org=组织可用范围(/orgs/:id/marketplace);member=被授权范围(/me/marketplace)。
+// 倍率正常展示——照 new-api 普通用户可见口径(31-ADR §9 镜像原则)。
+VIEWS.marketplace = async () => {
+  const isMember = S.role === "member";
+  const path = isMember ? "/me/marketplace" : "/orgs/" + S.orgId + "/marketplace";
+  const groups = marketGroups(await api("GET", path, null));
+  const panels = groups.map(g => `<div class="panel"><div class="ph">${esc(g.group)}<span class="mini" style="font-weight:400">计价倍率 ${g.ratio != null ? esc(String(g.ratio)) : "-"}</span></div>
+    <div class="pb">${g.desc ? `<div class="mini" style="margin-bottom:8px">${esc(g.desc)}</div>` : ""}${g.models.map(m => `<span class="mcap">${esc(m)}</span>`).join("") || '<span class="mini">该分组暂无模型</span>'}</div></div>`).join("");
+  return head("模型广场", isMember ? "你被授权的分组、模型与计价倍率(建令牌时只能选这些分组)" : "本组织可用的分组、模型与计价倍率(档位的分组从这里选)")
+    + (panels || `<div class="panel"><div class="pb">${emptyState("▦", "暂无可用分组", isMember ? "还没有档位授权给你,请联系管理员" : "请联系运营方为组织配置可用分组", "", "")}</div></div>`);
+};
+
+/* ===================== 运营方:平台账本 / 平台设置(架构B) ===================== */
+VIEWS.pledger = async () => {
+  const page = S.pledgerPage || 1;
+  const org = (S.pledgerOrg || "").trim();
+  const q = new URLSearchParams({ page: String(page), page_size: "50" });
+  if (org) q.set("org_id", org);
+  const d = await api("GET", "/ledger?" + q.toString(), null);
+  const list = d.list || d.items || [];
+  const total = (d.pagination || d.page || {}).total || list.length;
+  const maxPage = Math.max(1, Math.ceil(total / 50));
+  return head("平台账本", "全平台划拨流水(金库 ↔ 成员);守恒审计与排障入口,保留不少于 1 年")
+    + `<div class="toolbar log-filter"><input id="pl_org" class="fsel" value="${esc(org)}" placeholder="组织 ID" onkeydown="if(event.key==='Enter')applyPledgerFilter()">
+      <button class="btn sm" onclick="applyPledgerFilter()">筛选</button>
+      <button class="btn sm" onclick="S.pledgerOrg='';S.pledgerPage=1;renderView()">重置</button></div>
+    <div class="panel"><div class="pb">
+      <div class="table-scroll"><table class="kvtable"><tr><td class="k">时间</td><td class="k">组织</td><td class="k">成员</td><td class="k">方向</td><td class="right k">金额</td><td class="k">原因</td><td class="k">状态</td></tr>${ledgerRows(list, "platform")}</table></div>
+      <div class="pager" style="justify-content:flex-end;margin-top:10px"><span class="mini">共 ${total} 笔 · 第 ${page}/${maxPage} 页</span>
+        <button onclick="goPledgerPage(${page - 1})" ${page <= 1 ? "disabled" : ""}>上一页</button>
+        <button onclick="goPledgerPage(${page + 1})" ${page >= maxPage ? "disabled" : ""}>下一页</button></div>
+    </div></div>`;
+};
+function applyPledgerFilter() { S.pledgerOrg = val("pl_org").trim(); S.pledgerPage = 1; renderView(); }
+function goPledgerPage(p) { S.pledgerPage = Math.max(1, p); renderView(); }
+// 平台设置(33 §2-0033 / §3.5 GET/PUT /platform-settings):money_freeze 急停、令牌上限、成员帽、预警阈值;quota_per_unit 只读。
+VIEWS.psettings = async () => {
+  const ps = (await api("GET", "/platform-settings", null)) || {};
+  S.psettings = ps;
+  const qpu = Number(ps.quota_per_unit) || 0;
+  if (qpu > 0) S.qpu = qpu;
+  const freeze = ps.money_freeze === true || String(ps.money_freeze) === "true";
+  const cap = rawOf(ps, "member_quota_cap_raw");
+  const low = rawOf(ps, "treasury_low_watermark_raw");
+  const freezePanel = `<div class="panel ${freeze ? "danger-zone" : ""}"><div class="ph">钱动作急停(money_freeze)</div><div class="pb">
+    <div class="status-copy">当前状态:${freeze ? pill("已冻结", "bad") : pill("正常", "ok")}。开启后<b>全平台所有划拨动作立即拒绝</b>——建成员首笔划拨、追加划拨、订阅补满、离职退额、对账补齐写入,全部冻结(对账的读/检测/告警照常)。仅用于灰度资金事故一把止血,平时必须保持关闭。</div>
+    ${freeze
+      ? `<button class="btn pri" style="margin-top:12px" onclick="confirmMoneyFreeze(false)">解除急停(恢复划拨)</button>`
+      : `<button class="btn danger danger-solid" style="margin-top:12px" onclick="confirmMoneyFreeze(true)">开启急停(冻结所有钱动作)</button>`}
+  </div></div>`;
+  return head("平台设置", "平台级配置(KV);涉钱与额度上限,保存即刻全局生效")
+    + freezePanel
+    + `<div class="panel"><div class="ph">额度与预警</div><div class="pb">
+      <table class="kvtable" style="margin-bottom:12px">
+        <tr><td class="k">quota_per_unit(只读)</td><td><b>${qpu || "-"}</b><div class="mini">须与所连 new-api 实例一致(启动自检不一致拒启动,33 §3.6);当前换算 $1 = ${qpu || "-"} quota</div></td></tr>
+      </table>
+      <div class="fld" style="max-width:400px"><label>成员令牌数上限(member_token_limit,默认 2)</label><input id="pf_tl" type="number" min="1" step="1" value="${Number(ps.member_token_limit) || ""}"></div>
+      <div class="fld" style="max-width:400px"><label>成员额度帽(美元;member_quota_cap_raw,默认 $1000)</label><input id="pf_cap" type="number" min="0" step="1" value="${cap != null ? (cap / (S.qpu || 500000)) : ""}"><div class="mini" style="margin-top:4px">单成员持有额度上限;raw 不得超 int32(约 $4294,31-ADR §3 护栏)</div></div>
+      <div class="fld" style="max-width:400px"><label>金库低预警阈值(美元;treasury_low_watermark_raw)</label><input id="pf_low" type="number" min="0" step="1" value="${low != null ? (low / (S.qpu || 500000)) : ""}"><div class="mini" style="margin-top:4px">金库低于该值 → 预警组织管理员 + 运营方</div></div>
+      <button class="btn pri" onclick="doSavePlatformSettings()">保存</button>
+      <div class="errline" id="pf_err"></div>
+    </div></div>`;
+};
+function confirmMoneyFreeze(on) {
+  if (on) {
+    dangerConfirm("确认开启钱动作急停?", `<p style="color:var(--bad)"><b>这是全平台级红色开关。</b></p>
+      <p>开启后所有组织的划拨立即全部拒绝:开通成员、追加划拨、订阅补满、离职退额、对账补齐写入,全部冻结。</p>
+      <p>仅用于灰度期资金事故止血;处理完成后请尽快解除。</p>`, "确认冻结所有钱动作", "doMoneyFreeze(true)");
+  } else {
+    dangerConfirm("解除钱动作急停?", `<p>解除后划拨 / 订阅补满 / 退额恢复执行。</p>
+      <p>请确认事故已处理、对账(reconcile)漂移已收敛后再解除。</p>`, "确认解除", "doMoneyFreeze(false)");
+  }
+}
+async function doMoneyFreeze(on) {
+  try { await api("PUT", "/platform-settings", { money_freeze: on }); closeM(); toast(on ? "已开启急停:所有钱动作已冻结" : "已解除急停,划拨恢复"); renderView(); }
+  catch (e) { toast(e.message); }
+}
+async function doSavePlatformSettings() {
+  setErr("pf_err", "");
+  const body = {};
+  const tls = val("pf_tl").trim();
+  if (tls !== "") { const tl = parseInt(tls, 10); if (!(tl > 0)) { setErr("pf_err", "令牌数上限须为正整数"); return; } body.member_token_limit = tl; }
+  const capUsd = val("pf_cap").trim();
+  if (capUsd !== "") {
+    const c = parseFloat(capUsd);
+    if (!(c > 0)) { setErr("pf_err", "成员额度帽须为正数"); return; }
+    const raw = usd2raw(c);
+    if (raw > 2147483647) { setErr("pf_err", "额度帽 raw 超 int32 上限(约 $" + Math.floor(2147483647 / (S.qpu || 500000)) + "),请调低"); return; }
+    body.member_quota_cap_raw = raw;
+  }
+  const lowUsd = val("pf_low").trim();
+  if (lowUsd !== "") { const l = parseFloat(lowUsd); if (!(l >= 0)) { setErr("pf_err", "预警阈值须为非负数"); return; } body.treasury_low_watermark_raw = usd2raw(l); }
+  try { await api("PUT", "/platform-settings", body); toast("已保存"); renderView(); }
+  catch (e) { setErr("pf_err", e.message); }
+}
 VIEWS.mynotif = async () => {
   // B2(28):分页,>30 条历史通知不再永久不可达;未读单条可点已读(后端 /notifications/{id}/read 本就支持)。
   const page = S.notifPage || 1, size = 30;

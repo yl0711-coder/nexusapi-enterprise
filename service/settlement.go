@@ -329,24 +329,6 @@ func (s *Service) RunSettlement(ctx context.Context) (int64, error) {
 	return totalSettled, nil
 }
 
-// convergeOrgQuotas 对组织全部就绪成员经唯一下发出口 applyMemberOverride 重算下发(GZ-04 方案②即时收敛触发):
-// 用于 recomputeOrgStatus 翻 stopped 进/出旗标后让硬停(→0)/恢复(→正常额)当拍生效。
-// 硬停值由 applyMemberOverride 内的 gateByOrgStatus 按组织状态统一决策,故仍是单写者、不与 quota-worker 对撞
-// (取代旧 hardStopOrg/restoreOrgQuotas 的"直接写0/直接下发"——那是绕过单一出口的双写者隐患,已删)。
-func (s *Service) convergeOrgQuotas(ctx context.Context, orgID int64) {
-	members, err := s.store.ListActiveOverridableMembers(ctx, orgID)
-	if err != nil {
-		s.log.Error("即时收敛:列成员失败", "org_id", orgID, "err", err)
-		return
-	}
-	for _, m := range members {
-		if _, err := s.applyMemberOverride(ctx, m); err != nil {
-			s.log.Error("即时收敛:下发成员 quota 失败", "org_id", orgID, "member_id", m.ID, "err", err)
-		}
-	}
-	s.auditSystem(ctx, orgID, "converge_quota", "organization", &orgID, map[string]any{"members": len(members)}, "ok")
-}
-
 // checkModelSoftLimit 检测某成员某模型今日累计是否刚跨过层级 model_cap;跨过则告警(E4,默认仅告警)。
 // "收该模型权限"作可配升级项(改令牌 model_limits 去掉该模型),本期仅告警避免 logs 滞后误伤。
 func (s *Service) checkModelSoftLimit(ctx context.Context, a *bucketAgg) {

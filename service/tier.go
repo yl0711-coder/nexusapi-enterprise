@@ -193,16 +193,8 @@ func (s *Service) UpdateTier(ctx context.Context, c session.Claims, orgID, tierI
 		}
 		return nil, apperr.Internal("").WithCause(err)
 	}
-	// 改层级后:对引用该层级、已就绪的成员重算 override 下发(当期上限按新档,best-effort)。
-	if members, lerr := s.store.ListMembersByTier(ctx, orgID, tierID); lerr == nil {
-		for _, m := range members {
-			if m.BootstrapState == model.BootstrapDone && m.NewapiTokenID != nil {
-				if _, aerr := s.applyMemberOverride(ctx, m); aerr != nil {
-					s.log.Error("改层级后成员 override 重算失败(待对账/重试)", "member_id", m.ID, "tier_id", tierID, "err", aerr)
-				}
-			}
-		}
-	}
+	// 架构B:改层级模板只改后续分配口径,不回溯已分配成员的 user.quota(A 版 override 重算已退役;
+	// 需调整成员额度走显式 quota:grant→Transfer)。
 	s.audit(ctx, c, orgID, "update_tier", "tier", &tierID, map[string]any{"name": t.Name})
 	out, err := s.store.GetTier(ctx, orgID, tierID)
 	if err != nil {

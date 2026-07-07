@@ -135,20 +135,9 @@ func (s *Service) UpdateMember(ctx context.Context, c session.Claims, orgID, mem
 	if err := s.store.UpdateMemberTeamTier(ctx, orgID, memberID, teamID, tierID); err != nil {
 		return nil, apperr.Internal("").WithCause(err)
 	}
-	// 改团队或层级 → 重算 override:团队级显式策略与团队默认档都进基线(resolveBaseQuota),
-	// 故改 team 同样会变基线,不能只在改 tier 时重算(否则 new-api quota 留旧团队基线,直到下次 reset 才自愈)。
-	// nil=未改(UpdateMemberTeamTier 用 COALESCE 不动该列),只在非 nil 时同步内存态 m,保持与 DB 一致。
-	if teamID != nil {
-		m.TeamID = teamID
-	}
-	if tierID != nil {
-		m.TierID = tierID
-	}
-	if teamID != nil || tierID != nil {
-		if _, err := s.applyMemberOverride(ctx, m); err != nil {
-			s.log.Warn("改团队/层级后重算 override 失败", "member_id", memberID, "err", err)
-		}
-	}
+	// 架构B:改团队/层级只更新平台侧关联;成员额度=其 new-api user.quota,不随改档自动调整,
+	// 需显式 quota:grant(GrantMemberQuota→Transfer,金库↔成员)重新分配(A 版 override 回溯已退役)。
+	_ = m // m 仅用于前置校验;架构B 下改档不再据其重算下发
 	s.audit(ctx, c, orgID, "update_member", "member", &memberID, map[string]any{"team_id": teamID, "tier_id": tierID, "renamed": displayName != nil})
 	return s.store.GetMember(ctx, orgID, memberID)
 }

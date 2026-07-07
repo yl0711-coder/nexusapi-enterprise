@@ -11,6 +11,10 @@ import (
 // ResetDuePolicies 是周期重置(03 §3.3,leader 单写者):按 quota_policy 的 period 算当期重置边界,
 // 跨过边界且本期未重置的策略 → 对其 scope 内成员重算 override 下发(把当期上限设回基线)。
 // 返回本次重置的成员数。时区精化(reset_anchor 的 HH:MM / 按组织时区)为后续项,本期按 UTC 期初。
+//
+// 【架构B 退役停调】(33 §5,组长裁定 33-§12-4/6):A 版 override 周期重置机器,B 下额度落成员
+// user.quota、周期语义由 RunSubscriptionTopup(经 Transfer)接管。worker 已停调,函数保留待删,
+// 勿新增调用;内部 observeMode 短路随宿主一并废弃(observe 拆除清单 #6)。
 func (s *Service) ResetDuePolicies(ctx context.Context) (int, error) {
 	if s.observeMode {
 		return 0, nil // MVP(观测)下 quota-worker 绝不碰 new-api 写/停服(与 ReverseExpiredGrants:19 同口径,放行前必做)

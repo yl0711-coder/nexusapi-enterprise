@@ -270,6 +270,9 @@ func computeAutoThreshold(peakHourly, maxSingle int64, hasHistory bool) (auto in
 
 // AutoRefill 自动续充 worker tick(leader 单写者;observe 也跑——续充是池子 funding,不停员工)。
 // 逐有桶组织:懒重算阈值(配置陈旧>20h/无行)→ 窗口<阈值则补满。失败逐组织隔离、下轮重试。
+//
+// 【架构B 退役停调】(33 §5,组长裁定 33-§12-17):escrow 分桶下发整体退役(内含绕 Transfer 的
+// quota 直写)。worker 已停调,函数保留待删,勿新增调用。
 func (s *Service) AutoRefill(ctx context.Context) error {
 	if !s.fundingEnabled {
 		return nil // v1 escrow 休眠(20-§9):worker 静默短路(v2 开 flag 恢复)
@@ -319,6 +322,10 @@ func (s *Service) autoRefillOrg(ctx context.Context, orgID int64) error {
 //      由续充 worker(读真实窗口自愈)或人工按 SLA 补;
 //   ③ 守恒断言:已释放+托管 == 充值−退款(纯平台侧账,无消费项,不碰 used_quota)。
 // 开跑前先 drain 一次结算(把日志水位追平到 now),使"已消费"最新——防欠拨告警被结算滞后刷假(§15 前提②)。
+//
+// 【架构B 退役停调】(33 §5,组长裁定 33-§12-17):escrow 整体退役。worker 已停调,函数保留待删,
+// 勿新增调用。注:handler 仍挂 escrow-balance/escrow/refill 两端点(RefillWindow),由组长阶段2
+// 随 handler 层清理下线(现受 fundingEnabled=false 休眠闸兜底)。
 func (s *Service) ReconcileEscrow(ctx context.Context) error {
 	if !s.fundingEnabled {
 		return nil // v1 escrow 休眠(20-§9):worker 静默短路(v2 开 flag 恢复)

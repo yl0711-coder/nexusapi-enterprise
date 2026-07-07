@@ -17,6 +17,10 @@ import (
 //   - quota_add/quota_sub → 标 expired,重算该成员 override 下发(扣回临时额)
 //   - account_ttl         → 标 expired,disable new-api 用户、member→expired(US-04a)
 //   - model_add           → 标 expired(令牌当前不限模型,无 enforcement 可收;仅记录)
+//
+// 【架构B 退役停调】(33 §5,组长裁定 33-§12-4):A 版临时 grant 机器整体退役(不在 33 §3.5 契约内)。
+// worker 已停调,函数保留待删,勿新增调用;若未来复活临时额度,必须重写为 Transfer(成员↔金库),
+// 绝不再走 override;内部 observeMode 短路随宿主一并废弃(observe 拆除清单 #14)。
 func (s *Service) ReverseExpiredGrants(ctx context.Context, limit int) (int, error) {
 	if s.observeMode {
 		return 0, nil // MVP(观测)下 quota-worker 不碰 new-api 写(与 reconcile/settlement 同口径,放行前必做2)

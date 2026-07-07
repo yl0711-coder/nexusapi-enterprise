@@ -1,5 +1,6 @@
-// Package worker 是 leader 单写者后台循环(10 §4.3):定时重置 / grant 到期反向 / 异步补偿。
-// MVP 单实例直接跑;多实例水平扩展时再加分布式选主(与 bootstrap 锁同栈),本期不做。
+// Package worker 是 leader 单写者后台循环(10 §4.3):订阅补满 / 对账。
+// 多实例水平扩展前必须先做选主(MySQL 租约 + term fencing,memory project_enterprise_platform_multinode_leader),
+// 否则钱面写跨节点重复(双补=双倍发钱);单节点灰度由 NEXUS_WORKER_ENABLED + envLeadership 保证单写者。
 package worker
 
 import (
@@ -10,31 +11,35 @@ import (
 	"github.com/nexusapi-platform/enterprise/service"
 )
 
-// QuotaWorker 周期扫到期 grant 并反向应用(03 §3.4)。
+// QuotaWorker 周期跑订阅档位补满(架构B 阶段1,31-ADR §4.3):
+// 对 active+subscription 成员按组织时区自然边界补满到目标(D=目标−剩余,增量划账,幂等键=成员×周期桶)。
+//
+// 架构B 退役停调(33 §5 + 组长裁定 33-§12-4/17,函数保留待删、不再入口可达):
+//   - ReverseExpiredGrants / ResetDuePolicies:A 版临时 grant / override 周期重置机器(额度落 token),
+//     B 下成员额度=user.quota,周期语义由 RunSubscriptionTopup(经 Transfer)接管;
+//   - AutoRefill:escrow 分桶下发续充(内含绕 Transfer 的 quota 直写),escrow 整体退役。
 type QuotaWorker struct {
 	svc      *service.Service
 	log      *slog.Logger
 	interval time.Duration
-	batch    int
 }
 
-// NewQuotaWorker 构造 worker。interval<=0 用默认 1 分钟;batch<=0 用 100。
+// NewQuotaWorker 构造 worker。interval<=0 用默认 5 分钟(周期桶边界后的首个 tick 即补满;
+// 桶内已处理成员由进程内去重跳过,不空转打上游)。batch 参数保留签名兼容(调用方 main.go 不改),已不使用。
 func NewQuotaWorker(svc *service.Service, log *slog.Logger, interval time.Duration, batch int) *QuotaWorker {
 	if interval <= 0 {
-		interval = time.Minute
-	}
-	if batch <= 0 {
-		batch = 100
+		interval = 5 * time.Minute
 	}
 	if log == nil {
 		log = slog.Default()
 	}
-	return &QuotaWorker{svc: svc, log: log, interval: interval, batch: batch}
+	_ = batch
+	return &QuotaWorker{svc: svc, log: log, interval: interval}
 }
 
 // Run 阻塞运行循环直到 ctx 取消。先立即跑一轮,再按 interval 周期跑。
 func (w *QuotaWorker) Run(ctx context.Context) {
-	w.log.Info("quota-worker 启动", "interval", w.interval.String(), "batch", w.batch)
+	w.log.Info("quota-worker 启动(订阅补满)", "interval", w.interval.String())
 	safeTick(w.log, "quota", func() { w.tick(ctx) })
 	t := time.NewTicker(w.interval)
 	defer t.Stop()
@@ -50,24 +55,12 @@ func (w *QuotaWorker) Run(ctx context.Context) {
 }
 
 func (w *QuotaWorker) tick(ctx context.Context) {
-	c, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// 订阅补满搬真钱:每候选成员一次 GetUserQuota + 可能一笔 Transfer(多次上游 HTTP),
+	// 按数百成员给宽超时;leader 闸 / money_freeze / 幂等键防双补都在 service 内。
+	c, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	n, err := w.svc.ReverseExpiredGrants(c, w.batch)
-	if err != nil {
-		w.log.Error("quota-worker 扫到期失败", "err", err)
-	} else if n > 0 {
-		w.log.Info("quota-worker 反向到期 grant", "count", n)
+	if err := w.svc.RunSubscriptionTopup(c); err != nil {
+		w.log.Error("quota-worker 订阅补满失败(下 tick 重试)", "err", err)
+		w.svc.RecordWorkerFailure(ctx, "quota", "subscription_topup", err)
 	}
-	// 周期重置(03 §3.3):按 quota_policy 周期边界重算 override 下发。
-	if rn, rerr := w.svc.ResetDuePolicies(c); rerr != nil {
-		w.log.Error("quota-worker 周期重置失败", "err", rerr)
-	} else if rn > 0 {
-		w.log.Info("quota-worker 周期重置", "members", rn)
-	}
-	// 模型2 R5后:自动续充(托管→窗口,补货点触发)。leader 单写者;observe 也跑(池子 funding 不停员工)。
-	// 阈值每天懒重算,窗口<阈值即补满;手工 RefillWindow 走同锁同原子路径(应急 override)。
-	if aerr := w.svc.AutoRefill(c); aerr != nil {
-		w.log.Error("quota-worker 自动续充失败", "err", aerr)
-	}
-	// 模型2:已移除 orphan 用户扫描(member 不映射 newapi user,无孤儿用户;残留 token 靠确定性名重开自愈)。
 }

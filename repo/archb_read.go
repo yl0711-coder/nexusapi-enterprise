@@ -1,11 +1,10 @@
 // 架构B 阶段1 BE③(33 §3.3,只读):读求和余额 / 归因 / 报表所需的只读查询。
 // 本文件绝不写 quota、绝不写钱表;usage_ledger 自 0004 起即有 newapi_user_id 列(33 §12 组长复核)。
-// 注:SumConsumedByNewapiUser 与 BE② 各自建(裁定),阶段2 组长合并去重。
+// 注:SumConsumedByNewapiUser 已在阶段2 集成时去重,统一到 repo/subscription.go 那一份(钱核心口径)。
 package repo
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 
 	"github.com/nexusapi-platform/enterprise/model"
@@ -59,16 +58,8 @@ func (s *Store) ListMemberBalanceSources(ctx context.Context, orgID int64) ([]Me
 	return out, rows.Err()
 }
 
-// SumConsumedByNewapiUser 按成员 new-api user id 求 usage_ledger 累计消耗(成员"已用"口径,只读报表账)。
-func (s *Store) SumConsumedByNewapiUser(ctx context.Context, newapiUserID int64) (int64, error) {
-	var sum sql.NullInt64
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT SUM(consumed_quota) FROM usage_ledger WHERE newapi_user_id = ?`, newapiUserID).Scan(&sum); err != nil {
-		return 0, err
-	}
-	return sum.Int64, nil
-}
-
+// SumConsumedByNewapiUser 见 repo/subscription.go(BE②/BE③ 集成去重,阶段2:统一到钱核心那一份,
+// 其注释点明该值是随结算滞后的诊断口径、判定主口径走 /api/log/stat)。
 // TreasuryRef 金库巡检锚点(金库低预警探针用,29-PRD §4.9)。
 type TreasuryRef struct {
 	OrgID        int64

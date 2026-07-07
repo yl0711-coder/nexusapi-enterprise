@@ -102,6 +102,33 @@ func (s *Service) Me(ctx context.Context, c session.Claims) (*model.Member, erro
 	return m, nil
 }
 
+// MemberTierInfo 返回成员档位的名称与模型清单(F3/28:mykey 自助闭环,员工知道自己能调哪些模型)。
+// best-effort:无 tier / 取不到一律返回空,绝不阻断成员详情。
+func (s *Service) MemberTierInfo(ctx context.Context, orgID int64, m *model.Member) ([]string, string) {
+	if m == nil || m.TierID == nil {
+		return nil, ""
+	}
+	t, err := s.store.GetTier(ctx, orgID, *m.TierID)
+	if err != nil {
+		return nil, ""
+	}
+	return t.ModelSet, t.Name
+}
+
+// MyOrgStatus 返回调用者**本人所属组织**的服务状态(active/low/stopped/hard_stopped),供 /me 透出。
+// A3(28-§阻断):员工"我的用量·当前状态"据此显示真实状态(尤其组织硬停),不再硬编码"正常"。
+// 仅本人 org(c.OrgID,无跨 org),best-effort:取不到返回空串(前端按未知/正常处理),绝不阻断 /me。
+func (s *Service) MyOrgStatus(ctx context.Context, c session.Claims) string {
+	if c.OrgID == 0 {
+		return ""
+	}
+	org, err := s.store.GetOrganization(ctx, c.OrgID)
+	if err != nil {
+		return ""
+	}
+	return org.Status
+}
+
 // ChangePassword 个人设置·自助改平台登录密码:校验旧密码 → 校验新密码 → bcrypt 重哈希 → 落库。
 // 对所有平台账号通用(运营方/组织管理员/团队负责人/成员改各自的);堵"运营方永久知道客户初始密码"的口子。
 func (s *Service) ChangePassword(ctx context.Context, c session.Claims, oldPassword, newPassword string) error {

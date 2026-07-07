@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -26,11 +27,18 @@ const logMirrorPageCap = logMirrorMaxPages * logMirrorPageSize
 var errLogMirrorOverflow = errors.New("log mirror window overflow")
 
 type OrgNewapiLogFilter struct {
-	LogType   *int
-	MemberID  *int64
-	RequestID string
-	Limit     int
-	Offset    int
+	OrgID          int64
+	LogType        *int
+	MemberID       *int64
+	StartTimestamp int64
+	EndTimestamp   int64
+	TokenName      string
+	ModelName      string
+	ChannelID      *int
+	GroupName      string
+	RequestID      string
+	Limit          int
+	Offset         int
 }
 
 // RunLogMirrorSlice 把 new-api 全类型日志按组织镜像到本地排障表。
@@ -208,6 +216,54 @@ func (s *Service) toMirroredLog(ctx context.Context, src repo.LogMirrorSource, e
 }
 
 func (s *Service) ListOrgNewapiLogs(ctx context.Context, c session.Claims, orgID int64, f OrgNewapiLogFilter) ([]repo.OrgNewapiLog, int, error) {
+	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin, session.RoleMember); err != nil {
+		return nil, 0, err
+	}
+	if err := assertOrgScope(c, orgID); err != nil {
+		return nil, 0, err
+	}
+	if c.Role == session.RoleMember {
+		f.MemberID = &c.MemberID
+	}
+	if _, err := s.store.GetOrganization(ctx, orgID); errors.Is(err, repo.ErrNotFound) {
+		return nil, 0, apperr.NotFound("组织不存在")
+	} else if err != nil {
+		return nil, 0, apperr.Internal("").WithCause(err)
+	}
+	items, total, err := s.store.ListOrgNewapiLogs(ctx, repo.OrgNewapiLogFilter{
+		OrgID: orgID, LogType: f.LogType, MemberID: f.MemberID,
+		StartTimestamp: f.StartTimestamp, EndTimestamp: f.EndTimestamp,
+		TokenName: f.TokenName, ModelName: f.ModelName, ChannelID: f.ChannelID,
+		GroupName: f.GroupName, RequestID: f.RequestID,
+		Limit: f.Limit, Offset: f.Offset,
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	// 超管进组织=照抄 new-api 管理员,原样返回;组织管理/员工按角色收敛(真隔离,不靠前端藏)。
+	sanitizeLogsByRole(items, c.Role)
+	return items, total, nil
+}
+
+func (s *Service) ListAllNewapiLogs(ctx context.Context, c session.Claims, f OrgNewapiLogFilter) ([]repo.OrgNewapiLog, int, error) {
+	if err := assertRole(c, session.RoleOperator); err != nil {
+		return nil, 0, err
+	}
+	items, total, err := s.store.ListAllNewapiLogs(ctx, repo.OrgNewapiLogFilter{
+		OrgID: f.OrgID, LogType: f.LogType, MemberID: f.MemberID,
+		StartTimestamp: f.StartTimestamp, EndTimestamp: f.EndTimestamp,
+		TokenName: f.TokenName, ModelName: f.ModelName, ChannelID: f.ChannelID,
+		GroupName: f.GroupName, RequestID: f.RequestID,
+		Limit: f.Limit, Offset: f.Offset,
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	// 运营方(超管)全局日志=照抄 new-api 管理员,什么都能看:other 全量、content 不截断、IP 不打码。
+	return items, total, nil
+}
+
+func (s *Service) ListMemberTokenMappings(ctx context.Context, c session.Claims, orgID int64, limit, offset int) ([]repo.MemberTokenMapping, int, error) {
 	if err := assertRole(c, session.RoleOperator); err != nil {
 		return nil, 0, err
 	}
@@ -216,31 +272,57 @@ func (s *Service) ListOrgNewapiLogs(ctx context.Context, c session.Claims, orgID
 	} else if err != nil {
 		return nil, 0, apperr.Internal("").WithCause(err)
 	}
-	items, total, err := s.store.ListOrgNewapiLogs(ctx, repo.OrgNewapiLogFilter{
-		OrgID: orgID, LogType: f.LogType, MemberID: f.MemberID, RequestID: f.RequestID,
-		Limit: f.Limit, Offset: f.Offset,
-	})
-	if err != nil {
-		return nil, 0, err
-	}
-	for i := range items {
-		items[i].Content = truncateRunes(items[i].Content, 240)
-		items[i].Other = truncateRunes(items[i].Other, 240)
-		items[i].IP = maskLogIP(items[i].IP)
-	}
-	return items, total, nil
+	return s.store.ListMemberTokenMappings(ctx, orgID, limit, offset)
 }
 
-func (s *Service) ListMemberTokenMappings(ctx context.Context, c session.Claims, orgID int64) ([]repo.MemberTokenMapping, error) {
-	if err := assertRole(c, session.RoleOperator); err != nil {
-		return nil, err
+// sanitizeLogsByRole 按会话角色对镜像日志做服务端收敛(26-§4.2,真隔离不靠前端藏)。
+//   - 超管(operator):照抄 new-api 管理员,原样返回,不做任何剥离/截断/打码。
+//   - 组织管理/员工:剥掉顶层渠道系与 token 归因系字段 + other 内 admin_info/stream_status,
+//     content 截断、IP 打码;员工再进一步去令牌名/分组(其视角只有自己一个 key,不需选择)。
+//
+// 对齐 new-api formatUserLogs(model/log.go:53):低权 ChannelName 置空 + other 删 admin_info/stream_status。
+func sanitizeLogsByRole(items []repo.OrgNewapiLog, role session.Role) {
+	if role == session.RoleOperator {
+		return
 	}
-	if _, err := s.store.GetOrganization(ctx, orgID); errors.Is(err, repo.ErrNotFound) {
-		return nil, apperr.NotFound("组织不存在")
-	} else if err != nil {
-		return nil, apperr.Internal("").WithCause(err)
+	for i := range items {
+		// 顶层渠道系:低权一律不可见(渠道对客户侧透明)。
+		items[i].ChannelID = 0
+		items[i].ChannelName = ""
+		// 顶层 new-api 内部归因 id:低权不暴露(排障靠成员名/邮箱,不给内部 id)。
+		items[i].NewapiTokenID = 0
+		items[i].NewapiUserID = 0
+		items[i].KeyID = 0
+		// 员工视角锁定自己单一 key,令牌名/分组无选择意义,一并去掉。
+		if role == session.RoleMember {
+			items[i].TokenName = ""
+			items[i].GroupName = ""
+		}
+		// other:剥 admin_info/stream_status;解析失败返回空串,绝不返半截 JSON。
+		items[i].Other = sanitizeOther(items[i].Other)
+		// content 自由文本(可能含 prompt 片段/敏感串):低权截断。IP 打码。
+		items[i].Content = truncateRunes(items[i].Content, 240)
+		items[i].IP = maskLogIP(items[i].IP)
 	}
-	return s.store.ListMemberTokenMappings(ctx, orgID)
+}
+
+// sanitizeOther 对低权角色净化 other JSON:删 admin_info(渠道信息)与 stream_status(与 new-api 低权一致)。
+// 空串原样返回;解析失败返回空串(绝不返回半截/被截断的 JSON,否则前端展开面板 parse 失败)。
+func sanitizeOther(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return ""
+	}
+	delete(m, "admin_info")
+	delete(m, "stream_status")
+	out, err := json.Marshal(m)
+	if err != nil {
+		return ""
+	}
+	return string(out)
 }
 
 func truncateRunes(s string, max int) string {

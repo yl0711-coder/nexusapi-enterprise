@@ -238,24 +238,28 @@ func TestIntegration_DisabledMemberSelfServeBlocked(t *testing.T) {
 	if err := svc.SetMemberStatus(ctx, admin, orgID, memberID, false); err != nil { // 停用(禁用不删)
 		t.Fatalf("停用失败: %v", err)
 	}
-	// 停用后成员用自己会话调三自助端点 → 应 403(status!=active)。
+	// A1(28-§阻断):员工 key 纯只读——三自助端点对 member 一律 403(基于角色,不再依赖 status)。
+	// 停用后成员用自己会话调 → 403。
 	if _, _, e := svc.CreateMemberToken(ctx, member, memberID, "default"); !isForbidden(e) {
-		t.Fatalf("🔴M1:停用成员 CreateMemberToken 应 403,实=%v", e)
+		t.Fatalf("🔴A1:member CreateMemberToken 应 403,实=%v", e)
 	}
 	if _, _, e := svc.RotateKey(ctx, member, orgID, memberID); !isForbidden(e) {
-		t.Fatalf("🔴M1:停用成员 RotateKey 应 403,实=%v", e)
+		t.Fatalf("🔴A1:member RotateKey 应 403,实=%v", e)
 	}
 	if e := svc.SetKeyIPWhitelist(ctx, member, orgID, memberID, "203.0.113.5"); !isForbidden(e) {
-		t.Fatalf("🔴M1:停用成员 SetKeyIPWhitelist 应 403,实=%v", e)
+		t.Fatalf("🔴A1:member SetKeyIPWhitelist 应 403,实=%v", e)
 	}
-	// 恢复后可正常自助。
+	if _, e := svc.MemberUsableGroups(ctx, member); !isForbidden(e) {
+		t.Fatalf("🔴A1:member MemberUsableGroups 应 403,实=%v", e)
+	}
+	// 恢复启用后,member 侧仍一律 403(读只读,自助已整体下线,不再"恢复后可自助")。
 	if err := svc.SetMemberStatus(ctx, admin, orgID, memberID, true); err != nil {
-		t.Fatalf("恢复失败: %v", err)
+		t.Fatalf("恢复启用失败: %v", err)
 	}
-	if _, _, e := svc.RotateKey(ctx, member, orgID, memberID); e != nil {
-		t.Fatalf("🔴恢复后应可轮换,实错: %v", e)
+	if _, _, e := svc.RotateKey(ctx, member, orgID, memberID); !isForbidden(e) {
+		t.Fatalf("🔴A1:启用后 member RotateKey 仍应 403(纯只读),实=%v", e)
 	}
-	t.Logf("M1 真账 ok: 停用成员自助 CreateMemberToken/RotateKey/SetKeyIPWhitelist 全 403(防停用后绕过);恢复后正常")
+	t.Logf("A1 真账 ok: member 自助 CreateMemberToken/RotateKey/SetKeyIPWhitelist/MemberUsableGroups 一律 403(纯只读,不依赖 status)")
 }
 
 // F-A/F-C(真站联调发现):OpenMember 的 FinalizeBootstrap 失败必须补偿——删孤儿 token + 标 failed + 释放邮箱,不卡 provisioning。

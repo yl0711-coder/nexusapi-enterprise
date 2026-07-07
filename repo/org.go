@@ -139,18 +139,25 @@ func (s *Store) UpdateOrgAccessToken(ctx context.Context, orgID int64, accessTok
 }
 
 // ListOrganizations 列出组织(运营方视角,分页)。includeArchived=false 时默认隐藏已归档(T12)。
-func (s *Store) ListOrganizations(ctx context.Context, limit, offset int, includeArchived bool) ([]*model.Organization, int, error) {
+// q 服务端搜索(名称/slug LIKE,B1/28):取代"前端只筛已加载一页"的假搜索,空=不过滤。
+func (s *Store) ListOrganizations(ctx context.Context, q string, limit, offset int, includeArchived bool) ([]*model.Organization, int, error) {
 	cond := "deleted_at IS NULL"
 	if !includeArchived {
 		cond += " AND archived_at IS NULL"
 	}
+	args := []any{}
+	if q != "" {
+		cond += " AND (name LIKE ? OR slug LIKE ?)"
+		like := "%" + q + "%"
+		args = append(args, like, like)
+	}
 	var total int
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM organization WHERE `+cond).Scan(&total); err != nil {
+		`SELECT COUNT(*) FROM organization WHERE `+cond, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+orgCols+` FROM organization WHERE `+cond+` ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
+		`SELECT `+orgCols+` FROM organization WHERE `+cond+` ORDER BY id DESC LIMIT ? OFFSET ?`, append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
 	}

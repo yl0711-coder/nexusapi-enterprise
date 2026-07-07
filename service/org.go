@@ -368,12 +368,12 @@ func (s *Service) GetOrg(ctx context.Context, c session.Claims, orgID int64) (*m
 	return org, nil
 }
 
-// ListOrgs 列出客户组织(运营方)。includeArchived=false 默认隐藏已归档(T12)。
-func (s *Service) ListOrgs(ctx context.Context, c session.Claims, limit, offset int, includeArchived bool) ([]*model.Organization, int, error) {
+// ListOrgs 列出客户组织(运营方)。includeArchived=false 默认隐藏已归档(T12);q=服务端搜索(名称/slug,B1/28)。
+func (s *Service) ListOrgs(ctx context.Context, c session.Claims, q string, limit, offset int, includeArchived bool) ([]*model.Organization, int, error) {
 	if err := assertRole(c, session.RoleOperator); err != nil {
 		return nil, 0, err
 	}
-	return s.store.ListOrganizations(ctx, limit, offset, includeArchived)
+	return s.store.ListOrganizations(ctx, q, limit, offset, includeArchived)
 }
 
 // SetOrgArchived 归档/取消归档组织(T12:仅运营方,软隐藏不物理删除,留痕)。

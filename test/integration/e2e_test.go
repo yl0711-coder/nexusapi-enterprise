@@ -661,12 +661,13 @@ func tokenGroupBySQL(t *testing.T, dsn string, userID int64) string {
 	return g
 }
 
-// selfServeMemberToken 模型2:让成员自助建 key(在 org user 下),返回其 new-api token_id(灌日志归因用)。
+// provisionMemberToken 模型2:平台为成员建 key(在 org user 下),返回其 new-api token_id(灌日志归因用)。
+// A1(28):员工自助建 key 已下线,改走平台原语 ProvisionMemberKey(管理员身份);员工侧 key 纯只读。
 func selfServeMemberToken(t *testing.T, ctx context.Context, svc *service.Service, store *repo.Store, orgID, memberID int64) int64 {
 	t.Helper()
-	mc := session.Claims{MemberID: memberID, OrgID: orgID, Role: session.RoleMember}
-	if _, _, err := svc.CreateMemberToken(ctx, mc, memberID, "default"); err != nil {
-		t.Fatalf("成员 %d 自助建 key 失败: %v", memberID, err)
+	admin := session.Claims{MemberID: -1, OrgID: orgID, Role: session.RoleOrgAdmin}
+	if err := svc.ProvisionMemberKey(ctx, admin, orgID, memberID); err != nil {
+		t.Fatalf("平台为成员 %d 建 key 失败: %v", memberID, err)
 	}
 	m, err := store.GetMember(ctx, orgID, memberID)
 	if err != nil || m.NewapiTokenID == nil {

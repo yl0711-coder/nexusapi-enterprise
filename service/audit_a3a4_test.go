@@ -17,6 +17,7 @@ func TestUnit_MoneyOrKeyRedline(t *testing.T) {
 		{"POST", "/api/v1/organizations/5/members", true},         // 开通成员 = 铸 key(核心补堵)
 		{"POST", "/api/v1/members/9/tokens", true},                // 员工建 key
 		{"POST", "/api/v1/members/9/key:rotate", true},            // 轮换 = 出新 key
+		{"POST", "/api/v1/members/9/key:reveal", true},            // 揭示明文 key(收口 A:支持态硬挡运营方读明文)
 		{"POST", "/api/v1/members/9/key:ip-whitelist", true},      // 动 key
 		{"POST", "/api/v1/organizations/5/recharges", true},       // 动钱
 		{"POST", "/api/v1/organizations/5/recharge-requests", true},

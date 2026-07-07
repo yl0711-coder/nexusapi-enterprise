@@ -256,6 +256,13 @@ func (s *Service) ListMembers(ctx context.Context, c session.Claims, orgID int64
 	return s.store.ListMembers(ctx, orgID, f)
 }
 
+func (s *Service) ListAllMembers(ctx context.Context, c session.Claims, f repo.MemberFilter) ([]repo.MemberOverview, int, error) {
+	if err := assertRole(c, session.RoleOperator); err != nil {
+		return nil, 0, err
+	}
+	return s.store.ListAllMembers(ctx, f)
+}
+
 // GetMember 取成员详情(组织管理员/团队负责人本团队/成员本人)。
 func (s *Service) GetMember(ctx context.Context, c session.Claims, orgID, memberID int64) (*model.Member, error) {
 	if err := assertOrgScope(c, orgID); err != nil {
@@ -324,6 +331,10 @@ func validateAllowIPs(s string) error {
 }
 
 func (s *Service) SetKeyIPWhitelist(ctx context.Context, c session.Claims, orgID, memberID int64, allowIPs string) error {
+	// A1(28-§阻断):员工 key 纯只读——改 IP 白名单整体下线,对 member 一律 403。
+	if c.Role == session.RoleMember {
+		return apperr.Forbidden("员工 key 生成后不可修改,如需更换请联系管理员")
+	}
 	if err := assertOrgScope(c, orgID); err != nil {
 		return err
 	}
@@ -360,10 +371,14 @@ func (s *Service) SetKeyIPWhitelist(ctx context.Context, c session.Claims, orgID
 // RotateKey 轮换成员的明文 key(US-07,E21)。MVP 仅支持对自己轮换;
 // 代他人走支持/协助路径(本里程碑不实现)。返回新明文 key,仅此一次。
 func (s *Service) RotateKey(ctx context.Context, c session.Claims, orgID, memberID int64) (apiKey, masked string, err error) {
+	// A1(28-§阻断):员工 key 纯只读、生成后不可修改——自助轮换整体下线,对 member 一律 403(纵深防御,不只靠前端删按钮)。
+	// key 生命周期全程平台驱动(开通建/离职删/恢复重建);此端点已无合法调用方(原仅员工自助)。
+	if c.Role == session.RoleMember {
+		return "", "", apperr.Forbidden("员工 key 生成后不可修改,如需更换请联系管理员")
+	}
 	if err := assertOrgScope(c, orgID); err != nil {
 		return "", "", err
 	}
-	// MVP:只能轮换自己的 key(US-07 失败分支:代他人不在本期)。
 	if c.MemberID != memberID {
 		return "", "", apperr.Forbidden("MVP 仅支持轮换本人的 key")
 	}
@@ -404,9 +419,65 @@ func (s *Service) RotateKey(ctx context.Context, c session.Claims, orgID, member
 	return newKey, masked, nil
 }
 
+// RevealKey 即时取成员当前令牌的明文 key,仅供前端复制(27-§3.2)。平台不存明文,点复制时用组织凭证向 new-api 上游即时取,明文只即时回传——绝不落库、绝不写日志。
+// 授权(收口 A/B + 离职判断):
+//   - 运营方(operator)一律 403——全站爆炸半径最大,不给明文;顺带天然保住支持态代读明文 key 红线(端点路径含 key: 已被 isMoneyOrKeyRedline 支持态硬挡)。
+//   - 员工(member)只揭本人当前 token(忽略传入 id,强制 c.MemberID,防越权)。
+//   - 组织管理员(org_admin)只揭本组织成员(GetMember 按会话 org_id 查,越 org → NotFound;org 凭证也从会话 org_id 取,不信请求体)。
+//   - 目标成员须当前有效(active):GetMember/反查类不能靠"上游会失败"当授权,显式挡离职/禁用成员的历史 token 明文。
+func (s *Service) RevealKey(ctx context.Context, c session.Claims, memberID int64) (apiKey string, err error) {
+	if c.Role == session.RoleOperator {
+		return "", apperr.Forbidden("运营方不可复制成员明文 key")
+	}
+	target := memberID
+	switch c.Role {
+	case session.RoleMember:
+		target = c.MemberID // 员工强制本人,忽略客户端传入 id
+	case session.RoleOrgAdmin:
+		// 目标须属本 org,由下方 GetMember(按 c.OrgID 查)保证越 org → NotFound。
+	default:
+		return "", apperr.Forbidden("无权复制明文 key")
+	}
+	if err := assertOrgScope(c, c.OrgID); err != nil {
+		return "", err
+	}
+	ctx, cancel := withTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	m, err := s.store.GetMember(ctx, c.OrgID, target)
+	if errors.Is(err, repo.ErrNotFound) {
+		return "", apperr.NotFound("成员不存在")
+	}
+	if err != nil {
+		return "", apperr.Internal("").WithCause(err)
+	}
+	if m.Status != model.MemberStatusActive {
+		return "", apperr.Forbidden("该成员当前不可用,不复制明文 key") // 离职/禁用成员不揭示历史 token 明文
+	}
+	if m.BootstrapState != model.BootstrapDone || m.NewapiTokenID == nil {
+		return "", apperr.New(apperr.CodeInvalidParam, 409, "该成员尚无可用 key")
+	}
+
+	var key string
+	if berr := s.withOrgCred(ctx, c.OrgID, func(cred newapi.MemberCred) error {
+		var e error
+		key, e = s.upstream.RevealTokenKey(ctx, cred, int(*m.NewapiTokenID))
+		return e
+	}); berr != nil {
+		return "", mapUpstream(berr)
+	}
+	// 揭示审计(兜底追责):操作者/目标成员/目标 token/时间——绝不记 key 明文。
+	s.audit(ctx, c, c.OrgID, "reveal_key", "member", &target, map[string]any{"newapi_token_id": *m.NewapiTokenID})
+	return key, nil
+}
+
 // MemberUsableGroups 列本企业可用的模型分组(改动③:自助建 key 的分组选择器只列这些,不暴露全系统分组)。
 // 取调用者所属组织的用户分组 → GetOrgUsableGroups。
 func (s *Service) MemberUsableGroups(ctx context.Context, c session.Claims) ([]string, error) {
+	// A1(28-§阻断):随员工自助建 key 下线——自助分组选择器不再对 member 开放,一律 403。
+	if c.Role == session.RoleMember {
+		return nil, apperr.Forbidden("员工自助建 key 已下线")
+	}
 	groups, err := s.upstream.GetOrgUsableGroups(ctx, s.orgUserGroup(ctx, c.OrgID))
 	if err != nil {
 		return nil, mapUpstream(err)
@@ -713,7 +784,37 @@ func (s *Service) withOrgCred(ctx context.Context, orgID int64, fn func(cred new
 // CreateMemberToken 员工自助建/重建 API key,选一个本企业可用的模型分组(改动③·方案A 单 key)。
 // 方案A:平台只跟踪最近一枚——首次(无令牌)CreateToken;重建(已有令牌)RotateToken 替换上一枚(旧 key 失效)。
 // RBAC:仅本人(MVP)。校验所选分组 ∈ 本企业可用模型分组(隔离边界:不能选别家分组)。返回明文 key(仅回显一次)+ 脱敏。
+// ProvisionMemberKey 平台/管理员为**尚无 key** 的成员生成 key(A1:员工 key 平台驱动的通用原语)。
+// 仅 operator/org_admin;成员已有 key 则拒(避免孤儿,更换 key 走离职再恢复)。RestoreOffboardedMember 内联复用同一核心。
+func (s *Service) ProvisionMemberKey(ctx context.Context, c session.Claims, orgID, memberID int64) error {
+	if err := assertOrgScope(c, orgID); err != nil {
+		return err
+	}
+	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
+		return err
+	}
+	m, err := s.store.GetMember(ctx, orgID, memberID)
+	if errors.Is(err, repo.ErrNotFound) {
+		return apperr.NotFound("成员不存在")
+	}
+	if err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	if m.NewapiTokenID != nil {
+		return apperr.New(apperr.CodeInvalidParam, 409, "该成员已有 key,如需更换请走离职再恢复")
+	}
+	if rerr := s.rebuildMemberTokenInline(ctx, orgID, m); rerr != nil {
+		return rerr
+	}
+	s.audit(ctx, c, orgID, "provision_member_key", "member", &memberID, nil)
+	return nil
+}
+
 func (s *Service) CreateMemberToken(ctx context.Context, c session.Claims, memberID int64, group string) (apiKey, masked string, err error) {
+	// A1(28-§阻断):员工自助建 key 整体下线——key 由平台在开通/恢复时建,员工侧只读。对 member 一律 403。
+	if c.Role == session.RoleMember {
+		return "", "", apperr.Forbidden("员工自助建 key 已下线,Key 由平台开通时生成")
+	}
 	if c.MemberID != memberID {
 		return "", "", apperr.Forbidden("仅支持为本人建 key")
 	}

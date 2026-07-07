@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nexusapi-platform/enterprise/pkg/session"
+	"github.com/nexusapi-platform/enterprise/repo"
 	"github.com/nexusapi-platform/enterprise/model"
 )
 
@@ -159,5 +161,70 @@ func TestUnit_ResolveTokenGroup(t *testing.T) {
 	}
 	if got := resolveTokenGroup(nil, nil); got != "default" {
 		t.Fatalf("都无应回退 default,得 %q", got)
+	}
+}
+
+// TestUnit_SanitizeOther 锁死 26-§4.2:低权 other 净化必须删 admin_info/stream_status,
+// 保留计费过程/缓存/frt 等展开所需字段;空串原样、坏 JSON 返空串(绝不返半截,否则前端展开 parse 失败)。
+func TestUnit_SanitizeOther(t *testing.T) {
+	raw := `{"frt":123,"cache_tokens":50,"reasoning_effort":"high","admin_info":{"channel_id":9},"stream_status":"ok","po":["a"]}`
+	got := sanitizeOther(raw)
+	for _, banned := range []string{"admin_info", "stream_status"} {
+		if strings.Contains(got, banned) {
+			t.Fatalf("低权 other 仍含 %q: %s", banned, got)
+		}
+	}
+	for _, keep := range []string{"frt", "cache_tokens", "reasoning_effort", "po"} {
+		if !strings.Contains(got, keep) {
+			t.Fatalf("低权 other 误删了展开所需字段 %q: %s", keep, got)
+		}
+	}
+	if sanitizeOther("") != "" {
+		t.Fatal("空串应原样返回空串")
+	}
+	if got := sanitizeOther(`{"frt":1,"admin_info":{trunc`); got != "" {
+		t.Fatalf("坏/半截 JSON 必须返回空串,不得返半截,得 %q", got)
+	}
+}
+
+// TestUnit_SanitizeLogsByRole 锁死隔离洞:低权响应体不得含顶层渠道系/内部归因 id;
+// 员工再去令牌名/分组;超管(operator)原样不动。这是"真隔离,不靠前端藏"的服务端保证。
+func TestUnit_SanitizeLogsByRole(t *testing.T) {
+	mk := func() []repo.OrgNewapiLog {
+		return []repo.OrgNewapiLog{{
+			ChannelID: 9, ChannelName: "ch-a", NewapiUserID: 100, NewapiTokenID: 200, KeyID: 7,
+			TokenName: "nexus_m1_v1", GroupName: "vip", IP: "1.2.3.4",
+			Content: "x", Other: `{"frt":1,"admin_info":{"channel_id":9}}`,
+		}}
+	}
+
+	// 超管:原样,渠道/归因 id/other 全保留。
+	op := mk()
+	sanitizeLogsByRole(op, session.RoleOperator)
+	if op[0].ChannelName == "" || op[0].NewapiTokenID == 0 || !strings.Contains(op[0].Other, "admin_info") {
+		t.Fatalf("超管必须原样返回,不得剥离: %+v", op[0])
+	}
+
+	// 组织管理员:去顶层渠道系与内部归因 id;令牌名/分组保留(其视角要看成员令牌)。
+	oa := mk()
+	sanitizeLogsByRole(oa, session.RoleOrgAdmin)
+	if oa[0].ChannelID != 0 || oa[0].ChannelName != "" || oa[0].NewapiTokenID != 0 || oa[0].NewapiUserID != 0 || oa[0].KeyID != 0 {
+		t.Fatalf("组织管理员响应体仍含渠道系/内部归因 id: %+v", oa[0])
+	}
+	if oa[0].TokenName == "" {
+		t.Fatal("组织管理员应保留令牌名(需看成员令牌维度)")
+	}
+	if strings.Contains(oa[0].Other, "admin_info") {
+		t.Fatal("组织管理员 other 仍含 admin_info")
+	}
+
+	// 员工:在组织管理员基础上再去令牌名/分组。
+	mb := mk()
+	sanitizeLogsByRole(mb, session.RoleMember)
+	if mb[0].TokenName != "" || mb[0].GroupName != "" {
+		t.Fatalf("员工应去令牌名/分组: %+v", mb[0])
+	}
+	if mb[0].ChannelName != "" || mb[0].NewapiTokenID != 0 {
+		t.Fatalf("员工响应体仍含渠道系/内部归因 id: %+v", mb[0])
 	}
 }

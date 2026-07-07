@@ -120,10 +120,14 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 改动⑥-2:/me 透出 mvp_mode,前端据此藏掉本期封锁的菜单/按钮(真正拦截以后端 mvpGate 为准)。
+	// A3(28):透出本人组织状态,员工"我的用量·当前状态"显示真实状态(组织硬停等),不再硬编码"正常"。
+	// F3(28):透出 API 接入地址(纯展示,未配置则前端不显示接入示例)。
 	writeOK(w, r, http.StatusOK, struct {
 		memberView
-		MvpMode bool `json:"mvp_mode"`
-	}{toMemberView(m), h.mvpMode})
+		MvpMode        bool   `json:"mvp_mode"`
+		OrgStatus      string `json:"org_status,omitempty"`
+		GatewayBaseURL string `json:"gateway_base_url,omitempty"`
+	}{toMemberView(m), h.mvpMode, h.svc.MyOrgStatus(r.Context(), c), h.gatewayBaseURL})
 }
 
 // ---- 组织 ----
@@ -132,7 +136,8 @@ func (h *Handler) handleListOrgs(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())
 	page, size, offset := parsePaging(r, 20)
 	includeArchived := r.URL.Query().Get("include_archived") == "true" // T12:默认隐藏已归档
-	orgs, total, err := h.svc.ListOrgs(r.Context(), c, size, offset, includeArchived)
+	q := strings.TrimSpace(r.URL.Query().Get("q"))                    // B1(28):服务端搜索(名称/slug)
+	orgs, total, err := h.svc.ListOrgs(r.Context(), c, q, size, offset, includeArchived)
 	if err != nil {
 		writeErr(w, r, err)
 		return
@@ -604,6 +609,33 @@ func (h *Handler) handleListMembers(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, r, http.StatusOK, listResp{List: views, Pagination: makePageMeta(page, size, total)})
 }
 
+func (h *Handler) handleListAllMembers(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	page, size, offset := parsePaging(r, 50)
+	f := repo.MemberFilter{
+		Q:      strings.TrimSpace(r.URL.Query().Get("q")),
+		Status: strings.TrimSpace(r.URL.Query().Get("status")),
+		Limit:  size,
+		Offset: offset,
+	}
+	if oid := strings.TrimSpace(r.URL.Query().Get("org_id")); oid != "" {
+		if n, err := strconv.ParseInt(oid, 10, 64); err == nil && n > 0 {
+			f.OrgID = &n
+		}
+	}
+	if tid := strings.TrimSpace(r.URL.Query().Get("team_id")); tid != "" {
+		if n, err := strconv.ParseInt(tid, 10, 64); err == nil && n > 0 {
+			f.TeamID = &n
+		}
+	}
+	items, total, err := h.svc.ListAllMembers(r.Context(), c, f)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{"list": items, "pagination": makePageMeta(page, size, total)})
+}
+
 type openMemberReq struct {
 	Name   string `json:"name"`
 	Email  string `json:"email"`
@@ -654,6 +686,16 @@ func (h *Handler) handleGetMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, err)
 		return
 	}
+	// F3(28):本人视角附加档位名/可用模型清单(mykey 自助闭环:员工知道自己能调哪些模型),best-effort。
+	if c.MemberID == memberID {
+		ms, tn := h.svc.MemberTierInfo(r.Context(), c.OrgID, m)
+		writeOK(w, r, http.StatusOK, struct {
+			memberView
+			TierName string   `json:"tier_name,omitempty"`
+			ModelSet []string `json:"model_set,omitempty"`
+		}{toMemberView(m), tn, ms})
+		return
+	}
 	writeOK(w, r, http.StatusOK, toMemberView(m))
 }
 
@@ -670,6 +712,22 @@ func (h *Handler) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeOK(w, r, http.StatusOK, map[string]any{"api_key": apiKey, "key_masked": masked})
+}
+
+// handleRevealKey 即时取成员当前令牌明文,仅供前端复制(27-§3.2)。运营方一律 403;明文只即时回传,不落库/不写日志。
+func (h *Handler) handleRevealKey(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	memberID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	apiKey, err := h.svc.RevealKey(r.Context(), c, memberID)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{"api_key": apiKey})
 }
 
 // handleCreateMemberToken 员工自助建/重建 API key,选模型分组(改动③)。

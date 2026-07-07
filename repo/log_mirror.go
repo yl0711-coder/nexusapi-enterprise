@@ -24,7 +24,10 @@ type LogMirrorCursor struct {
 type OrgNewapiLog struct {
 	ID               int64     `json:"id"`
 	OrgID            int64     `json:"org_id"`
+	OrgName          string    `json:"org_name,omitempty"`
 	MemberID         int64     `json:"member_id"`
+	MemberName       string    `json:"member_name,omitempty"`
+	MemberEmail      string    `json:"member_email,omitempty"`
 	KeyID            int64     `json:"key_id"`
 	NewapiUserID     int64     `json:"newapi_user_id"`
 	NewapiTokenID    int64     `json:"newapi_token_id"`
@@ -49,12 +52,99 @@ type OrgNewapiLog struct {
 }
 
 type OrgNewapiLogFilter struct {
-	OrgID     int64
-	LogType   *int
-	MemberID  *int64
-	RequestID string
-	Limit     int
-	Offset    int
+	OrgID          int64
+	LogType        *int
+	MemberID       *int64
+	StartTimestamp int64
+	EndTimestamp   int64
+	TokenName      string
+	ModelName      string
+	ChannelID      *int
+	GroupName      string
+	RequestID      string
+	Limit          int
+	Offset         int
+}
+
+func (s *Store) ListAllNewapiLogs(ctx context.Context, f OrgNewapiLogFilter) ([]OrgNewapiLog, int, error) {
+	if f.Limit <= 0 || f.Limit > 200 {
+		f.Limit = 50
+	}
+	where, args := []string{"o.deleted_at IS NULL"}, []any{}
+	if f.OrgID > 0 {
+		where = append(where, "l.org_id = ?")
+		args = append(args, f.OrgID)
+	}
+	if f.LogType != nil {
+		where = append(where, "l.log_type = ?")
+		args = append(args, *f.LogType)
+	}
+	if f.MemberID != nil {
+		where = append(where, "l.member_id = ?")
+		args = append(args, *f.MemberID)
+	}
+	if f.StartTimestamp > 0 {
+		where = append(where, "l.log_ts >= FROM_UNIXTIME(?)")
+		args = append(args, f.StartTimestamp)
+	}
+	if f.EndTimestamp > 0 {
+		where = append(where, "l.log_ts <= FROM_UNIXTIME(?)")
+		args = append(args, f.EndTimestamp)
+	}
+	if f.TokenName != "" {
+		where = append(where, "l.token_name LIKE ?")
+		args = append(args, "%"+f.TokenName+"%")
+	}
+	if f.ModelName != "" {
+		where = append(where, "l.model_name LIKE ?")
+		args = append(args, "%"+f.ModelName+"%")
+	}
+	if f.ChannelID != nil {
+		where = append(where, "l.channel_id = ?")
+		args = append(args, *f.ChannelID)
+	}
+	if f.GroupName != "" {
+		where = append(where, "l.group_name LIKE ?")
+		args = append(args, "%"+f.GroupName+"%")
+	}
+	if f.RequestID != "" {
+		where = append(where, "l.request_id = ?")
+		args = append(args, f.RequestID)
+	}
+	cond := strings.Join(where, " AND ")
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM org_newapi_log l JOIN organization o ON o.id = l.org_id WHERE `+cond, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	qargs := append(append([]any{}, args...), f.Limit, f.Offset)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT l.id, l.org_id, COALESCE(o.name,''), l.member_id, COALESCE(m.display_name,''), COALESCE(m.login_email,''), l.key_id, l.newapi_user_id, l.newapi_token_id,
+		        COALESCE(l.token_name,''), l.log_type, COALESCE(l.model_name,''), l.channel_id,
+		        COALESCE(l.channel_name,''), COALESCE(l.group_name,''), COALESCE(l.request_id,''),
+		        l.quota, l.prompt_tokens, l.completion_tokens, l.use_time, l.is_stream, COALESCE(l.content,''),
+		        COALESCE(l.ip,''), COALESCE(l.other,''), l.newapi_log_id, l.log_ts, l.created_at
+		   FROM org_newapi_log l
+		   JOIN organization o ON o.id = l.org_id
+		   LEFT JOIN member m ON m.id = l.member_id AND m.org_id = l.org_id
+		  WHERE `+cond+`
+		  ORDER BY l.log_ts DESC, l.newapi_log_id DESC
+		  LIMIT ? OFFSET ?`, qargs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := make([]OrgNewapiLog, 0)
+	for rows.Next() {
+		var r OrgNewapiLog
+		if err := rows.Scan(&r.ID, &r.OrgID, &r.OrgName, &r.MemberID, &r.MemberName, &r.MemberEmail, &r.KeyID, &r.NewapiUserID, &r.NewapiTokenID,
+			&r.TokenName, &r.LogType, &r.ModelName, &r.ChannelID, &r.ChannelName, &r.GroupName, &r.RequestID,
+			&r.Quota, &r.PromptTokens, &r.CompletionTokens, &r.UseTime, &r.IsStream, &r.Content, &r.IP, &r.Other,
+			&r.NewapiLogID, &r.LogTS, &r.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, r)
+	}
+	return out, total, rows.Err()
 }
 
 type MemberTokenMapping struct {
@@ -184,34 +274,59 @@ func (s *Store) ListOrgNewapiLogs(ctx context.Context, f OrgNewapiLogFilter) ([]
 	if f.Limit <= 0 || f.Limit > 200 {
 		f.Limit = 50
 	}
-	where, args := []string{"org_id = ?"}, []any{f.OrgID}
+	where, args := []string{"l.org_id = ?"}, []any{f.OrgID}
 	if f.LogType != nil {
-		where = append(where, "log_type = ?")
+		where = append(where, "l.log_type = ?")
 		args = append(args, *f.LogType)
 	}
 	if f.MemberID != nil {
-		where = append(where, "member_id = ?")
+		where = append(where, "l.member_id = ?")
 		args = append(args, *f.MemberID)
 	}
+	if f.StartTimestamp > 0 {
+		where = append(where, "l.log_ts >= FROM_UNIXTIME(?)")
+		args = append(args, f.StartTimestamp)
+	}
+	if f.EndTimestamp > 0 {
+		where = append(where, "l.log_ts <= FROM_UNIXTIME(?)")
+		args = append(args, f.EndTimestamp)
+	}
+	if f.TokenName != "" {
+		where = append(where, "l.token_name LIKE ?")
+		args = append(args, "%"+f.TokenName+"%")
+	}
+	if f.ModelName != "" {
+		where = append(where, "l.model_name LIKE ?")
+		args = append(args, "%"+f.ModelName+"%")
+	}
+	if f.ChannelID != nil {
+		where = append(where, "l.channel_id = ?")
+		args = append(args, *f.ChannelID)
+	}
+	if f.GroupName != "" {
+		where = append(where, "l.group_name LIKE ?")
+		args = append(args, "%"+f.GroupName+"%")
+	}
 	if f.RequestID != "" {
-		where = append(where, "request_id = ?")
+		where = append(where, "l.request_id = ?")
 		args = append(args, f.RequestID)
 	}
 	cond := strings.Join(where, " AND ")
 	var total int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM org_newapi_log WHERE `+cond, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM org_newapi_log l WHERE `+cond, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	qargs := append(append([]any{}, args...), f.Limit, f.Offset)
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, org_id, member_id, key_id, newapi_user_id, newapi_token_id,
-		        COALESCE(token_name,''), log_type, COALESCE(model_name,''), channel_id,
-		        COALESCE(channel_name,''), COALESCE(group_name,''), COALESCE(request_id,''),
-		        quota, prompt_tokens, completion_tokens, use_time, is_stream, COALESCE(content,''),
-		        COALESCE(ip,''), COALESCE(other,''), newapi_log_id, log_ts, created_at
-		   FROM org_newapi_log
+		`SELECT l.id, l.org_id, l.member_id, COALESCE(m.display_name,''), COALESCE(m.login_email,''), l.key_id, l.newapi_user_id, l.newapi_token_id,
+		        COALESCE(l.token_name,''), l.log_type, COALESCE(l.model_name,''), l.channel_id,
+		        COALESCE(l.channel_name,''), COALESCE(l.group_name,''), COALESCE(l.request_id,''),
+		        l.quota, l.prompt_tokens, l.completion_tokens, l.use_time, l.is_stream, COALESCE(l.content,''),
+		        COALESCE(l.ip,''), COALESCE(l.other,''), l.newapi_log_id, l.log_ts, l.created_at
+		   FROM org_newapi_log l
+		   LEFT JOIN member m ON m.id = l.member_id AND m.org_id = l.org_id
 		  WHERE `+cond+`
-		  ORDER BY log_ts DESC, newapi_log_id DESC
+		  ORDER BY l.log_ts DESC, l.newapi_log_id DESC
 		  LIMIT ? OFFSET ?`, qargs...)
 	if err != nil {
 		return nil, 0, err
@@ -220,7 +335,7 @@ func (s *Store) ListOrgNewapiLogs(ctx context.Context, f OrgNewapiLogFilter) ([]
 	out := make([]OrgNewapiLog, 0)
 	for rows.Next() {
 		var r OrgNewapiLog
-		if err := rows.Scan(&r.ID, &r.OrgID, &r.MemberID, &r.KeyID, &r.NewapiUserID, &r.NewapiTokenID,
+		if err := rows.Scan(&r.ID, &r.OrgID, &r.MemberID, &r.MemberName, &r.MemberEmail, &r.KeyID, &r.NewapiUserID, &r.NewapiTokenID,
 			&r.TokenName, &r.LogType, &r.ModelName, &r.ChannelID, &r.ChannelName, &r.GroupName, &r.RequestID,
 			&r.Quota, &r.PromptTokens, &r.CompletionTokens, &r.UseTime, &r.IsStream, &r.Content, &r.IP, &r.Other,
 			&r.NewapiLogID, &r.LogTS, &r.CreatedAt); err != nil {
@@ -231,7 +346,16 @@ func (s *Store) ListOrgNewapiLogs(ctx context.Context, f OrgNewapiLogFilter) ([]
 	return out, total, rows.Err()
 }
 
-func (s *Store) ListMemberTokenMappings(ctx context.Context, orgID int64) ([]MemberTokenMapping, error) {
+// ListMemberTokenMappings 员工↔token 映射(运营排障)。B4(28):分页,不再一次拉全量(历史令牌多的大客户首屏慢)。
+func (s *Store) ListMemberTokenMappings(ctx context.Context, orgID int64, limit, offset int) ([]MemberTokenMapping, int, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	var total int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM member_key_token WHERE org_id = ?`, orgID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT mkt.id, mkt.key_id, mkt.org_id, mkt.member_id,
 		        COALESCE(m.display_name,''), COALESCE(m.login_email,''), COALESCE(m.status,''),
@@ -242,9 +366,10 @@ func (s *Store) ListMemberTokenMappings(ctx context.Context, orgID int64) ([]Mem
 		   FROM member_key_token mkt
 		   LEFT JOIN member m ON m.id = mkt.member_id AND m.org_id = mkt.org_id
 		  WHERE mkt.org_id = ?
-		  ORDER BY mkt.member_id ASC, mkt.key_id ASC, mkt.rotation DESC, mkt.id DESC`, orgID)
+		  ORDER BY mkt.member_id ASC, mkt.key_id ASC, mkt.rotation DESC, mkt.id DESC
+		  LIMIT ? OFFSET ?`, orgID, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	out := make([]MemberTokenMapping, 0)
@@ -254,13 +379,13 @@ func (s *Store) ListMemberTokenMappings(ctx context.Context, orgID int64) ([]Mem
 		if err := rows.Scan(&m.KeyTokenID, &m.KeyID, &m.OrgID, &m.MemberID, &m.DisplayName, &m.LoginEmail,
 			&m.MemberStatus, &memberDeleted, &m.NewapiTokenID, &m.TokenName, &isCurrent, &m.KeyMasked,
 			&m.Rotation, &m.TokenStatus, &m.NewapiGroup, &m.TeamID, &m.CreatedAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		m.MemberDeleted = memberDeleted == 1
 		m.IsCurrent = isCurrent == 1
 		out = append(out, m)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 func nullString(v string) any {

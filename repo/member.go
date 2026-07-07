@@ -11,11 +11,34 @@ import (
 
 // MemberFilter 是成员列表的过滤条件(10 §1.5;对应原型 members 页 _mq/_mteam/_mstatus)。
 type MemberFilter struct {
-	Q      string // 关键词:匹配 display_name / login_email
+	Q      string // 关键词:匹配 display_name / login_email / key_masked
+	OrgID  *int64
 	TeamID *int64
 	Status string
 	Limit  int
 	Offset int
+}
+
+type MemberOverview struct {
+	ID             int64   `json:"id"`
+	OrgID          int64   `json:"org_id"`
+	OrgName        string  `json:"org_name"`
+	TeamID         *int64  `json:"team_id"`
+	TeamName       string  `json:"team_name,omitempty"`
+	LoginEmail     string  `json:"login_email"`
+	DisplayName    *string `json:"display_name"`
+	Role           string  `json:"role"`
+	TierID         *int64  `json:"tier_id"`
+	TierName       string  `json:"tier_name,omitempty"`
+	NewapiGroup    *string `json:"newapi_group"`
+	Status         string  `json:"status"`
+	KeyMasked      *string `json:"key_masked"`
+	NewapiTokenID  *int64  `json:"newapi_token_id"`
+	MonthlyLimit   *int64  `json:"monthly_limit_quota"`
+	ConsumedQuota  int64   `json:"consumed_quota"`
+	RemainingQuota *int64  `json:"remaining_quota,omitempty"`
+	BootstrapState string  `json:"bootstrap_state"`
+	CreatedAt      string  `json:"created_at"`
 }
 
 // CreateMemberProvisional 先建 provisioning 中间态成员行(尚无 new-api 用户),返回 member.id。
@@ -295,9 +318,9 @@ func (s *Store) ListMembers(ctx context.Context, orgID int64, f MemberFilter) ([
 	where := []string{"org_id = ?", "deleted_at IS NULL"}
 	args := []any{orgID}
 	if f.Q != "" {
-		where = append(where, "(display_name LIKE ? OR login_email LIKE ?)")
+		where = append(where, "(display_name LIKE ? OR login_email LIKE ? OR key_masked LIKE ?)")
 		like := "%" + f.Q + "%"
-		args = append(args, like, like)
+		args = append(args, like, like, like)
 	}
 	if f.TeamID != nil {
 		where = append(where, "team_id = ?")
@@ -327,6 +350,77 @@ func (s *Store) ListMembers(ctx context.Context, orgID int64, f MemberFilter) ([
 		m, err := scanMember(rows)
 		if err != nil {
 			return nil, 0, err
+		}
+		out = append(out, m)
+	}
+	return out, total, rows.Err()
+}
+
+func (s *Store) ListAllMembers(ctx context.Context, f MemberFilter) ([]MemberOverview, int, error) {
+	// B3(28):管理类账号(运营方/组织管理员)过滤下沉 SQL——原前端过滤导致 total 与可见行错位(计数/翻页真 bug)。
+	where := []string{"m.deleted_at IS NULL", "o.deleted_at IS NULL", "m.role NOT IN ('operator','org_admin')"}
+	args := []any{}
+	if f.OrgID != nil {
+		where = append(where, "m.org_id = ?")
+		args = append(args, *f.OrgID)
+	}
+	if f.Q != "" {
+		where = append(where, "(m.display_name LIKE ? OR m.login_email LIKE ? OR m.key_masked LIKE ? OR o.name LIKE ?)")
+		like := "%" + f.Q + "%"
+		args = append(args, like, like, like, like)
+	}
+	if f.TeamID != nil {
+		where = append(where, "m.team_id = ?")
+		args = append(args, *f.TeamID)
+	}
+	if f.Status != "" {
+		where = append(where, "m.status = ?")
+		args = append(args, f.Status)
+	}
+	cond := strings.Join(where, " AND ")
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM member m JOIN organization o ON o.id = m.org_id WHERE `+cond, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	if f.Limit <= 0 || f.Limit > 200 {
+		f.Limit = 50
+	}
+	pageArgs := append(append([]any{}, args...), f.Limit, f.Offset)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT m.id, m.org_id, COALESCE(o.name,''), m.team_id, COALESCE(t.name,''),
+		        m.login_email, m.display_name, m.role, m.tier_id, COALESCE(ti.name,''),
+		        m.newapi_group, m.status, m.key_masked, m.newapi_token_id, ti.monthly_limit,
+		        COALESCE(ul.consumed_quota,0), m.bootstrap_state, DATE_FORMAT(m.created_at, '%Y-%m-%dT%H:%i:%sZ')
+		   FROM member m
+		   JOIN organization o ON o.id = m.org_id
+		   LEFT JOIN team t ON t.id = m.team_id AND t.org_id = m.org_id
+		   LEFT JOIN tier ti ON ti.id = m.tier_id AND ti.org_id = m.org_id
+		   LEFT JOIN (
+		     SELECT org_id, member_id, SUM(consumed_quota) AS consumed_quota
+		       FROM usage_ledger
+		      GROUP BY org_id, member_id
+		   ) ul ON ul.org_id = m.org_id AND ul.member_id = m.id
+		  WHERE `+cond+`
+		  ORDER BY m.org_id ASC, m.id DESC
+		  LIMIT ? OFFSET ?`, pageArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := make([]MemberOverview, 0)
+	for rows.Next() {
+		var m MemberOverview
+		if err := rows.Scan(&m.ID, &m.OrgID, &m.OrgName, &m.TeamID, &m.TeamName, &m.LoginEmail, &m.DisplayName,
+			&m.Role, &m.TierID, &m.TierName, &m.NewapiGroup, &m.Status, &m.KeyMasked, &m.NewapiTokenID,
+			&m.MonthlyLimit, &m.ConsumedQuota, &m.BootstrapState, &m.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		if m.MonthlyLimit != nil {
+			remaining := *m.MonthlyLimit - m.ConsumedQuota
+			if remaining < 0 {
+				remaining = 0
+			}
+			m.RemainingQuota = &remaining
 		}
 		out = append(out, m)
 	}

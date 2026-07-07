@@ -406,7 +406,10 @@ func (s *Service) OffboardMember(ctx context.Context, c session.Claims, orgID, m
 	return nil
 }
 
-// RestoreOffboardedMember 恢复入职(org_admin):清软删 + 置 active;无 token,员工登录后自助重建 key(新 key)。
+// RestoreOffboardedMember 恢复入职(org_admin):清软删 + 置 active,并**平台内联重建 key**。
+// A1(28-§阻断):员工 key 纯只读、不再自助重建——恢复时由平台建好 token,恢复的员工立即有可用 key;
+// 员工通过 mykey 只读查看 + 复制完整(揭示端点,doc 27 §3.2)拿到明文。
+// 幂等:重建仅当成员 active 且无 token 指针(离职时置 NULL)且已 bootstrap——重试(重建失败后)仍会补建。
 func (s *Service) RestoreOffboardedMember(ctx context.Context, c session.Claims, orgID, memberID int64) error {
 	if err := assertOrgScope(c, orgID); err != nil {
 		return err
@@ -417,7 +420,67 @@ func (s *Service) RestoreOffboardedMember(ctx context.Context, c session.Claims,
 	if err := s.store.RestoreOffboardedMember(ctx, orgID, memberID); err != nil {
 		return apperr.Internal("").WithCause(err)
 	}
+	m, err := s.store.GetMember(ctx, orgID, memberID)
+	if err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	if m.Status == model.MemberStatusActive && m.NewapiTokenID == nil && m.BootstrapState == model.BootstrapDone {
+		if rerr := s.rebuildMemberTokenInline(ctx, orgID, m); rerr != nil {
+			// 成员已恢复 active 但重建 key 失败:不回滚恢复(成员资料/历史已在),返回错误让管理员重试;
+			// 重试时成员仍 active + token nil,会再次内联补建(幂等)。
+			s.log.Error("恢复入职:内联重建 key 失败(成员已 active 但暂无 key,可重试恢复补建)", "member_id", memberID, "err", rerr)
+			return rerr
+		}
+	}
 	s.audit(ctx, c, orgID, "restore_member", "member", &memberID, nil)
+	return nil
+}
+
+// rebuildMemberTokenInline 平台内联为成员(重新)建 token 并落库(A1:员工 key 全程平台驱动,不再自助)。
+// 复用 OpenMember 的建 token 口径:解析计价分组 + 补 org 可用分组 + tier 模型限制 + org 凭证建 token → 落库。
+func (s *Service) rebuildMemberTokenInline(ctx context.Context, orgID int64, m *model.Member) error {
+	org, err := s.store.GetOrganization(ctx, orgID)
+	if err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	var tier *model.Tier
+	if m.TierID != nil {
+		if t, terr := s.store.GetTier(ctx, orgID, *m.TierID); terr == nil {
+			tier = t
+		}
+	}
+	grp := resolveTokenGroup(tier, org)
+	// 令牌分组须在 org 可用集(best-effort,不补则令牌用业务分组会 403),须在建 token 前。
+	if aerr := s.upstream.AddOrgUsableGroup(ctx, s.orgUserGroup(ctx, orgID), grp); aerr != nil {
+		s.log.Warn("恢复:加 org 可用分组失败(令牌可能 403,需补)", "member_id", m.ID, "group", grp, "err", aerr)
+	}
+	s.ensureTotalDiscountCoversGroup(ctx, orgID, grp)
+
+	nextRotation := m.KeyRotation + 1
+	spec := newapi.TokenSpec{Name: deriveTokenName(m.ID, nextRotation), UnlimitedQuota: true, ExpiredTime: -1, Group: grp}
+	if tier != nil {
+		spec.ModelLimits = tier.ModelSet // 与 OpenMember 一致:网关数据面限模型(真拦截)
+	}
+	var newID int
+	var newKey string
+	if berr := s.withOrgCred(ctx, orgID, func(cred newapi.MemberCred) error {
+		tid, e := s.upstream.CreateToken(ctx, cred, spec)
+		if e != nil {
+			return e
+		}
+		k, e := s.upstream.RevealTokenKey(ctx, cred, tid)
+		if e != nil {
+			return e
+		}
+		newID, newKey = tid, k
+		return nil
+	}); berr != nil {
+		return mapUpstream(berr)
+	}
+	masked := maskKey(newKey)
+	if err := s.store.UpdateMemberKey(ctx, orgID, m.ID, int64(newID), masked, spec.Name, nextRotation); err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
 	return nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/nexusapi-platform/enterprise/pkg/session"
@@ -14,12 +15,13 @@ import (
 
 // Handler 持有依赖,挂载所有平台 REST 路由(10 §1.7,前缀 /api/v1)。
 type Handler struct {
-	svc     *service.Service
-	signer  *session.Signer
-	log     *slog.Logger
-	version string
-	mvpMode bool            // 改动⑥:MVP 灰度封锁(mvpGate 路由白名单 + /me 透出 mvp_mode 给前端藏菜单)
-	authLim *attemptLimiter // A2:登录/改密账号级失败退避(应用层纵深)
+	svc            *service.Service
+	signer         *session.Signer
+	log            *slog.Logger
+	version        string
+	mvpMode        bool            // 改动⑥:MVP 灰度封锁(mvpGate 路由白名单 + /me 透出 mvp_mode 给前端藏菜单)
+	authLim        *attemptLimiter // A2:登录/改密账号级失败退避(应用层纵深)
+	gatewayBaseURL string          // F3(28):对客户展示的 API 接入地址(纯展示,可选;未配置则 mykey 不显示接入示例)
 }
 
 // New 构造 Handler。
@@ -28,7 +30,9 @@ func New(svc *service.Service, signer *session.Signer, log *slog.Logger, version
 		log = slog.Default()
 	}
 	markStarted(time.Now().Unix()) // /metrics uptime 起点
-	return &Handler{svc: svc, signer: signer, log: log, version: version, mvpMode: mvpMode, authLim: newAttemptLimiter()}
+	// NEXUS_GATEWAY_BASE_URL 在此直读(非注入):纯展示字段,不影响任何逻辑;避免为它改 New 签名波及调用方。
+	return &Handler{svc: svc, signer: signer, log: log, version: version, mvpMode: mvpMode,
+		authLim: newAttemptLimiter(), gatewayBaseURL: os.Getenv("NEXUS_GATEWAY_BASE_URL")}
 }
 
 // Routes 返回挂好中间件的根 http.Handler。
@@ -48,6 +52,8 @@ func (h *Handler) Routes() http.Handler {
 
 	// 组织(运营方)。
 	mux.HandleFunc("GET /api/v1/organizations", h.requireAuth(h.handleListOrgs))
+	mux.HandleFunc("GET /api/v1/newapi-logs", h.requireAuth(h.handleAllNewapiLogs)) // 运营方全局 new-api 日志镜像
+	mux.HandleFunc("GET /api/v1/members", h.requireAuth(h.handleListAllMembers))    // 运营方全局员工/Key 管理
 	mux.HandleFunc("POST /api/v1/organizations", h.requireAuth(h.handleCreateOrg))
 	mux.HandleFunc("GET /api/v1/organizations/{id}", h.requireAuth(h.handleGetOrg))
 	mux.HandleFunc("PATCH /api/v1/organizations/{id}", h.requireAuth(h.handleUpdateOrg))
@@ -90,6 +96,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("PATCH /api/v1/members/{id}", h.requireAuth(h.handleUpdateMember))
 	mux.HandleFunc("POST /api/v1/members/{id}/role", h.requireAuth(h.handleAssignRole))
 	mux.HandleFunc("POST /api/v1/members/{id}/key:rotate", h.requireAuth(h.handleRotateKey))
+	mux.HandleFunc("POST /api/v1/members/{id}/key:reveal", h.requireAuth(h.handleRevealKey)) // 揭示明文 key 供复制(operator 403,path 含 key: 命中支持态红线墙)
 	mux.HandleFunc("POST /api/v1/members/{id}/key:ip-whitelist", h.requireAuth(h.handleSetKeyIP))
 	// 改动③:员工自助建 key(选模型分组)+ 列本企业可用模型分组(分组选择器)。MVP 白名单已含。
 	mux.HandleFunc("POST /api/v1/members/{id}/tokens", h.requireAuth(h.handleCreateMemberToken))

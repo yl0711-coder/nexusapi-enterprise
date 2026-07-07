@@ -1,16 +1,13 @@
-// commitUsageOnly 抽取回归 · 三态钱路径 golden(交付批次「历史日志全量回填」步骤3,文档24-§4.4)。
+// commitUsageOnly 抽取回归 · 三态钱路径 golden(架构B版,BE③ observe 拆除后更新)。
 //
-// 背景:回填与 forward 结算共用"只写报表"落账段,故把 settlement.go:287-299(ledger 桶 + usage_detail)
-// 抽成 commitUsageOnly(ctx,tx,aggs,details)。扣余额(DeductBalanceTx)+ 推全局水位(AdvanceCursorTx)
-// 留在 RunSettlement 事务后半段、forward 独有。本测试锁死抽取"逐字节不变":对固定日志集,三个状态下
-//   - 落账(ledger 精确值 + detail 行数)与推水位(精确 log_id)**三态完全一致**(证 commitUsageOnly + 推水位没被动坏);
-//   - 扣余额与"扣费审计"只在 observe=false 且该组织 billing_enabled=true 时发生(证钱门仍在 commitUsageOnly 之外)。
+// 架构B(33 §5/§12-9):RunSettlement 的 company_balance 扣款分支已**整体拆除**(第二账砍掉,
+// 钱的执行在 new-api 原生双扣;observe 短路一并拆除,结算无业务分支)。本测试的锁死点随之更新为:
+//   - 落账(ledger 精确值 + detail 行数)与推水位(精确 log_id)**三态完全一致**(commitUsageOnly 没被动坏);
+//   - **三态都绝不扣 company_balance**(consumed 恒 0、balance 恒 = A)——扣款分支拆除的硬验收
+//     (33 §11-2:observe 短路拆除是阶段1 硬验收项,这里反向锁死"live+billing on 也不再扣");
+//   - **三态都无 settlement_deduct 审计**(postBal 驱动的扣费副作用已随分支删除)。
 //
-// 三态(302-320 的 observeMode + per-org billing_enabled 两道门):
-//  1. observe=true                      → 不扣;ledger+detail+推水位照常。
-//  2. observe=false + billing_enabled=0 → 也不扣(v1 裁定B,观测期主力路径,最易漏,单列一态);落账+推水位照常。
-//  3. observe=false + billing_enabled=1 → 扣;并触发扣费审计(postBal 驱动的提交后副作用)。
-//
+// 三态沿用旧参数矩阵(observe × billing_enabled)以证明这两个旗标对结算落账已无任何分支效应。
 // 解耦:setup(开通/建 token/充值)一律走非 observe svc(可靠路径);仅 RunSettlement 那一下换成待测状态的 svc。
 package integration
 
@@ -65,23 +62,18 @@ func TestIntegration_CommitUsageOnlyThreeStateGolden(t *testing.T) {
 		}
 	}
 
-	// (b) 扣余额:态1/2 为 0(balance 原样 == A),态3 精确扣 C(balance == A−C)。
-	if s1.consumed != 0 || s1.balance != A {
-		t.Errorf("态1(observe)不得扣钱:应 consumed=0 balance=A=%d,实 consumed=%d balance=%d", A, s1.consumed, s1.balance)
-	}
-	if s2.consumed != 0 || s2.balance != A {
-		t.Errorf("态2(live+billing off)不得扣钱(v1 裁定B):应 consumed=0 balance=A=%d,实 consumed=%d balance=%d", A, s2.consumed, s2.balance)
-	}
-	if s3.consumed != C || s3.balance != A-C {
-		t.Errorf("态3(live+billing on)应精确扣 C=%d:balance 应==A−C=%d,实 consumed=%d balance=%d", C, A-C, s3.consumed, s3.balance)
+	// (b) 架构B扣款分支拆除硬验收:**三态都绝不扣 company_balance**(第二账退役,33 §5/§12-9)。
+	for name, o := range map[string]goldenObs{"observe": s1, "live+billoff": s2, "live+billon": s3} {
+		if o.consumed != 0 || o.balance != A {
+			t.Errorf("[%s] 架构B下结算绝不扣 company_balance:应 consumed=0 balance=A=%d,实 consumed=%d balance=%d",
+				name, A, o.consumed, o.balance)
+		}
 	}
 
-	// (d) 提交后副作用(扣费审计,postBal 驱动)只在态3触发 → 证 postBal 生成段没被 commitUsageOnly 带走。
-	if s1.deductAudit != 0 || s2.deductAudit != 0 {
-		t.Errorf("态1/2 不得有 settlement_deduct 审计(postBal 应为空),实 s1=%d s2=%d", s1.deductAudit, s2.deductAudit)
-	}
-	if s3.deductAudit != 1 {
-		t.Errorf("态3 应有恰 1 条 settlement_deduct 审计(postBal 驱动的提交后副作用照常),实=%d", s3.deductAudit)
+	// (d) 扣费审计(settlement_deduct)随扣款分支删除:三态都必须为 0。
+	if s1.deductAudit != 0 || s2.deductAudit != 0 || s3.deductAudit != 0 {
+		t.Errorf("架构B下不得再有 settlement_deduct 审计(扣款分支已拆),实 s1=%d s2=%d s3=%d",
+			s1.deductAudit, s2.deductAudit, s3.deductAudit)
 	}
 }
 

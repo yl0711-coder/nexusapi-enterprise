@@ -371,9 +371,7 @@ func (s *Service) GetBillingSettings(ctx context.Context, c session.Claims, orgI
 	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
 		return nil, err
 	}
-	if err := s.mvpHidePrice(c); err != nil { // MVP(观测)藏价:客户直连不可读计费开关/阈值;运营方/支持态正常
-		return nil, err
-	}
+	// 藏价机制已废除(架构B,33 §12-7,ADR §9 镜像可见性):org_admin 正常可读计费开关/阈值。
 	f, err := s.store.GetOrgBillingFlags(ctx, orgID)
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)

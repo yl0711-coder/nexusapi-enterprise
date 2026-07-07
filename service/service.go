@@ -63,6 +63,9 @@ type Service struct {
 	// ledger 钱核心进程内运行态(架构B 阶段1,BE②:订阅补满桶去重/恒等式扫描限频/负漂移双轮确认)。
 	// 零值可用(懒初始化);单 leader 进程语义,多节点前随选主重造(见 ledger.go)。
 	ledger ledgerRuntime
+	// 金库低预警跨越去抖状态(BE③ treasury_alert.go;进程内,零值可用,多节点由 leader gate 单跑)。
+	treasuryAlertMu sync.Mutex
+	treasuryBelow   map[int64]bool
 }
 
 // Deps 是构造 Service 的依赖集合。

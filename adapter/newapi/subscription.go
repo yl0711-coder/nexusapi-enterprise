@@ -39,6 +39,10 @@ func (a *Adapter) GetSelfSubscription(ctx context.Context, cred MemberCred) (*Se
 // 幂等(重复设同值无害),失败可重试——调用方放进 EnsureOrgProvisioned 幂等路径,不靠一次性动作(20-§7 兜底)。
 func (a *Adapter) SetBillingPreference(ctx context.Context, cred MemberCred, pref string) error {
 	body := map[string]string{"billing_preference": pref}
-	_, err := a.c.do(ctx, stepSubscription, "PUT", "/api/subscription/self/preference", userAuth(cred), body)
-	return err
+	// do 返回 *UpstreamError:直接 `return err` 会把 nil 指针装进非 nil 的 error 接口(Go typed-nil 陷阱,
+	// 调用方 err!=nil 恒真 → 误走失败分支;adapter.go ManageUserQuota 同款规避)。先判空再返回。
+	if _, err := a.c.do(ctx, stepSubscription, "PUT", "/api/subscription/self/preference", userAuth(cred), body); err != nil {
+		return err
+	}
+	return nil
 }

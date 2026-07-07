@@ -190,23 +190,17 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		t.Errorf("新成员未出现在列表或非 active")
 	}
 
-	// 10) 轮换 key(成员本人):签发成员会话,调 :rotate,得新 key,旧 key 应不同。
+	// 10) 轮换 key(成员本人):28-A1 后员工 key 纯只读,自助轮换对 member 一律 403(现状如实断言)。
+	// 架构B(31-ADR/33 §5 退役清单):A 版轮换路径整体退役,成员自助令牌在阶段1 以 /me/tokens 重写——届时本段随之重写。
 	memberTok, _ := signer.Issue(session.Claims{MemberID: openResp.MemberID, OrgID: orgID, Role: session.RoleMember, TeamID: teamResp.ID})
-	var rotResp struct {
-		APIKey    string `json:"api_key"`
-		KeyMasked string `json:"key_masked"`
+	if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/key:rotate", openResp.MemberID), memberTok, nil, nil); st != http.StatusForbidden {
+		t.Fatalf("A1 现状:成员自助轮换应 403,得 HTTP=%d", st)
 	}
-	if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/key:rotate", openResp.MemberID), memberTok, nil, &rotResp); st != http.StatusOK {
-		t.Fatalf("轮换 key HTTP=%d", st)
-	}
-	if rotResp.APIKey == "" || rotResp.APIKey == originalKey {
-		t.Errorf("轮换应得不同的新 key:old=%s new=%s", mask(originalKey), mask(rotResp.APIKey))
-	}
-	t.Logf("轮换 key ok: 新 masked=%s", rotResp.KeyMasked)
+	t.Logf("轮换 key 403 ok(A1 员工只读现状;架构B 阶段1 将以 /me/tokens 重写)")
 
-	// v2 M1:轮换后同一主槽,旧令牌置 superseded、插新 current(1 槽 / 2 令牌 / 1 current / v2)= 历史按 key_id 连续。
-	if sl, tk, cu, nm := queryMemberKey(t, store.DB(), orgID, openResp.MemberID); sl != 1 || tk != 2 || cu != 1 || nm != fmt.Sprintf("nexus_m%d_v2", openResp.MemberID) {
-		t.Fatalf("轮换后 member_key 异常: slots=%d tokens=%d current=%d name=%q(应 1/2/1/nexus_m%d_v2)", sl, tk, cu, nm, openResp.MemberID)
+	// v2 M1(A1 后轮换未发生):主槽仍 1 槽/1 令牌/1 current/v1。
+	if sl, tk, cu, nm := queryMemberKey(t, store.DB(), orgID, openResp.MemberID); sl != 1 || tk != 1 || cu != 1 || nm != fmt.Sprintf("nexus_m%d_v1", openResp.MemberID) {
+		t.Fatalf("member_key 异常: slots=%d tokens=%d current=%d name=%q(应 1/1/1/nexus_m%d_v1)", sl, tk, cu, nm, openResp.MemberID)
 	}
 
 	// ===== RBAC 越权判定(08 §2)=====

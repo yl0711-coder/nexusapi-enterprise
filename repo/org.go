@@ -61,7 +61,7 @@ func (s *Store) GetOrgIDByNewapiUserID(ctx context.Context, newapiUserID int64) 
 
 // orgCols 组织查询列清单(与 scanOrg 一一对应,唯一来源防三处漂移)。
 const orgCols = `id, name, slug, status, timezone, newapi_group, default_tier_id, billing_mode, default_token_group, archived_at,
-	newapi_username, funding_mode, newapi_user_created_by_platform, member_cap_mode, billing_kind, created_at, updated_at`
+	newapi_username, funding_mode, newapi_user_created_by_platform, member_cap_mode, billing_kind, newapi_user_id, created_at, updated_at`
 
 // GetOrganization 按 id 取组织(未删)。不存在 → ErrNotFound。
 func (s *Store) GetOrganization(ctx context.Context, id int64) (*model.Organization, error) {
@@ -326,7 +326,7 @@ func scanOrg(r rowScanner) (*model.Organization, error) {
 	var o model.Organization
 	err := r.Scan(&o.ID, &o.Name, &o.Slug, &o.Status, &o.Timezone, &o.NewapiUserGroup,
 		&o.DefaultTierID, &o.BillingMode, &o.DefaultTokenGroup, &o.ArchivedAt, &o.NewapiUsername,
-		&o.FundingMode, &o.CreatedByPlatform, &o.MemberCapMode, &o.BillingKind, &o.CreatedAt, &o.UpdatedAt)
+		&o.FundingMode, &o.CreatedByPlatform, &o.MemberCapMode, &o.BillingKind, &o.NewapiUserID, &o.CreatedAt, &o.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

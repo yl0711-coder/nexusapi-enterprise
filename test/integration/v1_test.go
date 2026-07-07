@@ -64,38 +64,60 @@ func mkEnterpriseUser(t *testing.T, ctx context.Context, upstream newapi.NewapiA
 	return newapi.MemberCred{NewapiUserID: res.NewapiUserID, AccessToken: res.AccessToken}
 }
 
-// 裁定A(20-§2.1):observe 开着,开通成员也**真建令牌**(建令牌已从 observeMode 剥离,对齐 19-F2)。
+// 架构B(33 §3.2,取代旧「裁定A」用例):开通成员 = 建平台账号 + 成员服务账号 + 首笔划账,**不铸 key**;
+// 回显登录凭证一次;金库→成员划账守恒;金库不足整体失败(quarantined)。
 func TestIntegration_OpenMemberBuildsToken(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	svc, store, _ := v1Svc(t, ctx, "nexus_v1obt", true) // observe=true(v1 生产形态)
-	newapiSQLDSN := os.Getenv("NEXUS_IT_NEWAPI_SQL_DSN")
+	svc, store, upstream := v1Svc(t, ctx, "nexus_v1obt", false)
 	const orgID = int64(901)
 	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'obt-org', 'obt-slug')`, orgID); err != nil {
 		t.Fatalf("建组织失败: %v", err)
 	}
-	tierID, terr := store.CreateTier(ctx, &model.Tier{OrgID: orgID, Name: "obt-tier"})
+	// 门A:金库惰性开通(OpenMember 内 EnsureOrgProvisioned)——先手动确保 + 注资,验证幂等复用。
+	treasury, perr := svc.EnsureOrgProvisioned(ctx, orgID, "obt-org")
+	if perr != nil {
+		t.Fatalf("开金库失败: %v", perr)
+	}
+	if err := upstream.IncreaseUserQuota(ctx, treasury.NewapiUserID, 5_000_000); err != nil {
+		t.Fatalf("金库注资失败: %v", err)
+	}
+	amount := int64(2_000_000)
+	tierID, terr := store.CreateTier(ctx, &model.Tier{OrgID: orgID, Name: "obt-tier", AmountRaw: &amount})
 	if terr != nil {
 		t.Fatalf("建档失败: %v", terr)
 	}
 	admin := session.Claims{Role: session.RoleOrgAdmin, OrgID: orgID, MemberID: 999}
-	res, err := svc.OpenMember(ctx, admin, orgID, service.OpenMemberInput{Name: "观测建令牌", TierID: &tierID})
+	res, err := svc.OpenMember(ctx, admin, orgID, service.OpenMemberInput{Name: "架构B开通", TierID: &tierID})
 	if err != nil {
 		t.Fatalf("开通成员失败: %v", err)
 	}
-	if res.APIKey == "" || !strings.Contains(res.KeyMasked, "••••") {
-		t.Fatalf("🔴裁定A:observe 下开通成员应真建令牌回明文 key(仅一次),实 key=%q masked=%q", res.APIKey, res.KeyMasked)
+	if res.InitialPassword == "" || res.NewapiUserID == 0 || res.InitialQuotaRaw != amount {
+		t.Fatalf("🔴开通返回异常(应回显登录凭证+服务账号+首笔额度): %+v", res)
 	}
-	// 共享 newapi 实例:deriveTokenName 只含 memberID,别的测试库的 m1 也叫 nexus_m1_v1 → 按本组织 org user 限定。
-	uid, _, _, _ := store.GetOrgNewapiCred(ctx, orgID)
-	ndb, _ := sql.Open("mysql", newapiSQLDSN)
-	defer ndb.Close()
-	var live int
-	_ = ndb.QueryRowContext(ctx, `SELECT COUNT(*) FROM tokens WHERE name = ? AND user_id = ? AND deleted_at IS NULL`, fmt.Sprintf("nexus_m%d_v1", res.MemberID), uid).Scan(&live)
-	if live != 1 {
-		t.Fatalf("🔴new-api 侧该组织 user 下应有该成员令牌(nexus_m%d_v1),实 %d 个", res.MemberID, live)
+	// 守恒:金库 5M-2M=3M,成员=2M(读 DB 实时)。
+	tq, _ := upstream.GetUserQuota(ctx, treasury.NewapiUserID)
+	mq, _ := upstream.GetUserQuota(ctx, int(res.NewapiUserID))
+	if tq != 3_000_000 || mq != 2_000_000 {
+		t.Fatalf("🔴开通划账守恒破:金库=%d(期 3M) 成员=%d(期 2M)", tq, mq)
 	}
-	t.Logf("裁定A 真账 ok: observe 开着开通成员真建令牌(new-api 侧存在)+key 回显一次")
+	// 不铸 key:成员名下无令牌归属行。
+	var nTok int
+	_ = store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM member_key_token WHERE org_id=? AND member_id=?`, orgID, res.MemberID).Scan(&nTok)
+	if nTok != 0 {
+		t.Fatalf("🔴架构B 开通不应铸 key,实归属行=%d", nTok)
+	}
+	// tier_id 必填(契约)。
+	if _, err := svc.OpenMember(ctx, admin, orgID, service.OpenMemberInput{Name: "缺档位"}); err == nil {
+		t.Fatal("🔴缺 tier_id 应拒")
+	}
+	// 金库不足(剩 3M,档位要 3.5M)→ 整体失败(孤儿隔离 quarantined,不半成功)。
+	big := int64(3_500_000)
+	bigTier, _ := store.CreateTier(ctx, &model.Tier{OrgID: orgID, Name: "obt-big", AmountRaw: &big})
+	if _, err := svc.OpenMember(ctx, admin, orgID, service.OpenMemberInput{Name: "金库不足", TierID: &bigTier}); err == nil {
+		t.Fatal("🔴金库不足应整体失败")
+	}
+	t.Logf("架构B 开通真账 ok: 服务账号+登录凭证回显+首笔划账守恒+不铸 key+tier 必填+金库不足整体失败")
 }
 
 // 裁定B(20-§2.1)+M4:billing_enabled=关 的组织报表也有数据(同步解耦);未映射令牌归未知桶(member_id=0)不丢行。

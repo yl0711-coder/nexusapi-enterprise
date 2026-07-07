@@ -1,6 +1,7 @@
 // 托管多桶/入账/续充真账测试(v2 R3,涉钱必真账):对真 newapi 验
-//   ① 入账用 add 非 override(窗口=旧值+额,不是覆盖);② 守恒:已释放(窗口增量)+托管 = 总充值,绝不超拨;
-//   ③ 窗口封顶 escrowWindowCap、溢出入托管;④ 续充把托管并入窗口(add)。
+//
+//	① 入账用 add 非 override(窗口=旧值+额,不是覆盖);② 守恒:已释放(窗口增量)+托管 = 总充值,绝不超拨;
+//	③ 窗口封顶 escrowWindowCap、溢出入托管;④ 续充把托管并入窗口(add)。
 package integration
 
 import (
@@ -238,28 +239,30 @@ func TestIntegration_DisabledMemberSelfServeBlocked(t *testing.T) {
 	if err := svc.SetMemberStatus(ctx, admin, orgID, memberID, false); err != nil { // 停用(禁用不删)
 		t.Fatalf("停用失败: %v", err)
 	}
-	// A1(28-§阻断):员工 key 纯只读——三自助端点对 member 一律 403(基于角色,不再依赖 status)。
-	// 停用后成员用自己会话调 → 403。
-	if _, _, e := svc.CreateMemberToken(ctx, member, memberID, "default"); !isForbidden(e) {
-		t.Fatalf("🔴A1:member CreateMemberToken 应 403,实=%v", e)
+	// 架构B(33 §5):A1「member-403 层」随「org 凭证建 token」路径整体退役;成员自助令牌改走 /me/tokens,
+	// 门禁 = member-only + 成员须 active + 服务账号已开通(requireSelfServiceMember)。
+	// 停用后成员用自己会话调 → 403(M1 语义保留:未过期会话不能绕过禁用)。
+	if _, _, e := svc.ListMyTokens(ctx, member); !isForbidden(e) {
+		t.Fatalf("🔴停用成员 ListMyTokens 应 403,实=%v", e)
 	}
-	if _, _, e := svc.RotateKey(ctx, member, orgID, memberID); !isForbidden(e) {
-		t.Fatalf("🔴A1:member RotateKey 应 403,实=%v", e)
+	if _, e := svc.CreateMyToken(ctx, member, service.CreateMyTokenInput{Name: "blk", Group: "default"}); !isForbidden(e) {
+		t.Fatalf("🔴停用成员 CreateMyToken 应 403,实=%v", e)
 	}
-	if e := svc.SetKeyIPWhitelist(ctx, member, orgID, memberID, "203.0.113.5"); !isForbidden(e) {
-		t.Fatalf("🔴A1:member SetKeyIPWhitelist 应 403,实=%v", e)
+	if _, e := svc.RevealMyTokenKey(ctx, member, 1); !isForbidden(e) {
+		t.Fatalf("🔴停用成员 key:reveal 应 403,实=%v", e)
 	}
-	if _, e := svc.MemberUsableGroups(ctx, member); !isForbidden(e) {
-		t.Fatalf("🔴A1:member MemberUsableGroups 应 403,实=%v", e)
+	// 上级角色对 /me/tokens 无写权(33 §3.5 RBAC 铁律:member-only)。
+	if _, e := svc.CreateMyToken(ctx, admin, service.CreateMyTokenInput{Name: "adm", Group: "default"}); !isForbidden(e) {
+		t.Fatalf("🔴org_admin 写 /me/tokens 应 403,实=%v", e)
 	}
-	// 恢复启用后,member 侧仍一律 403(读只读,自助已整体下线,不再"恢复后可自助")。
+	// 恢复启用:该成员是 A 版存量行(无服务账号)→ 409 不可自助(而非放行)。
 	if err := svc.SetMemberStatus(ctx, admin, orgID, memberID, true); err != nil {
 		t.Fatalf("恢复启用失败: %v", err)
 	}
-	if _, _, e := svc.RotateKey(ctx, member, orgID, memberID); !isForbidden(e) {
-		t.Fatalf("🔴A1:启用后 member RotateKey 仍应 403(纯只读),实=%v", e)
+	if _, _, e := svc.ListMyTokens(ctx, member); e == nil {
+		t.Fatal("🔴无服务账号成员 ListMyTokens 应 409,实成功")
 	}
-	t.Logf("A1 真账 ok: member 自助 CreateMemberToken/RotateKey/SetKeyIPWhitelist/MemberUsableGroups 一律 403(纯只读,不依赖 status)")
+	t.Logf("架构B 门禁 ok: 停用成员 /me/tokens 全 403(不依赖前端)+ 上级角色无写权 + 无服务账号 409")
 }
 
 // F-A/F-C(真站联调发现):OpenMember 的 FinalizeBootstrap 失败必须补偿——删孤儿 token + 标 failed + 释放邮箱,不卡 provisioning。
@@ -267,65 +270,10 @@ func TestIntegration_DisabledMemberSelfServeBlocked(t *testing.T) {
 // OpenMember 建 token 得 nn → finalize 插 member_key_token(nn) 撞 uk 真报错(insertKeyTokenTx 是普通 INSERT 非 IGNORE)。
 // 去掉 F-A 补偿则本用例变红(member 卡 provisioning + 孤儿 token active)。
 func TestIntegration_OpenMemberFinalizeCompensation(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	svc, store, _, _ := escrowSvc(t, ctx, "nexus_fin")
-	newapiSQLDSN := os.Getenv("NEXUS_IT_NEWAPI_SQL_DSN")
-	const orgID = int64(601)
-	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'fin-org', 'fin-slug')`, orgID); err != nil {
-		t.Fatalf("建组织失败: %v", err)
-	}
-	if _, err := svc.EnsureOrgProvisioned(ctx, orgID, "fin-org"); err != nil {
-		t.Fatalf("开通失败: %v", err)
-	}
-	tierID, terr := store.CreateTier(ctx, &model.Tier{OrgID: orgID, Name: "fin-tier"})
-	if terr != nil {
-		t.Fatalf("建档失败: %v", terr)
-	}
-
-	ndb, err := sql.Open("mysql", newapiSQLDSN)
-	if err != nil {
-		t.Fatalf("连 newapi 库失败: %v", err)
-	}
-	defer ndb.Close()
-	var maxTok int64
-	_ = ndb.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM tokens`).Scan(&maxTok)
-	nn := maxTok + 100
-	if _, err := ndb.ExecContext(ctx, fmt.Sprintf("ALTER TABLE tokens AUTO_INCREMENT = %d", nn)); err != nil {
-		t.Fatalf("置 tokens auto_increment 失败: %v", err)
-	}
-	if _, err := store.DB().ExecContext(ctx,
-		`INSERT INTO member_key_token (key_id, org_id, member_id, newapi_token_id, token_name, is_current, rotation, status)
-		 VALUES (999, ?, 999, ?, 'stale', 1, 0, 'active')`, orgID, nn); err != nil {
-		t.Fatalf("预置 stale key_token 失败: %v", err)
-	}
-
-	admin := session.Claims{Role: session.RoleOrgAdmin, OrgID: orgID, MemberID: 999}
-	if _, oerr := svc.OpenMember(ctx, admin, orgID, service.OpenMemberInput{Name: "钱一", Email: "fin@t.local", TierID: &tierID}); oerr == nil {
-		t.Fatalf("🔴注入 finalize 失败(uk 撞 %d)应报错,实成功——注入未生效", nn)
-	}
-	// ① 成员不卡 provisioning:bootstrap_state=failed + 邮箱释放(failed- 前缀)。
-	var bs, email string
-	if err := store.DB().QueryRowContext(ctx, `SELECT bootstrap_state, login_email FROM member WHERE org_id=? ORDER BY id DESC LIMIT 1`, orgID).Scan(&bs, &email); err != nil {
-		t.Fatalf("查成员失败: %v", err)
-	}
-	if bs != model.BootstrapFailed {
-		t.Fatalf("🔴finalize 失败后 bootstrap_state 应=failed(不卡 provisioning),实=%s", bs)
-	}
-	if !strings.HasPrefix(email, "failed-") {
-		t.Fatalf("🔴finalize 失败应释放邮箱(failed- 前缀),实=%s", email)
-	}
-	// ② 无孤儿:补偿删除 new-api token nn(不再 active)。
-	var live int
-	_ = ndb.QueryRowContext(ctx, `SELECT COUNT(*) FROM tokens WHERE id=? AND deleted_at IS NULL`, nn).Scan(&live)
-	if live != 0 {
-		t.Fatalf("🔴finalize 失败应补偿删除孤儿 token,实 new-api 仍有 active token id=%d", nn)
-	}
-	// ③ 同邮箱可重开成功(邮箱已释放;新 token 得 nn+1 不撞)。
-	if _, rerr := svc.OpenMember(ctx, admin, orgID, service.OpenMemberInput{Name: "钱一", Email: "fin@t.local", TierID: &tierID}); rerr != nil {
-		t.Fatalf("🔴释放邮箱后同邮箱应可重开,实错: %v", rerr)
-	}
-	t.Logf("F-A/F-C 真账 ok: finalize 失败(uk 撞 nn=%d)→补偿删孤儿 token(不再active)+标 bootstrap_state=failed+释放邮箱→同邮箱重开成功", nn)
+	// 架构B(33 §5 退役):OpenMember 不再走「org 凭证建 token + FinalizeBootstrap」——本用例注入的
+	// member_key_token uk 撞车路径已不存在(开通=Provision saga,孤儿处置=disable+quarantined,
+	// 由 TestIntegration_ArchB_ProvisionSaga 覆盖)。留壳记档,阶段2 组长确认后删除。
+	t.Skip("架构B:A 版 FinalizeBootstrap 补偿路径已退役(开通孤儿处置改由 ArchB_ProvisionSaga 覆盖)")
 }
 
 // 步骤5:401 自愈——破坏 org access_token → token 操作 401 → EnsureFreshCred 重登刷新 → 重试成功。
@@ -381,67 +329,83 @@ func TestIntegration_CredSelfHeal401(t *testing.T) {
 
 // 步骤4:成员三态——禁用(token置禁用不删,key保留)/恢复(启用同key)/离职(删token+软删转离职列表)。
 func TestIntegration_MemberLifecycle(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// 架构B 生命周期(31-ADR §4.5 / 33 §3.2):停用/恢复 = disable/enable **成员自己的 new-api user**;
+	// 离职 = disable → 静默 → 未用额度反向划账退回金库(守恒);恢复入职 = enable + 如新建重新分配。
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	svc, store, _, _ := escrowSvc(t, ctx, "nexus_life")
+	svc, store, upstream, _ := escrowSvc(t, ctx, "nexus_life")
 	newapiSQLDSN := os.Getenv("NEXUS_IT_NEWAPI_SQL_DSN")
 	const orgID, memberID = int64(401), int64(1)
-	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'life-org', 'life-slug')`, orgID); err != nil {
+	// 金库 org(真 new-api user)+ 注资 $20。
+	treasuryCred := mkEnterpriseUser(t, ctx, upstream, "life-treasury")
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug, newapi_user_id) VALUES (?, 'life-org', 'life-slug', ?)`, orgID, treasuryCred.NewapiUserID); err != nil {
 		t.Fatalf("建组织失败: %v", err)
 	}
-	if _, err := svc.EnsureOrgProvisioned(ctx, orgID, "life-org"); err != nil {
-		t.Fatalf("开通失败: %v", err)
+	if err := upstream.IncreaseUserQuota(ctx, treasuryCred.NewapiUserID, 10_000_000); err != nil {
+		t.Fatalf("金库注资失败: %v", err)
 	}
-	if _, err := store.DB().ExecContext(ctx, `INSERT INTO member (id, org_id, login_email, status, bootstrap_state) VALUES (?, ?, 'life@t.local', 'active', 'done')`, memberID, orgID); err != nil {
+	// 档位(amount_raw=$4=2M)+ 成员行 → Provision saga 开通(建号+首笔划账)。
+	amount := int64(2_000_000)
+	tierID, terr := store.CreateTier(ctx, &model.Tier{OrgID: orgID, Name: "life-tier", AmountRaw: &amount})
+	if terr != nil {
+		t.Fatalf("建档失败: %v", terr)
+	}
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO member (id, org_id, tier_id, login_email, status, bootstrap_state) VALUES (?, ?, ?, 'life@t.local', 'provisioning', 'pending')`, memberID, orgID, tierID); err != nil {
 		t.Fatalf("建成员失败: %v", err)
 	}
-	tokenID := selfServeMemberToken(t, ctx, svc, store, orgID, memberID) // 真 token
+	uid, perr := svc.ProvisionMemberServiceAccount(ctx, orgID, memberID, "", amount, "test")
+	if perr != nil {
+		t.Fatalf("开通服务账号失败: %v", perr)
+	}
+	if err := store.ActivatePlatformAccount(ctx, orgID, memberID); err != nil {
+		t.Fatalf("置 active 失败: %v", err)
+	}
 
 	ndb, err := sql.Open("mysql", newapiSQLDSN)
 	if err != nil {
 		t.Fatalf("连 newapi 库失败: %v", err)
 	}
 	defer ndb.Close()
-	tokenStatus := func() int {
-		var s sql.NullInt64
-		_ = ndb.QueryRowContext(ctx, `SELECT status FROM tokens WHERE id = ?`, tokenID).Scan(&s)
-		return int(s.Int64)
+	userStatus := func() int {
+		var st sql.NullInt64
+		_ = ndb.QueryRowContext(ctx, `SELECT status FROM users WHERE id = ?`, uid).Scan(&st)
+		return int(st.Int64)
 	}
-	if st := tokenStatus(); st != 1 {
-		t.Fatalf("初始 token 应 enabled=1,实=%d", st)
+	if st := userStatus(); st != 1 {
+		t.Fatalf("初始成员 user 应 enabled=1,实=%d", st)
 	}
 	admin := session.Claims{Role: session.RoleOrgAdmin, OrgID: orgID, MemberID: 999}
 
-	// 禁用不删:token 置禁用(status=2),指针保留、成员 disabled。
+	// 停用:disable 成员 user(status=2,连带停其全部令牌;非 override)。
 	if err := svc.SetMemberStatus(ctx, admin, orgID, memberID, false); err != nil {
 		t.Fatalf("禁用失败: %v", err)
 	}
-	if st := tokenStatus(); st != 2 {
-		t.Fatalf("🔴禁用应把 token 置禁用 status=2(不删),实=%d", st)
+	if st := userStatus(); st != 2 {
+		t.Fatalf("🔴禁用应 disable 成员 user(status=2),实=%d", st)
 	}
 	m, _ := store.GetMember(ctx, orgID, memberID)
-	if m.NewapiTokenID == nil || *m.NewapiTokenID != tokenID {
-		t.Fatalf("🔴禁用不应删 token 指针(禁用不删,key 保留)")
-	}
 	if m.Status != model.MemberStatusDisabled {
 		t.Fatalf("成员状态应 disabled,实=%s", m.Status)
 	}
-
-	// 恢复:启用同一 token(status=1,同 key)。
+	// 恢复:enable(额度不动)。
 	if err := svc.SetMemberStatus(ctx, admin, orgID, memberID, true); err != nil {
 		t.Fatalf("恢复失败: %v", err)
 	}
-	if st := tokenStatus(); st != 1 {
-		t.Fatalf("🔴恢复应把 token 置启用 status=1,实=%d", st)
-	}
-	m2, _ := store.GetMember(ctx, orgID, memberID)
-	if m2.NewapiTokenID == nil || *m2.NewapiTokenID != tokenID {
-		t.Fatalf("🔴恢复应是同一 key(token 不变)")
+	if st := userStatus(); st != 1 {
+		t.Fatalf("🔴恢复应 enable(status=1),实=%d", st)
 	}
 
-	// 离职:删 token + 软删转离职列表(活跃列表消失)。
+	// 离职:disable → 静默 → 退额守恒(金库回到 10M-2M+2M=10M,成员=0)。
 	if err := svc.OffboardMember(ctx, admin, orgID, memberID); err != nil {
 		t.Fatalf("离职失败: %v", err)
+	}
+	if st := userStatus(); st != 2 {
+		t.Fatalf("🔴离职应 disable 成员 user,实=%d", st)
+	}
+	tq, _ := upstream.GetUserQuota(ctx, treasuryCred.NewapiUserID)
+	mq, _ := upstream.GetUserQuota(ctx, uid)
+	if tq != 10_000_000 || mq != 0 {
+		t.Fatalf("🔴离职退额守恒破:金库=%d(期 10M) 成员=%d(期 0)", tq, mq)
 	}
 	if _, gerr := store.GetMember(ctx, orgID, memberID); gerr == nil {
 		t.Fatalf("🔴离职后成员应从活跃列表消失(软删)")
@@ -450,7 +414,28 @@ func TestIntegration_MemberLifecycle(t *testing.T) {
 	if total != 1 || len(off) != 1 {
 		t.Fatalf("🔴离职成员应在离职列表,实 total=%d", total)
 	}
-	t.Logf("步骤4 成员三态真账 ok: 禁用→token status=2(不删/指针保留/近实时)、恢复→status=1(同 key)、离职→删 token+软删转离职列表(活跃列表消失,可恢复)")
+	// 幂等重调:余额 0 → 不双退。
+	if err := svc.OffboardMember(ctx, admin, orgID, memberID); err != nil {
+		t.Fatalf("离职重调应幂等成功: %v", err)
+	}
+	tq2, _ := upstream.GetUserQuota(ctx, treasuryCred.NewapiUserID)
+	if tq2 != 10_000_000 {
+		t.Fatalf("🔴离职重调双退:金库=%d", tq2)
+	}
+
+	// 恢复入职:enable + 如新建重新分配(金库→成员再划 2M)。
+	if err := svc.RestoreMember(ctx, admin, orgID, memberID, tierID); err != nil {
+		t.Fatalf("恢复入职失败: %v", err)
+	}
+	if st := userStatus(); st != 1 {
+		t.Fatalf("🔴恢复入职应 enable 成员 user,实=%d", st)
+	}
+	tq3, _ := upstream.GetUserQuota(ctx, treasuryCred.NewapiUserID)
+	mq3, _ := upstream.GetUserQuota(ctx, uid)
+	if tq3 != 8_000_000 || mq3 != 2_000_000 {
+		t.Fatalf("🔴恢复重新分配守恒破:金库=%d(期 8M) 成员=%d(期 2M)", tq3, mq3)
+	}
+	t.Logf("架构B 生命周期真账 ok: 停用/恢复=disable/enable user;离职=disable→退额守恒(幂等不双退);恢复=enable+重新分配守恒")
 }
 
 // escrowSvc 起一套对真 MySQL(独立库 dbName)+ 真 newapi 的非 observe 服务(escrow 涉钱测试公共脚手架)。返回同一把 keyring。

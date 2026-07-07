@@ -31,7 +31,8 @@ func isForbidden(err error) bool {
 	return errors.As(err, &e) && e.Code == apperr.CodeForbidden
 }
 
-// B档#1(结算扣款侧,P0·堵HIGH-1盲区):非 observe RunSettlement 真扣钱 → 守恒 + 水位去重防双扣。
+// B档#1(架构B更新,BE③ 扣款分支拆除):RunSettlement 只写报表(usage_ledger)+ 水位去重防双计;
+// company_balance **绝不再被扣**(第二账退役,33 §5/§12-9——扣款分支删除的硬验收,反向锁死)。
 func TestIntegration_SettlementDeductDedup(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -69,28 +70,38 @@ func TestIntegration_SettlementDeductDedup(t *testing.T) {
 		_ = store.DB().QueryRowContext(ctx, `SELECT total_consumed, balance FROM company_balance WHERE org_id=?`, orgID).Scan(&consumed, &balance)
 		return
 	}
+	readLedger := func() (sum int64) {
+		_ = store.DB().QueryRowContext(ctx, `SELECT COALESCE(SUM(consumed_quota),0) FROM usage_ledger WHERE org_id=?`, orgID).Scan(&sum)
+		return
+	}
 	if _, err := svc.RunSettlement(ctx); err != nil {
 		t.Fatalf("首次结算失败: %v", err)
 	}
+	if l1 := readLedger(); l1 != C {
+		t.Fatalf("🔴首次结算应落账 C=%d,实 usage_ledger=%d", C, l1)
+	}
 	c1, b1 := readBal()
-	if c1 != C {
-		t.Fatalf("🔴首次结算应扣消费 C=%d,实 total_consumed=%d", C, c1)
+	if c1 != 0 || b1 != A {
+		t.Fatalf("🔴架构B下结算绝不扣 company_balance(第二账退役):应 consumed=0 balance=A=%d,实 consumed=%d balance=%d", A, c1, b1)
 	}
-	if b1 != A-C {
-		t.Fatalf("🔴守恒破:balance 应=A−C=%d,实=%d", A-C, b1)
-	}
-	if _, err := svc.RunSettlement(ctx); err != nil { // 二次结算:水位去重,绝不双扣
+	if _, err := svc.RunSettlement(ctx); err != nil { // 二次结算:水位去重,绝不双计
 		t.Fatalf("二次结算失败: %v", err)
 	}
-	c2, b2 := readBal()
-	if c2 != C || b2 != A-C {
-		t.Fatalf("🔴重跑结算双扣了(去重失效):total_consumed %d→%d、balance %d→%d", c1, c2, b1, b2)
+	if l2 := readLedger(); l2 != C {
+		t.Fatalf("🔴重跑结算双计了(去重失效):usage_ledger %d→%d", C, l2)
 	}
-	t.Logf("B档#1 结算真扣钱去重守恒 ok: 扣 C=%d、balance=A−C=%d、守恒成立;重跑水位去重不双扣", C, A-C)
+	if c2, b2 := readBal(); c2 != 0 || b2 != A {
+		t.Fatalf("🔴重跑后 company_balance 被动了(扣款分支未拆净):consumed=%d balance=%d", c2, b2)
+	}
+	t.Logf("B档#1(架构B) 结算只写报表 ok: 落账 C=%d 一次;重跑水位去重不双计;company_balance 恒不动(balance=A=%d)", C, A)
 }
 
 // B档#1(结算扣款侧·堵HIGH-1盲区):非 observe 余额耗尽→硬停 converge 把成员 token override→0;充值回正→恢复档额。
+// 架构B退役下线(BE③,33 §5/§12-9):本用例依赖"结算扣 company_balance→余额耗尽→recomputeOrgStatus→override 硬停"
+// 整条链,其中扣款分支已删(链条起点消失),且 override 硬停在 B 下被 disable 硬停取代(31-ADR §4.5,归 BE①)。
+// 保留骨架供阶段2 组长对齐时决定删除或改写为 disable 链路验收。
 func TestIntegration_HardStopConvergeRecover(t *testing.T) {
+	t.Skip("架构B退役:结算扣款分支已拆(33 §12-9),余额驱动 override 硬停链不存在;硬停改 disable(BE① HardStopOrg),阶段2 组长裁定本用例去留")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	svc, store, _, _ := escrowSvc(t, ctx, "nexus_hstop") // 非 observe

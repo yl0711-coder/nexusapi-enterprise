@@ -31,20 +31,18 @@ type UsageReport struct {
 	ByTeam     []UsageBucket `json:"by_team,omitempty"` // F3:按团队(key=team_id,"0"=未分组);仅整组织看板(无 user/team 过滤时)填
 }
 
-// BudgetRef 是「额度参考条」最小只读数据(#4·总监裁定走 B):只两个美元口径数,不带任何价/控字段。
+// BudgetRef 是「额度参考条」最小只读数据(#4):只两个 raw 口径数,不带任何价/控字段。
+// 架构B(BE③ 读口径改造,33 §5):预付口径从 company_balance.total_recharged(第二账,已退役)
+// 改为**读求和余额**(金库+Σ成员实时读 new-api,单一真相);字段名随语义换为 balance_raw(FE 契约已广播)。
 type BudgetRef struct {
-	ConsumedQuota  int64 `json:"consumed_quota"`  // 已用(usage_ledger 累计 SUM;非冻结的 company_balance.total_consumed)
-	RechargedQuota int64 `json:"recharged_quota"` // 预付总额(company_balance.total_recharged)
+	ConsumedQuota int64 `json:"consumed_quota"` // 已用(usage_ledger 累计 SUM,报表口径)
+	BalanceRaw    int64 `json:"balance_raw"`    // 当前余额(读求和:金库 user.quota + Σ成员 user.quota)
 }
 
-// OrgBudgetRef 额度参考条(#4·B 方案):给客户/运营看「已用$ / 预付$」两数,辅助成本感知与垫钱敞口。
-//
-// 藏价红线(总监定):
-//   - 这是藏价的"有意例外":客户看自己美元账单天经地义、不泄倍率,故本端点**不挂 mvpHidePrice**
-//     (GetBalance/pricing/billing-settings 维持对客户 observe 下 404 不变,不开口子)。
-//   - 只返两数,绝不带 ratio/折扣/低位阈值/退款明细/计费开关。
-//   - 已用必须从 usage_ledger 求和(与看板消耗$同源):observe 下 company_balance.total_consumed 冻结,
-//     读它会得 0/旧值;预付读 total_recharged(充值仍更新它,不冻结)。
+// OrgBudgetRef 额度参考条(#4):给客户/运营看「已用 / 当前余额」两数,辅助成本感知。
+//   - 只返两数,绝不带 ratio/折扣/低位阈值/计费开关。
+//   - 已用从 usage_ledger 求和(与看板消耗同源);余额=读求和(orgBalanceTotals,全走 DB 不读缓存)。
+//   - 藏价机制已废除(33 §12-7,ADR §9 镜像可见性):不再挂 mvpHidePrice/字段裁剪。
 //   - org 作用域(assertOrgScope),operator + org_admin。
 func (s *Service) OrgBudgetRef(ctx context.Context, c session.Claims, orgID int64) (*BudgetRef, error) {
 	if err := assertOrgScope(c, orgID); err != nil {
@@ -58,11 +56,11 @@ func (s *Service) OrgBudgetRef(ctx context.Context, c session.Claims, orgID int6
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)
 	}
-	bal, err := s.store.GetOrCreateBalance(ctx, orgID)
+	bal, err := s.orgBalanceTotals(ctx, orgID)
 	if err != nil {
-		return nil, apperr.Internal("").WithCause(err)
+		return nil, err
 	}
-	return &BudgetRef{ConsumedQuota: consumed, RechargedQuota: bal.TotalRecharged}, nil
+	return &BudgetRef{ConsumedQuota: consumed, BalanceRaw: bal.TotalRaw}, nil
 }
 
 // OrgUsage 组织用量分析(O/A):读窗口内消费 logs,按模型 + 成员聚合(只算本 org 成员)。

@@ -63,19 +63,10 @@ func (s *Service) CreateTier(ctx context.Context, c session.Claims, orgID int64,
 	return t, nil
 }
 
-// redactTierMoney:MVP(观测)藏价·字段级裁剪——客户角色(非运营方/非支持态)看不到层级月额度
-// (monthly_limit=配额上限,控制字段,改动⑦ 要求 MVP 藏;同藏价根因:前端藏 UI、后端直连仍泄)。
-// 模型集/分组保留(org_admin 配档需要);运营方/支持态保留真值。复用 mvpPriceHidden 单一真值来源。
-func (s *Service) redactTierMoney(c session.Claims, tiers ...*model.Tier) {
-	if !s.mvpPriceHidden(c) {
-		return
-	}
-	for _, t := range tiers {
-		if t != nil {
-			t.MonthlyLimit = nil
-		}
-	}
-}
+// redactTierMoney:藏价机制已废除(架构B,33 §12-7,ADR §9 镜像可见性——额度/倍率对成员可见,
+// 镜像 new-api 普通用户),恒为无操作。函数与各调用点保留形状,组长阶段2 连同 rbac.go 的
+// mvpPriceHidden/mvpHidePrice 定义统一删除(防跨文件连锁编译断裂,BE③ 只清本文件语义)。
+func (s *Service) redactTierMoney(c session.Claims, tiers ...*model.Tier) {}
 
 // UpdateTierInput 改层级入参(T10;nil 字段=不改)。
 type UpdateTierInput struct {

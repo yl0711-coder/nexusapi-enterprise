@@ -100,6 +100,7 @@ func (s *Store) ListPendingTransfers(ctx context.Context, olderThan time.Duratio
 type LedgerFilter struct {
 	OrgID    int64 // 0=全平台(仅超管)
 	MemberID int64 // >0=仅该成员相关(成员看自己的到账)
+	ToUserID int64 // >0=仅入账到该 new-api user 的行(BE③ 成员可见性:仅 to_user=本人,33 §3.5 /me/ledger)
 	Limit    int
 	Offset   int
 }
@@ -116,6 +117,10 @@ func (s *Store) ListTransfers(ctx context.Context, f LedgerFilter) ([]*LedgerTra
 	if f.MemberID > 0 {
 		where += " AND member_id = ?"
 		args = append(args, f.MemberID)
+	}
+	if f.ToUserID > 0 {
+		where += " AND to_user_id = ?"
+		args = append(args, f.ToUserID)
 	}
 	var total int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM ledger_transfer WHERE `+where, args...).Scan(&total); err != nil {

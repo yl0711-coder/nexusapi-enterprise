@@ -113,8 +113,13 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/members/{id}/restore", h.requireAuth(h.handleRestoreMember))                  // 恢复入职
 	mux.HandleFunc("GET /api/v1/organizations/{id}/members/offboarded", h.requireAuth(h.handleListOffboarded)) // 离职列表
 
-	// 计费(里程碑3a):余额 / 入账 / 申请充值(钱进 + 只读 + 告警;扣费 3b 下一轮)。
-	mux.HandleFunc("GET /api/v1/organizations/{id}/balance", h.requireAuth(h.handleGetBalance))
+	// 余额/账本(架构B BE③,只读):读求和余额 + 分配账本三级可见(31-ADR §15)。
+	mux.HandleFunc("GET /api/v1/organizations/{id}/balance", h.requireAuth(h.handleOrgBalance)) // 读求和:金库+Σ成员(取代 company_balance 视图)
+	mux.HandleFunc("GET /api/v1/organizations/{id}/ledger", h.requireAuth(h.handleOrgLedger))   // 本组织划账流水(O/A)
+	mux.HandleFunc("GET /api/v1/ledger", h.requireAuth(h.handleAllLedger))                      // 全平台流水(仅运营方)
+	mux.HandleFunc("GET /api/v1/me/balance", h.requireAuth(h.handleMyBalance))                  // 成员本人额度/已用/剩余
+	mux.HandleFunc("GET /api/v1/me/ledger", h.requireAuth(h.handleMyLedger))                    // 成员到账记录(仅 to_user=本人)
+	// 计费(里程碑3a 遗留):入账 / 申请充值(fundingEnabled 恒关时 service 层 404)。
 	mux.HandleFunc("GET /api/v1/organizations/{id}/recharges", h.requireAuth(h.handleListRecharges))
 	mux.HandleFunc("POST /api/v1/organizations/{id}/recharges", h.requireAuth(h.handleRecharge))
 	mux.HandleFunc("GET /api/v1/organizations/{id}/recharge-requests", h.requireAuth(h.handleListRechargeRequests))

@@ -164,67 +164,110 @@ func TestUnit_ResolveTokenGroup(t *testing.T) {
 	}
 }
 
-// TestUnit_SanitizeOther 锁死 26-§4.2:低权 other 净化必须删 admin_info/stream_status,
-// 保留计费过程/缓存/frt 等展开所需字段;空串原样、坏 JSON 返空串(绝不返半截,否则前端展开 parse 失败)。
-func TestUnit_SanitizeOther(t *testing.T) {
-	raw := `{"frt":123,"cache_tokens":50,"reasoning_effort":"high","admin_info":{"channel_id":9},"stream_status":"ok","po":["a"]}`
-	got := sanitizeOther(raw)
-	for _, banned := range []string{"admin_info", "stream_status"} {
-		if strings.Contains(got, banned) {
-			t.Fatalf("低权 other 仍含 %q: %s", banned, got)
-		}
+// 日志脱敏纯函数测试已随实现下沉 repo 层(31-ADR §8):见 repo/log_redact_test.go
+// (含 [v3 反转]:成员保留 token_name/group_name)。
+
+// TestUnit_DecideAttribution 锁死架构B归因决策(33 §3.3 AttributeLog):user_id 主键 +
+// token→member 与 member.newapi_user_id→org 一致性断言,不一致落未归因桶(member=nil)+ mismatch。
+func TestUnit_DecideAttribution(t *testing.T) {
+	m1 := &model.Member{ID: 11, OrgID: 1}
+	m2 := &model.Member{ID: 22, OrgID: 1}
+	mOther := &model.Member{ID: 33, OrgID: 2}
+
+	// A: user=成员 且 token=同一成员 → 归成员 + key。
+	if a := decideAttribution(m1, 0, tokenAttr{found: true, member: m1, keyID: 7}); a.member != m1 || a.keyID != 7 || a.mismatch || a.skip {
+		t.Fatalf("A: user与token同成员应归该成员+key, 实 %+v", a)
 	}
-	for _, keep := range []string{"frt", "cache_tokens", "reasoning_effort", "po"} {
-		if !strings.Contains(got, keep) {
-			t.Fatalf("低权 other 误删了展开所需字段 %q: %s", keep, got)
-		}
+	// B: user=成员、无/未登记 token → 归成员,key=0。
+	if a := decideAttribution(m1, 0, tokenAttr{}); a.member != m1 || a.keyID != 0 || a.mismatch {
+		t.Fatalf("B: user=成员无token应归成员, 实 %+v", a)
 	}
-	if sanitizeOther("") != "" {
-		t.Fatal("空串应原样返回空串")
+	// C: user=成员 但 token=别的成员 → 未归因桶(user 侧组织)+ mismatch。
+	if a := decideAttribution(m1, 0, tokenAttr{found: true, member: m2, keyID: 9}); a.member != nil || !a.mismatch || a.orgID != 1 || a.keyID != 0 {
+		t.Fatalf("C: token串成员应落未归因桶+mismatch, 实 %+v", a)
 	}
-	if got := sanitizeOther(`{"frt":1,"admin_info":{trunc`); got != "" {
-		t.Fatalf("坏/半截 JSON 必须返回空串,不得返半截,得 %q", got)
+	// D: user=金库 且 token=同组织成员(A 版遗留)→ 按 token 归成员。
+	if a := decideAttribution(nil, 1, tokenAttr{found: true, member: m2, keyID: 9}); a.member != m2 || a.keyID != 9 || a.mismatch {
+		t.Fatalf("D: 金库user+同组织token应按token归因, 实 %+v", a)
+	}
+	// E: user=金库 但 token=他组织成员 → 未归因桶(金库组织)+ mismatch(防跨组织串台)。
+	if a := decideAttribution(nil, 1, tokenAttr{found: true, member: mOther, keyID: 9}); a.member != nil || !a.mismatch || a.orgID != 1 {
+		t.Fatalf("E: 跨组织token必须落未归因桶+mismatch, 实 %+v", a)
+	}
+	// F: user=金库、token 未登记 → 未归因桶,无 mismatch(门B/金库自身日志)。
+	if a := decideAttribution(nil, 1, tokenAttr{}); a.member != nil || a.mismatch || a.orgID != 1 || a.skip {
+		t.Fatalf("F: 金库未登记token应落未归因桶, 实 %+v", a)
+	}
+	// G: user 非平台 → skip(主站客户)。
+	if a := decideAttribution(nil, 0, tokenAttr{}); !a.skip {
+		t.Fatalf("G: 非平台user必须skip, 实 %+v", a)
+	}
+	// 跨组织攻击面:user=成员(org1) token=成员(org2) → 绝不能归到任何成员。
+	if a := decideAttribution(m1, 0, tokenAttr{found: true, member: mOther, keyID: 5}); a.member != nil || !a.mismatch {
+		t.Fatalf("跨组织串台必须拦下, 实 %+v", a)
 	}
 }
 
-// TestUnit_SanitizeLogsByRole 锁死隔离洞:低权响应体不得含顶层渠道系/内部归因 id;
-// 员工再去令牌名/分组;超管(operator)原样不动。这是"真隔离,不靠前端藏"的服务端保证。
-func TestUnit_SanitizeLogsByRole(t *testing.T) {
-	mk := func() []repo.OrgNewapiLog {
-		return []repo.OrgNewapiLog{{
-			ChannelID: 9, ChannelName: "ch-a", NewapiUserID: 100, NewapiTokenID: 200, KeyID: 7,
-			TokenName: "nexus_m1_v1", GroupName: "vip", IP: "1.2.3.4",
-			Content: "x", Other: `{"frt":1,"admin_info":{"channel_id":9}}`,
-		}}
+// TestUnit_LedgerEntryView 锁死账本可见性脱敏(31-ADR §15 + 组长裁定):direction 相对金库派生;
+// from/to_user_id/idempotency_key 仅超管;created_by 超管+组织管理员;成员只见方向/金额/状态。
+func TestUnit_LedgerEntryView(t *testing.T) {
+	tr := &repo.LedgerTransfer{
+		ID: 1, OrgID: 3, FromUserID: 100, ToUserID: 200, MemberID: 9,
+		AmountRaw: 50_000_000, IdempotencyKey: "grant:9:x", Status: repo.LedgerApplied,
+		Reason: "grant", CreatedBy: "org_admin:2",
 	}
+	// 金库=100 → from=金库 → credit。
+	op := ledgerEntryView(tr, 100, session.RoleOperator)
+	if op.Direction != LedgerDirCredit || op.FromUserID != 100 || op.IdempotencyKey == "" || op.CreatedBy == "" {
+		t.Fatalf("超管应全量+credit, 实 %+v", op)
+	}
+	oa := ledgerEntryView(tr, 100, session.RoleOrgAdmin)
+	if oa.FromUserID != 0 || oa.ToUserID != 0 || oa.IdempotencyKey != "" {
+		t.Fatalf("组织管理员不得见内部 user id/幂等键, 实 %+v", oa)
+	}
+	if oa.CreatedBy == "" || oa.Direction != LedgerDirCredit || oa.AmountRaw != 50_000_000 {
+		t.Fatalf("组织管理员应见 created_by/direction/amount, 实 %+v", oa)
+	}
+	mb := ledgerEntryView(tr, 100, session.RoleMember)
+	if mb.FromUserID != 0 || mb.ToUserID != 0 || mb.IdempotencyKey != "" || mb.CreatedBy != "" {
+		t.Fatalf("成员视图泄露内部字段: %+v", mb)
+	}
+	// 退额方向:to=金库 → debit。
+	back := &repo.LedgerTransfer{ID: 2, OrgID: 3, FromUserID: 200, ToUserID: 100, MemberID: 9, AmountRaw: 1, Status: repo.LedgerApplied}
+	if v := ledgerEntryView(back, 100, session.RoleOrgAdmin); v.Direction != LedgerDirDebit {
+		t.Fatalf("成员→金库应为 debit, 实 %+v", v)
+	}
+	// 金库未知 → direction 空串(不瞎猜)。
+	if v := ledgerEntryView(tr, 0, session.RoleOperator); v.Direction != "" {
+		t.Fatalf("金库未知不得派生方向, 实 %+v", v)
+	}
+}
 
-	// 超管:原样,渠道/归因 id/other 全保留。
-	op := mk()
-	sanitizeLogsByRole(op, session.RoleOperator)
-	if op[0].ChannelName == "" || op[0].NewapiTokenID == 0 || !strings.Contains(op[0].Other, "admin_info") {
-		t.Fatalf("超管必须原样返回,不得剥离: %+v", op[0])
+// TestUnit_TreasuryAlertDecision 锁死金库低预警跨越去抖:只在跌破那一拍告警一次,回升复位。
+func TestUnit_TreasuryAlertDecision(t *testing.T) {
+	if alert, below := treasuryAlertDecision(false, 10, 100); !alert || !below {
+		t.Fatal("首次跌破必须告警")
 	}
+	if alert, below := treasuryAlertDecision(true, 10, 100); alert || !below {
+		t.Fatal("持续低位不得重复告警")
+	}
+	if alert, below := treasuryAlertDecision(true, 200, 100); alert || below {
+		t.Fatal("回升应复位且不告警")
+	}
+	if alert, _ := treasuryAlertDecision(false, 100, 100); alert {
+		t.Fatal("恰等于阈值不算跌破(< 语义)")
+	}
+}
 
-	// 组织管理员:去顶层渠道系与内部归因 id;令牌名/分组保留(其视角要看成员令牌)。
-	oa := mk()
-	sanitizeLogsByRole(oa, session.RoleOrgAdmin)
-	if oa[0].ChannelID != 0 || oa[0].ChannelName != "" || oa[0].NewapiTokenID != 0 || oa[0].NewapiUserID != 0 || oa[0].KeyID != 0 {
-		t.Fatalf("组织管理员响应体仍含渠道系/内部归因 id: %+v", oa[0])
+// TestUnit_MemberExhaustedState 锁死成员额度光的对客文案映射(29-PRD §4.9)。
+func TestUnit_MemberExhaustedState(t *testing.T) {
+	if ex, notice := memberExhaustedState(0); !ex || notice != memberExhaustedNotice {
+		t.Fatalf("剩余 0 应判用尽+文案, 实 %v %q", ex, notice)
 	}
-	if oa[0].TokenName == "" {
-		t.Fatal("组织管理员应保留令牌名(需看成员令牌维度)")
+	if ex, _ := memberExhaustedState(-5); !ex {
+		t.Fatal("略负(在途请求)同样判用尽")
 	}
-	if strings.Contains(oa[0].Other, "admin_info") {
-		t.Fatal("组织管理员 other 仍含 admin_info")
-	}
-
-	// 员工:在组织管理员基础上再去令牌名/分组。
-	mb := mk()
-	sanitizeLogsByRole(mb, session.RoleMember)
-	if mb[0].TokenName != "" || mb[0].GroupName != "" {
-		t.Fatalf("员工应去令牌名/分组: %+v", mb[0])
-	}
-	if mb[0].ChannelName != "" || mb[0].NewapiTokenID != 0 {
-		t.Fatalf("员工响应体仍含渠道系/内部归因 id: %+v", mb[0])
+	if ex, notice := memberExhaustedState(1); ex || notice != "" {
+		t.Fatal("有剩余不得报用尽")
 	}
 }

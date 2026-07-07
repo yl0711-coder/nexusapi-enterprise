@@ -64,6 +64,9 @@ type OrgNewapiLogFilter struct {
 	RequestID      string
 	Limit          int
 	Offset         int
+	// View 读取视角(脱敏下沉 repo 层,31-ADR §8):零值=LogViewRestricted 最严(fail-closed),
+	// 只有 service 层判定为超管时才显式传 LogViewFull。
+	View LogView
 }
 
 func (s *Store) ListAllNewapiLogs(ctx context.Context, f OrgNewapiLogFilter) ([]OrgNewapiLog, int, error) {
@@ -144,6 +147,7 @@ func (s *Store) ListAllNewapiLogs(ctx context.Context, f OrgNewapiLogFilter) ([]
 		}
 		out = append(out, r)
 	}
+	redactOrgNewapiLogs(out, f.View) // 脱敏下沉 repo 层(31-ADR §8):按视角出列,不靠读端点各自记得
 	return out, total, rows.Err()
 }
 
@@ -343,7 +347,42 @@ func (s *Store) ListOrgNewapiLogs(ctx context.Context, f OrgNewapiLogFilter) ([]
 		}
 		out = append(out, r)
 	}
+	redactOrgNewapiLogs(out, f.View) // 脱敏下沉 repo 层(31-ADR §8)
 	return out, total, rows.Err()
+}
+
+// MemberLogSource 架构B(BE③):组织日志镜像的成员级上游锚点(成员=各自 new-api user,按 username 拉)。
+type MemberLogSource struct {
+	MemberID     int64
+	NewapiUserID int64
+	Username     string
+}
+
+// ListMemberLogSources 列组织内可镜像日志的成员(有服务账号 + username;跳过 quarantined 孤儿与软删成员)。
+// 组织日志聚合 = 金库 user + 这批成员 user(31-ADR §8:跨 N 成员按数百成员设计,镜像侧摊销上游读)。
+func (s *Store) ListMemberLogSources(ctx context.Context, orgID int64) ([]MemberLogSource, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, newapi_user_id, COALESCE(newapi_username, '')
+		   FROM member
+		  WHERE org_id = ? AND deleted_at IS NULL AND newapi_user_id IS NOT NULL
+		    AND bootstrap_state <> 'quarantined'
+		  ORDER BY id ASC`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]MemberLogSource, 0)
+	for rows.Next() {
+		var m MemberLogSource
+		if err := rows.Scan(&m.MemberID, &m.NewapiUserID, &m.Username); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(m.Username) == "" || m.NewapiUserID == 0 {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 // ListMemberTokenMappings 员工↔token 映射(运营排障)。B4(28):分页,不再一次拉全量(历史令牌多的大客户首屏慢)。

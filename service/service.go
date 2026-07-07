@@ -59,6 +59,10 @@ type Service struct {
 
 	// leadership B5:leader-only 写工作(结算/回填/托管对账)的准入决策支点;v1=envLeadership,v2 换 leaseLeadership。
 	leadership Leadership
+
+	// 金库低预警跨越去抖状态(BE③ treasury_alert.go;进程内,零值可用,多节点由 leader gate 单跑)。
+	treasuryAlertMu sync.Mutex
+	treasuryBelow   map[int64]bool
 }
 
 // Deps 是构造 Service 的依赖集合。

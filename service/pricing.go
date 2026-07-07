@@ -145,14 +145,8 @@ func (s *Service) ListBillingGroups(ctx context.Context, c session.Claims) ([]Bi
 	for g, r := range ratios {
 		out = append(out, BillingGroup{Group: g, Ratio: r, Models: g2m[g]})
 	}
-	// MVP(观测)藏价·字段级裁剪:本端点喂层级页分组下拉(org_admin 配档必需),不能整体 404。
-	// 只对客户直连剥基础倍率(Ratio→0),保留分组名/模型集;前端 S.mvp 下本就不渲染 ratio,显示无影响;
-	// 运营方/支持态仍拿真倍率。判定复用 mvpPriceHidden(与整端点 404 同一真值来源)。
-	if s.mvpPriceHidden(c) {
-		for i := range out {
-			out[i].Ratio = 0
-		}
-	}
+	// 藏价机制已废除(架构B,33 §12-7,ADR §9 镜像可见性:倍率 new-api 对普通用户可见 → 这里同样可见):
+	// 全角色返回真倍率,不再做字段级裁剪。
 	return out, nil
 }
 
@@ -164,9 +158,7 @@ func (s *Service) GetPricing(ctx context.Context, c session.Claims, orgID int64)
 	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
 		return nil, err
 	}
-	if err := s.mvpHidePrice(c); err != nil { // MVP(观测)藏价:客户直连不可读倍率/折扣;运营方/支持态正常
-		return nil, err
-	}
+	// 藏价机制已废除(架构B,33 §12-7,ADR §9 镜像可见性):客户可读自己的倍率/折扣回显。
 	d, err := s.store.GetOrgDiscount(ctx, orgID)
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)

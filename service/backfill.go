@@ -213,11 +213,7 @@ func (s *Service) backfillOneWindow(ctx context.Context, job *repo.BackfillJob, 
 	for i, e := range keep {
 		ids[i] = e.ID
 	}
-	sk := &settleSink{
-		aggs: map[string]*bucketAgg{}, flagCache: map[int64]bool{},
-		attrCache: map[int64]tokenAttr{}, orgByUser: map[int64]int64{}, orphanAlerted: map[int64]bool{},
-		backfillMode: true, // 回填:跳过孤儿告警刷屏 + 无用的 billing flag 查询(回填从不扣钱,flagCache 不被读)
-	}
+	sk := newSettleSink(true) // 回填槽:跳过孤儿/归因告警刷屏(回填只写报表)
 	// B4:**去重查 + ingest + 落账全收进同一写事务**——FilterExistingDetailLogIDsTx 走 tx,与 commitUsageOnly 同快照。
 	// ledger 无按行去重,靠此查重防重复计入(24-§3.3 第二重保险);收进同事务后,跨节点/失效切换的竞态窗口下
 	// 去重读与提交一致,配 B5 leader 租约杜绝跨节点回填双灌。ingestEntry 的归因读走 s.db(稳定数据,不影响原子性)。

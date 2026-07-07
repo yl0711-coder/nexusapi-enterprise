@@ -11,8 +11,9 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
-// TestIntegration_B3_MissingBalanceNoDeadlock:B3——billing_enabled 但无 company_balance 行(误配)时,
-// 结算单组织隔离跳过扣费、**不整批回滚/不卡死**;消费仍落 ledger,不自动建余额行,产告警审计。
+// TestIntegration_B3_MissingBalanceNoDeadlock:B3(架构B更新,BE③ 扣款分支拆除):
+// 原场景"billing_enabled 但无 company_balance 行→隔离跳过扣费+settlement_missing_balance 告警"随扣款分支退役;
+// 保留的锁死点:该形态组织的结算**不报错/不卡死**(水位照常推进)、消费照落 ledger、绝不自动建 balance 行。
 func TestIntegration_B3_MissingBalanceNoDeadlock(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -66,10 +67,11 @@ func TestIntegration_B3_MissingBalanceNoDeadlock(t *testing.T) {
 	if balRows != 0 {
 		t.Fatalf("B3:未充值组织不应被自动建 balance 行,实 %d 行", balRows)
 	}
+	// 架构B:扣款分支已删,settlement_missing_balance 告警不复存在(0 条即对;>0 说明扣款路径没拆净)。
 	var alerts int
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_log WHERE org_id=? AND action='settlement_missing_balance'`, orgID).Scan(&alerts)
-	if alerts < 1 {
-		t.Fatalf("B3:应产 settlement_missing_balance 告警审计")
+	if alerts != 0 {
+		t.Fatalf("B3(架构B):不应再产 settlement_missing_balance 告警(扣款分支已拆),实 %d 条", alerts)
 	}
-	t.Logf("B3 ok: 缺 balance 行结算不卡死(水位推进 log_id=%d)、消费落 ledger=%d、不自动建行、告警 %d 条", curLogID, ledgerSum, alerts)
+	t.Logf("B3(架构B) ok: 缺 balance 行结算不卡死(水位推进 log_id=%d)、消费落 ledger=%d、不自动建行、无扣款告警", curLogID, ledgerSum)
 }

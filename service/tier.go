@@ -11,15 +11,44 @@ import (
 	"github.com/nexusapi-platform/enterprise/repo"
 )
 
-// CreateTierInput 建层级入参(E15,仅组织管理员)。
+// CreateTierInput 建层级入参(E15,仅组织管理员;架构B 0032 增 quota_type/amount_raw/reset_period/visibility)。
 type CreateTierInput struct {
 	Name         string
 	ModelSet     []string
 	ModelCap     map[string]int64
-	DailyLimit   *int64
+	QuotaType    string // fixed(默认)| subscription
+	AmountRaw    *int64 // 额度值(raw;架构B 开通/恢复成员的初始划账额;正数,不可 0/无限)
+	ResetPeriod  *string
+	Visibility   string // all | assigned(默认)
+	DailyLimit   *int64 // Deprecated: 架构A 遗留
 	WeeklyLimit  *int64
 	MonthlyLimit *int64
 	NewapiGroup  *string
+}
+
+// validateTierArchB 架构B 档位字段校验(31-ADR §4.3:额度正数、无无上限;subscription 须带周期)。
+func validateTierArchB(quotaType string, amountRaw *int64, resetPeriod *string, visibility string) error {
+	switch quotaType {
+	case "", model.TierQuotaFixed, model.TierQuotaSubscription:
+	default:
+		return apperr.InvalidParam("quota_type 须为 fixed 或 subscription")
+	}
+	if amountRaw != nil && *amountRaw <= 0 {
+		return apperr.InvalidParam("amount_raw 必须为正数(0=没有额度不是无限,不可填 0)")
+	}
+	if quotaType == model.TierQuotaSubscription {
+		if resetPeriod == nil || (*resetPeriod != "daily" && *resetPeriod != "weekly" && *resetPeriod != "monthly") {
+			return apperr.InvalidParam("订阅型档位须指定 reset_period(daily/weekly/monthly)")
+		}
+	} else if resetPeriod != nil && *resetPeriod != "" {
+		return apperr.InvalidParam("固定型档位不可带 reset_period")
+	}
+	switch visibility {
+	case "", model.TierVisibilityAll, model.TierVisibilityAssigned:
+	default:
+		return apperr.InvalidParam("visibility 须为 all 或 assigned")
+	}
+	return nil
 }
 
 // CreateTier 建层级(E15:组织管理员)。
@@ -43,8 +72,12 @@ func (s *Service) CreateTier(ctx context.Context, c session.Claims, orgID int64,
 			return nil, err
 		}
 	}
+	if err := validateTierArchB(in.QuotaType, in.AmountRaw, in.ResetPeriod, in.Visibility); err != nil {
+		return nil, err
+	}
 	id, err := s.store.CreateTier(ctx, &model.Tier{
 		OrgID: orgID, Name: in.Name, ModelSet: in.ModelSet, ModelCap: in.ModelCap,
+		QuotaType: in.QuotaType, AmountRaw: in.AmountRaw, ResetPeriod: in.ResetPeriod, Visibility: in.Visibility,
 		DailyLimit: in.DailyLimit, WeeklyLimit: in.WeeklyLimit, MonthlyLimit: in.MonthlyLimit,
 		NewapiGroup: in.NewapiGroup,
 	})
@@ -68,17 +101,22 @@ func (s *Service) CreateTier(ctx context.Context, c session.Claims, orgID int64,
 // mvpPriceHidden/mvpHidePrice 定义统一删除(防跨文件连锁编译断裂,BE③ 只清本文件语义)。
 func (s *Service) redactTierMoney(c session.Claims, tiers ...*model.Tier) {}
 
-// UpdateTierInput 改层级入参(T10;nil 字段=不改)。
+// UpdateTierInput 改层级入参(T10;nil 字段=不改;架构B 0032 增额度型/额度值/周期/可见性)。
 type UpdateTierInput struct {
-	Name         *string
-	ModelSet     []string
-	ModelCap     map[string]int64
-	DailyLimit   *int64
-	WeeklyLimit  *int64
-	MonthlyLimit *int64
-	NewapiGroup  *string
-	SetModelSet  bool // 显式置空模型集(区分"不改"与"清空继承")
-	SetModelCap  bool
+	Name           *string
+	ModelSet       []string
+	ModelCap       map[string]int64
+	QuotaType      *string
+	AmountRaw      *int64
+	ResetPeriod    *string
+	SetResetPeriod bool // 显式清空 reset_period(subscription→fixed 时)
+	Visibility     *string
+	DailyLimit     *int64 // Deprecated: 架构A 遗留
+	WeeklyLimit    *int64
+	MonthlyLimit   *int64
+	NewapiGroup    *string
+	SetModelSet    bool // 显式置空模型集(区分"不改"与"清空继承")
+	SetModelCap    bool
 }
 
 // UpdateTier 改层级(T10:组织管理员)。改后对引用该层级的成员重算 override 下发(当期上限按新档)。
@@ -122,6 +160,23 @@ func (s *Service) UpdateTier(ctx context.Context, c session.Claims, orgID, tierI
 	}
 	if in.NewapiGroup != nil {
 		t.NewapiGroup = in.NewapiGroup
+	}
+	if in.QuotaType != nil {
+		t.QuotaType = *in.QuotaType
+	}
+	if in.AmountRaw != nil {
+		t.AmountRaw = in.AmountRaw
+	}
+	if in.SetResetPeriod {
+		t.ResetPeriod = nil
+	} else if in.ResetPeriod != nil {
+		t.ResetPeriod = in.ResetPeriod
+	}
+	if in.Visibility != nil {
+		t.Visibility = *in.Visibility
+	}
+	if err := validateTierArchB(t.QuotaType, t.AmountRaw, t.ResetPeriod, t.Visibility); err != nil {
+		return nil, err
 	}
 	// T17-5/D4:改了分组或模型集,按改后的有效组合做配置期硬预检(分组存在 + 模型集 ⊆ 分组可用模型)。
 	if t.NewapiGroup != nil {
@@ -266,5 +321,92 @@ func (s *Service) SetDefaultTier(ctx context.Context, c session.Claims, orgID, t
 		return apperr.Internal("").WithCause(err)
 	}
 	s.audit(ctx, c, orgID, "set_default_tier", "tier", &tierID, nil)
+	return nil
+}
+
+// ===== 档位授权(架构B 31-ADR §5 + 组长契约增补 33 §12-④:target_type all|member|team)=====
+
+// TierGrants 列某档位授权(tier 读取随对象带出 grants 数组;operator/org_admin 可读)。
+func (s *Service) TierGrants(ctx context.Context, c session.Claims, orgID, tierID int64) ([]repo.TierGrant, error) {
+	if err := assertOrgScope(c, orgID); err != nil {
+		return nil, err
+	}
+	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
+		return nil, err
+	}
+	return s.store.ListTierGrants(ctx, orgID, tierID)
+}
+
+// CreateTierGrant 档位授权到 all/成员/团队(org_admin;重复授权 409)。
+// all:target_id 恒 0(全组织成员可用);member/team:target 须属本组织(防跨租户挂授权)。
+func (s *Service) CreateTierGrant(ctx context.Context, c session.Claims, orgID, tierID int64, targetType string, targetID int64) (*repo.TierGrant, error) {
+	if err := assertOrgScope(c, orgID); err != nil {
+		return nil, err
+	}
+	if err := assertRole(c, session.RoleOrgAdmin); err != nil {
+		return nil, err
+	}
+	if _, err := s.store.GetTier(ctx, orgID, tierID); errors.Is(err, repo.ErrNotFound) {
+		return nil, apperr.NotFound("档位不存在")
+	} else if err != nil {
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	switch targetType {
+	case "all":
+		targetID = 0
+	case "member":
+		if _, err := s.store.GetMember(ctx, orgID, targetID); errors.Is(err, repo.ErrNotFound) {
+			return nil, apperr.InvalidParam("目标成员不存在")
+		} else if err != nil {
+			return nil, apperr.Internal("").WithCause(err)
+		}
+	case "team":
+		if _, err := s.store.GetTeam(ctx, orgID, targetID); errors.Is(err, repo.ErrNotFound) {
+			return nil, apperr.InvalidParam("目标团队不存在")
+		} else if err != nil {
+			return nil, apperr.Internal("").WithCause(err)
+		}
+	default:
+		return nil, apperr.InvalidParam("target_type 须为 all / member / team")
+	}
+	g := &repo.TierGrant{OrgID: orgID, TierID: tierID, TargetType: targetType, TargetID: targetID}
+	id, err := s.store.CreateTierGrant(ctx, g, actorOf(c))
+	if errors.Is(err, repo.ErrConflict) {
+		return nil, apperr.Conflict("该授权已存在")
+	}
+	if err != nil {
+		return nil, apperr.Internal("").WithCause(err)
+	}
+	s.audit(ctx, c, orgID, "create_tier_grant", "tier", &tierID, map[string]any{
+		"grant_id": id, "target_type": targetType, "target_id": targetID,
+	})
+	return s.store.GetTierGrant(ctx, orgID, id)
+}
+
+// DeleteTierGrant 撤销档位授权(org_admin;DELETE body {grant_id},33 §12-④)。
+func (s *Service) DeleteTierGrant(ctx context.Context, c session.Claims, orgID, tierID, grantID int64) error {
+	if err := assertOrgScope(c, orgID); err != nil {
+		return err
+	}
+	if err := assertRole(c, session.RoleOrgAdmin); err != nil {
+		return err
+	}
+	g, err := s.store.GetTierGrant(ctx, orgID, grantID)
+	if errors.Is(err, repo.ErrNotFound) {
+		return apperr.NotFound("授权不存在")
+	}
+	if err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	if g.TierID != tierID {
+		return apperr.NotFound("授权不存在") // grant 不属该档位:不暴露存在性
+	}
+	if err := s.store.DeleteTierGrant(ctx, orgID, tierID, grantID); err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			return apperr.NotFound("授权不存在")
+		}
+		return apperr.Internal("").WithCause(err)
+	}
+	s.audit(ctx, c, orgID, "delete_tier_grant", "tier", &tierID, map[string]any{"grant_id": grantID})
 	return nil
 }

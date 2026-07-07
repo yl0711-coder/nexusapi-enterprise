@@ -118,27 +118,3 @@ func (h *Handler) handleServiceStatus(w http.ResponseWriter, r *http.Request) {
 	st := h.svc.GetServiceStatus(r.Context(), c)
 	writeOK(w, r, http.StatusOK, map[string]any{"overall": st.Overall, "note": st.Note, "models": st.Models})
 }
-
-// POST /members/{id}/key:ip-whitelist — 设自己 key 的 IP 白名单(E22)。
-type ipWhitelistReq struct {
-	AllowIPs string `json:"allow_ips"`
-}
-
-func (h *Handler) handleSetKeyIP(w http.ResponseWriter, r *http.Request) {
-	c, _ := claimsFrom(r.Context())
-	mid, err := pathInt64(r, "id")
-	if err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	var in ipWhitelistReq
-	if err := decodeJSON(r, &in); err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	if err := h.svc.SetKeyIPWhitelist(r.Context(), c, c.OrgID, mid, in.AllowIPs); err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	writeOK(w, r, http.StatusOK, map[string]any{"member_id": mid, "allow_ips": in.AllowIPs})
-}

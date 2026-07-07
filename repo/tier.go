@@ -23,10 +23,18 @@ func (s *Store) CreateTier(ctx context.Context, t *model.Tier) (int64, error) {
 		b, _ := json.Marshal(t.ModelCap)
 		modelCap = string(b)
 	}
+	if t.QuotaType == "" {
+		t.QuotaType = model.TierQuotaFixed
+	}
+	if t.Visibility == "" {
+		t.Visibility = model.TierVisibilityAssigned
+	}
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO tier (org_id, name, model_set, model_cap, daily_limit, weekly_limit, monthly_limit, newapi_group, is_default, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.OrgID, t.Name, modelSet, modelCap, t.DailyLimit, t.WeeklyLimit, t.MonthlyLimit, t.NewapiGroup, t.IsDefault, t.Status)
+		`INSERT INTO tier (org_id, name, model_set, model_cap, quota_type, amount_raw, reset_period, visibility,
+		    daily_limit, weekly_limit, monthly_limit, newapi_group, is_default, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.OrgID, t.Name, modelSet, modelCap, t.QuotaType, t.AmountRaw, t.ResetPeriod, t.Visibility,
+		t.DailyLimit, t.WeeklyLimit, t.MonthlyLimit, t.NewapiGroup, t.IsDefault, t.Status)
 	if err != nil {
 		if isDupKey(err) {
 			return 0, ErrConflict
@@ -39,7 +47,7 @@ func (s *Store) CreateTier(ctx context.Context, t *model.Tier) (int64, error) {
 // GetTier 取层级,强制 org_id 谓词。
 func (s *Store) GetTier(ctx context.Context, orgID, id int64) (*model.Tier, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, org_id, name, model_set, model_cap, daily_limit, weekly_limit, monthly_limit, newapi_group, is_default, status, created_at, updated_at
+		`SELECT id, org_id, name, model_set, model_cap, quota_type, amount_raw, reset_period, visibility, daily_limit, weekly_limit, monthly_limit, newapi_group, is_default, status, created_at, updated_at
 		 FROM tier WHERE id = ? AND org_id = ? AND deleted_at IS NULL`, id, orgID)
 	return scanTier(row)
 }
@@ -47,7 +55,7 @@ func (s *Store) GetTier(ctx context.Context, orgID, id int64) (*model.Tier, erro
 // ListTiers 列出 org 下层级。
 func (s *Store) ListTiers(ctx context.Context, orgID int64) ([]*model.Tier, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, org_id, name, model_set, model_cap, daily_limit, weekly_limit, monthly_limit, newapi_group, is_default, status, created_at, updated_at
+		`SELECT id, org_id, name, model_set, model_cap, quota_type, amount_raw, reset_period, visibility, daily_limit, weekly_limit, monthly_limit, newapi_group, is_default, status, created_at, updated_at
 		 FROM tier WHERE org_id = ? AND deleted_at IS NULL ORDER BY id`, orgID)
 	if err != nil {
 		return nil, err
@@ -109,9 +117,11 @@ func (s *Store) UpdateTier(ctx context.Context, t *model.Tier) error {
 		modelCap = string(b)
 	}
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE tier SET name = ?, model_set = ?, model_cap = ?, daily_limit = ?, weekly_limit = ?, monthly_limit = ?, newapi_group = ?
+		`UPDATE tier SET name = ?, model_set = ?, model_cap = ?, quota_type = ?, amount_raw = ?, reset_period = ?, visibility = ?,
+		        daily_limit = ?, weekly_limit = ?, monthly_limit = ?, newapi_group = ?
 		 WHERE id = ? AND org_id = ? AND deleted_at IS NULL`,
-		t.Name, modelSet, modelCap, t.DailyLimit, t.WeeklyLimit, t.MonthlyLimit, t.NewapiGroup, t.ID, t.OrgID)
+		t.Name, modelSet, modelCap, t.QuotaType, t.AmountRaw, t.ResetPeriod, t.Visibility,
+		t.DailyLimit, t.WeeklyLimit, t.MonthlyLimit, t.NewapiGroup, t.ID, t.OrgID)
 	if err != nil {
 		if isDupKey(err) {
 			return ErrConflict
@@ -149,8 +159,10 @@ func (s *Store) SoftDeleteTier(ctx context.Context, orgID, id int64) error {
 
 func scanTier(r rowScanner) (*model.Tier, error) {
 	var t model.Tier
-	var modelSet, modelCap sql.NullString
-	err := r.Scan(&t.ID, &t.OrgID, &t.Name, &modelSet, &modelCap, &t.DailyLimit, &t.WeeklyLimit,
+	var modelSet, modelCap, resetPeriod sql.NullString
+	var amountRaw sql.NullInt64
+	err := r.Scan(&t.ID, &t.OrgID, &t.Name, &modelSet, &modelCap, &t.QuotaType, &amountRaw, &resetPeriod, &t.Visibility,
+		&t.DailyLimit, &t.WeeklyLimit,
 		&t.MonthlyLimit, &t.NewapiGroup, &t.IsDefault, &t.Status, &t.CreatedAt, &t.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -163,6 +175,14 @@ func scanTier(r rowScanner) (*model.Tier, error) {
 	}
 	if modelCap.Valid && modelCap.String != "" {
 		_ = json.Unmarshal([]byte(modelCap.String), &t.ModelCap)
+	}
+	if amountRaw.Valid {
+		v := amountRaw.Int64
+		t.AmountRaw = &v
+	}
+	if resetPeriod.Valid && resetPeriod.String != "" {
+		v := resetPeriod.String
+		t.ResetPeriod = &v
 	}
 	return &t, nil
 }

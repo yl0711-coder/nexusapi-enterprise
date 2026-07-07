@@ -156,24 +156,72 @@ func (s *Service) CheckSupportGuard(ctx context.Context, c session.Claims, metho
 	return nil
 }
 
-// isMoneyOrKeyRedline 判定 (method, path) 是否属"动钱 / 铸或读明文 key"红线(协助态硬挡)。
-// A4:从纯路径子串黑名单改为端点能力枚举——补上开通成员(回显落客户池子的明文 key)与建 token 这两个铸 key 口子,
-// 否则运营方经协助态即可铸出计费落客户池子的明文 key,绕过"读明文 key 需破玻璃"红线。
+// assistWriteAllow 协助态可执行的**普通写能力白名单**(架构B,31-ADR §10 / 33 §3.5 改造):
+// 从「路径子串黑名单」倒转为显式端点能力枚举——凡不在列的写端点**默认落红线**,新端点默认受保护。
+// 匹配按路径段(`*` = 恰好一个段),与 method 精确比对。
+//
+// 显式不列(=红线,10403 硬挡)举例:开通成员(POST .../members,建号+首笔划账+登录凭证回显)、
+// members:bulk、offboard/restore(动钱:退额/重新分配)、quota:grant|quota:adjust|grants(划账/调额)、
+// /me/tokens 全部写与 key:reveal(铸/读 key)、password:reset(可借改密接管成员会话→绕 key 红线)、
+// recharges/recharge-requests/debits/pricing/billing-settings/default-token-group(钱与计价)、
+// hard-stop(风控大动作)、approvals(审批通过会触发额度下发)。
+var assistWriteAllow = []string{
+	"POST /api/v1/auth/login",
+	"POST /api/v1/me/password", // 改的是操作者自己的平台密码
+	"PATCH /api/v1/me",
+	"PATCH /api/v1/organizations/*",
+	"POST /api/v1/organizations/*/archive",
+	"POST /api/v1/organizations/*/unarchive",
+	"POST /api/v1/organizations/*/import-tokens",
+	"POST /api/v1/organizations/*/backfill/requeue",
+	"POST /api/v1/organizations/*/teams",
+	"PATCH /api/v1/organizations/*/teams/*",
+	"POST /api/v1/organizations/*/teams/*/archive",
+	"POST /api/v1/organizations/*/teams/*/unarchive",
+	"POST /api/v1/organizations/*/tiers", // 档位=模板配置;真动钱在划账端点(那些全在红线)
+	"PUT /api/v1/tiers/*",
+	"DELETE /api/v1/tiers/*",
+	"POST /api/v1/tiers/*/default",
+	"PATCH /api/v1/members/*", // 改名/团队/档位指针(不划钱)
+	"POST /api/v1/members/*/role",
+	"POST /api/v1/members/*/status", // 停用/启用(disable 非钱非 key)
+	"POST /api/v1/notifications/*/read",
+	"POST /api/v1/support-sessions/*/close",
+}
+
+// isMoneyOrKeyRedline 判定 (method, path) 是否属「动钱 / 铸或读明文 key」红线(协助态硬挡)。
+// 架构B:**能力白名单制**——写请求不在 assistWriteAllow 内即红线(默认拒,防新端点漏挡);
+// 读(GET/HEAD)恒非红线(只读态另有整体闸)。
 func isMoneyOrKeyRedline(method, path string) bool {
-	// 动钱:充值/续充/退款/改价/计费设置。
-	for _, p := range []string{"/recharges", "/recharge-requests", "/pricing", "/billing-settings"} {
-		if strings.Contains(path, p) {
-			return true
+	if method == http.MethodGet || method == http.MethodHead {
+		return false
+	}
+	for _, pat := range assistWriteAllow {
+		if matchEndpointPattern(pat, method, path) {
+			return false
 		}
 	}
-	// 铸/读明文 key:开通成员(POST .../members 回显客户明文 key)、建 token、轮换/读 key/IP 白名单。
-	if method == http.MethodPost && strings.HasSuffix(path, "/members") {
-		return true
+	return true
+}
+
+// matchEndpointPattern 按段匹配 "METHOD /a/*/b" 形式的端点模式(`*` 恰好匹配一个路径段;
+// 段数不等即不匹配,故 members:bulk 不会命中 members)。
+func matchEndpointPattern(pattern, method, path string) bool {
+	sp := strings.SplitN(pattern, " ", 2)
+	if len(sp) != 2 || sp[0] != method {
+		return false
 	}
-	if strings.Contains(path, "/tokens") || strings.Contains(path, "/key:") {
-		return true
+	pp := strings.Split(strings.Trim(sp[1], "/"), "/")
+	rp := strings.Split(strings.Trim(path, "/"), "/")
+	if len(pp) != len(rp) {
+		return false
 	}
-	return false
+	for i := range pp {
+		if pp[i] != "*" && pp[i] != rp[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // auditSupport 写支持态双身份审计(actor=运营方真实 + on_behalf_of=客户管理员),写客户 audit_log。

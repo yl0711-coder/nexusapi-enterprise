@@ -7,6 +7,7 @@ import (
 
 	"github.com/nexusapi-platform/enterprise/model"
 	"github.com/nexusapi-platform/enterprise/pkg/apperr"
+	"github.com/nexusapi-platform/enterprise/repo"
 	"github.com/nexusapi-platform/enterprise/service"
 )
 
@@ -24,7 +25,7 @@ type orgView struct {
 	// v1 正交属性(0022,只暴露非敏感位):门A/门B(前端"重新导入"按钮判断)+ 计费口径(订阅显示)。
 	CreatedByPlatform bool   `json:"newapi_created_by_platform"`
 	BillingKind       string `json:"billing_kind"`
-	CreatedAt     string `json:"created_at"`
+	CreatedAt         string `json:"created_at"`
 }
 
 func toOrgView(o *model.Organization) orgView {
@@ -60,14 +61,20 @@ type tierView struct {
 	Name         string           `json:"name"`
 	ModelSet     []string         `json:"model_set"`
 	ModelCap     map[string]int64 `json:"model_cap,omitempty"`
-	MonthlyLimit *int64           `json:"monthly_limit_quota"`
-	NewapiGroup  *string          `json:"newapi_group"` // 计费分组(T17-1;nil=回落组织默认/default)
+	QuotaType    string           `json:"quota_type"`             // 架构B:fixed | subscription
+	AmountRaw    *int64           `json:"amount_raw"`             // 架构B:额度值(raw;FE 用 quota_per_unit 换算美元)
+	ResetPeriod  *string          `json:"reset_period,omitempty"` // 架构B:daily|weekly|monthly
+	Visibility   string           `json:"visibility"`             // 架构B:all | assigned
+	MonthlyLimit *int64           `json:"monthly_limit_quota"`    // Deprecated: 架构A 遗留
+	NewapiGroup  *string          `json:"newapi_group"`           // 计费分组(T17-1;nil=回落组织默认/default)
 	IsDefault    bool             `json:"is_default"`
 	Status       string           `json:"status"`
+	Grants       []repo.TierGrant `json:"grants"` // 档位授权(33 §12-④;all|member|team)
 }
 
 func toTierView(t *model.Tier) tierView {
 	return tierView{ID: t.ID, OrgID: t.OrgID, Name: t.Name, ModelSet: t.ModelSet, ModelCap: t.ModelCap,
+		QuotaType: t.QuotaType, AmountRaw: t.AmountRaw, ResetPeriod: t.ResetPeriod, Visibility: t.Visibility,
 		MonthlyLimit: t.MonthlyLimit, NewapiGroup: t.NewapiGroup, IsDefault: t.IsDefault, Status: t.Status}
 }
 

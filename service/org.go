@@ -273,11 +273,11 @@ func (s *Service) importOrgTokens(ctx context.Context, orgID int64, cred newapi.
 	return imported, skipped, failed
 }
 
-// HardStopOrg v1 运维硬停/解除(20-§4/19-F4,运营方风控):硬停 = **禁用该组织的 new-api 用户**
-// (ManageUser disable,双缓存失效、下个请求近实时 403 全部令牌,new-api controller/user.go:977-984);解除 = enable。
-// 与余额驱动的停服正交(有钱也能停:欠费纠纷/风控)。硬停期间该 org 的 access token 同样 403 →
-// 平台管理写操作被 withOrgCred/EnsureOrgProvisioned 闸屏蔽、不进 401 自愈(防重登失败刷告警)。
-// v1 弃 convergeOrgQuotas(按 company_balance 判零逐成员下发 0——审计 F3/H2:会误杀直充组织)。
+// HardStopOrg 运维硬停/解除(架构B,31-ADR §4.5/33 §3.2,运营方风控):
+// 硬停 = **disable 金库 user + fan-out disable 全部成员 user**(幂等;漏一个=有人还在花)+ 全员会话踢线。
+// 解除 = enable 金库 + 只 enable 平台侧 status=active 且 bootstrap=done 的成员(个别停用/离职/quarantined 的不解)。
+// 一律 disable(SetUserStatus,双缓存失效近实时 403),禁 override-to-0(不刷缓存)。
+// 与余额驱动的停服正交(有钱也能停:欠费纠纷/风控)。硬停期间该 org 的管理写操作被 withOrgCred/OpenMember 闸屏蔽。
 func (s *Service) HardStopOrg(ctx context.Context, c session.Claims, orgID int64, stop bool) error {
 	if err := assertRole(c, session.RoleOperator); err != nil {
 		return err
@@ -300,10 +300,45 @@ func (s *Service) HardStopOrg(ctx context.Context, c session.Claims, orgID int64
 		return apperr.Internal("").WithCause(err)
 	}
 	if !ok {
-		return apperr.New(apperr.CodeInvalidParam, 409, "组织尚未开通 new-api 池子")
+		return apperr.New(apperr.CodeInvalidParam, 409, "组织尚未开通 new-api 金库")
 	}
+	// ① 金库先行(停:立断管理面 + 金库不再可划出;解除:先恢复金库)。
 	if uerr := s.upstream.SetUserStatus(ctx, int(uid), !stop); uerr != nil {
 		return mapUpstream(uerr)
+	}
+	// ② fan-out 全部成员 user(幂等重入:失败即返错,组织状态不翻转,运维重调补齐)。
+	creds, lerr := s.store.ListMembersWithServiceAccount(ctx, orgID)
+	if lerr != nil {
+		return apperr.Internal("").WithCause(lerr)
+	}
+	var failed int
+	for _, mc := range creds {
+		if stop {
+			// 停:全量 disable(含已停用/离职/quarantined——本就 disabled,upstream 幂等)。
+			if derr := s.upstream.SetUserStatus(ctx, int(mc.NewapiUserID), false); derr != nil {
+				s.log.Error("硬停 fan-out:disable 成员 user 失败(漏一个=有人还在花,须重试)", "org_id", orgID, "member_id", mc.MemberID, "err", derr)
+				failed++
+			}
+			continue
+		}
+		// 解除:只 enable 平台侧应为 active 的成员(GetMemberAny:含软删行以便判离职跳过)。
+		m, merr := s.store.GetMemberAny(ctx, orgID, mc.MemberID)
+		if merr != nil {
+			s.log.Error("解除硬停 fan-out:读成员失败(该成员维持 disabled,可重调解除补齐)", "member_id", mc.MemberID, "err", merr)
+			failed++
+			continue
+		}
+		if m.Status != model.MemberStatusActive || m.BootstrapState != model.BootstrapDone {
+			continue // 停用/离职/quarantined:不解(它们的 disable 语义独立于硬停)
+		}
+		if eerr := s.upstream.SetUserStatus(ctx, int(mc.NewapiUserID), true); eerr != nil {
+			s.log.Error("解除硬停 fan-out:enable 成员 user 失败(可重调解除补齐)", "member_id", mc.MemberID, "err", eerr)
+			failed++
+		}
+	}
+	if failed > 0 {
+		// 不翻组织状态:幂等重调会重跑 ①②(已到位的 upstream 调用幂等),直至全量收敛。
+		return apperr.Internal(fmt.Sprintf("硬停 fan-out 有 %d 个成员未收敛,请重试本操作(幂等)", failed))
 	}
 	newStatus := model.OrgStatusActive
 	action := "hard_stop_release"
@@ -322,7 +357,7 @@ func (s *Service) HardStopOrg(ctx context.Context, c session.Claims, orgID int64
 			s.log.Error("硬停:作废成员会话失败(旧 token 最长 12h 后自然失效)", "org_id", orgID, "err", berr)
 		}
 	}
-	s.audit(ctx, c, orgID, action, "organization", &orgID, map[string]any{"newapi_user_id": uid})
+	s.audit(ctx, c, orgID, action, "organization", &orgID, map[string]any{"newapi_user_id": uid, "members_fanout": len(creds)})
 	return nil
 }
 

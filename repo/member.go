@@ -273,6 +273,20 @@ func (s *Store) GetMemberNameByID(ctx context.Context, id int64) (string, error)
 	return name, err
 }
 
+// GetMemberAny 取成员**含软删行**(架构B 生命周期用:离职成员的幂等补退/恢复入职都要能读到软删行;
+// 常规读一律用 GetMember,勿混用)。强制 org_id 谓词。
+func (s *Store) GetMemberAny(ctx context.Context, orgID, id int64) (*model.Member, error) {
+	row := s.db.QueryRowContext(ctx, memberSelect+` WHERE id = ? AND org_id = ?`, id, orgID)
+	return scanMember(row)
+}
+
+// UpdateMemberTierGroup 恢复入职按新档位重设档位指针 + 分组快照(架构B RestoreMember)。
+func (s *Store) UpdateMemberTierGroup(ctx context.Context, orgID, memberID, tierID int64, group string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE member SET tier_id = ?, newapi_group = ? WHERE id = ? AND org_id = ?`, tierID, group, memberID, orgID)
+	return err
+}
+
 // GetMember 取成员,强制 org_id 谓词(跨 org → ErrNotFound)。
 func (s *Store) GetMember(ctx context.Context, orgID, id int64) (*model.Member, error) {
 	row := s.db.QueryRowContext(ctx, memberSelect+` WHERE id = ? AND org_id = ? AND deleted_at IS NULL`, id, orgID)
@@ -317,7 +331,12 @@ func (s *Store) GetMemberByEmail(ctx context.Context, email string) (*model.Memb
 
 // ListMembers 按过滤 + 分页列成员;返回行与过滤后总数(10 §1.5)。
 func (s *Store) ListMembers(ctx context.Context, orgID int64, f MemberFilter) ([]*model.Member, int, error) {
-	where := []string{"org_id = ?", "deleted_at IS NULL"}
+	// 组长契约增补(33 §12-⑤):offboarded(软删)默认不进主列表;status=offboarded 显式查时切换谓词。
+	deletedPred := "deleted_at IS NULL"
+	if f.Status == model.MemberStatusOffboarded {
+		deletedPred = "deleted_at IS NOT NULL"
+	}
+	where := []string{"org_id = ?", deletedPred}
 	args := []any{orgID}
 	if f.Q != "" {
 		where = append(where, "(display_name LIKE ? OR login_email LIKE ? OR key_masked LIKE ?)")

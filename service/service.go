@@ -59,6 +59,10 @@ type Service struct {
 
 	// leadership B5:leader-only 写工作(结算/回填/托管对账)的准入决策支点;v1=envLeadership,v2 换 leaseLeadership。
 	leadership Leadership
+
+	// offboardQuiesceWait 架构B 离职「确认静默」的单次等待间隔(31-ADR §4.5:disable→读实时余额→退额;
+	// 有界重读余额直至稳定)。默认 2s;测试注小值提速。
+	offboardQuiesceWait time.Duration
 }
 
 // Deps 是构造 Service 的依赖集合。
@@ -80,6 +84,8 @@ type Deps struct {
 	UsageDetailRetentionDays int
 	// Leadership B5:leader-only 写工作准入(nil → 默认 envLeadership(true),即单节点/测试恒 leader)。
 	Leadership Leadership
+	// OffboardQuiesceWait 架构B 离职静默确认的重读间隔(<=0 默认 2s;测试可注小值)。
+	OffboardQuiesceWait time.Duration
 }
 
 // New 构造 Service。
@@ -100,20 +106,25 @@ func New(d Deps) *Service {
 	if leadership == nil {
 		leadership = NewEnvLeadership(true) // 默认恒 leader(单节点/测试);多节点由 main.go 注入
 	}
+	quiesce := d.OffboardQuiesceWait
+	if quiesce <= 0 {
+		quiesce = 2 * time.Second
+	}
 	return &Service{
-		store:       d.Store,
-		upstream:    d.Upstream,
-		keyring:     d.Keyring,
-		signer:      d.Signer,
-		log:         log,
-		quotaLocker: lock.NewInProcessLocker(),
-		observeMode:    d.ObserveMode,
-		fundingEnabled: d.FundingEnabled,
-		memberRole:  "", // new-api 普通用户角色,空 = 默认普通用户
-		backfillWindowsPerTick: windowsPerTick,
-		backfillQPS:            qps,
+		store:                    d.Store,
+		upstream:                 d.Upstream,
+		keyring:                  d.Keyring,
+		signer:                   d.Signer,
+		log:                      log,
+		quotaLocker:              lock.NewInProcessLocker(),
+		observeMode:              d.ObserveMode,
+		fundingEnabled:           d.FundingEnabled,
+		memberRole:               "", // new-api 普通用户角色,空 = 默认普通用户
+		backfillWindowsPerTick:   windowsPerTick,
+		backfillQPS:              qps,
 		usageDetailRetentionDays: d.UsageDetailRetentionDays, // 默认 0 = 永久保留(不清理)
 		leadership:               leadership,
+		offboardQuiesceWait:      quiesce,
 	}
 }
 

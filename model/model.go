@@ -25,11 +25,14 @@ const (
 	MemberStatusProvisioning = "provisioning"
 )
 
-// bootstrap_state(10 §2.5)。
+// bootstrap_state(10 §2.5 + 架构B 0030)。
 const (
 	BootstrapPending = "pending"
 	BootstrapDone    = "done"
 	BootstrapFailed  = "failed"
+	// BootstrapQuarantined 架构B 孤儿隔离(34 §3-③):CreateUser 成功后续 saga 步骤失败,
+	// new-api 无干净删 user 能力 → disable + 本标记;worker/统计一律跳过;可重试(重入新名重建)。
+	BootstrapQuarantined = "quarantined"
 )
 
 // 通用状态(team/tier)。
@@ -116,11 +119,11 @@ type OrgUnit struct {
 
 // OrgEscrowConfig 对应 org_escrow_config 表(0021)。生效阈值=COALESCE(ThresholdManualOverride, ThresholdAuto)。
 type OrgEscrowConfig struct {
-	OrgID                 int64
-	ThresholdAuto         int64  // 每天按近7天补货点重算
+	OrgID                   int64
+	ThresholdAuto           int64  // 每天按近7天补货点重算
 	ThresholdManualOverride *int64 // 运维手动定(优先);nil=用 auto
-	ConsumedBaseline      *int64    // B1:funding 激活时快照的 SUM(ledger);窗口纠偏/对账只算此后增量。nil=未快照
-	UpdatedAt             time.Time
+	ConsumedBaseline        *int64 // B1:funding 激活时快照的 SUM(ledger);窗口纠偏/对账只算此后增量。nil=未快照
+	UpdatedAt               time.Time
 }
 
 // EffectiveThreshold 生效续充阈值:手动覆盖优先,否则自动值。
@@ -143,16 +146,30 @@ type EscrowBucket struct {
 	UpdatedAt time.Time
 }
 
-// Tier 对应 tier 表(09 §5)。ModelSet/ModelCap 以 JSON 字符串透传(本期不解析)。
+// 档位额度型 / 可见性(架构B 0032,31-ADR §5):fixed=固定/单次(不重置)| subscription=订阅/周期(worker 补满)。
+// 无「无上限」档。visibility:all=全组织成员可用(无需 grant 行)/ assigned=须经 tier_grant 授权到成员或团队。
+const (
+	TierQuotaFixed         = "fixed"
+	TierQuotaSubscription  = "subscription"
+	TierVisibilityAll      = "all"
+	TierVisibilityAssigned = "assigned"
+)
+
+// Tier 对应 tier 表(09 §5 + 架构B 0032)。ModelSet/ModelCap 以 JSON 字符串透传(本期不解析)。
+// 架构B:额度落成员 user.quota(AmountRaw 为唯一额度值);旧三档 limit 保留废弃(0032,代码停引用)。
 type Tier struct {
 	ID           int64
 	OrgID        int64
 	Name         string
 	ModelSet     []string         // 允许的模型集合;空 = 继承组织默认
 	ModelCap     map[string]int64 // 单模型日上限(quota),如 {"claude-opus":50000};软限额(E4)
-	DailyLimit   *int64
-	WeeklyLimit  *int64
-	MonthlyLimit *int64
+	QuotaType    string           // 架构B(0032):fixed | subscription
+	AmountRaw    *int64           // 架构B(0032):额度值(raw quota;建成员必设、正数、≤成员帽、不可 0)
+	ResetPeriod  *string          // 架构B(0032):subscription 的周期 daily|weekly|monthly;fixed=nil
+	Visibility   string           // 架构B(0032):all | assigned(经 tier_grant 授权)
+	DailyLimit   *int64           // Deprecated: 架构A 遗留(0032 废弃,读兼容保留)
+	WeeklyLimit  *int64           // Deprecated: 架构A 遗留(0032 废弃,读兼容保留)
+	MonthlyLimit *int64           // Deprecated: 架构A 遗留(0032 废弃,读兼容保留)
 	NewapiGroup  *string
 	IsDefault    bool
 	Status       string
@@ -185,14 +202,14 @@ type Member struct {
 	// 架构B(0030):成员=各自 new-api user(平台托管服务账号)。凭证密文不进本结构(单独 repo 方法取,防密文到处传)。
 	NewapiUserID   *int64  // 成员自己的 new-api user id(nil=未开通/旧A版数据)
 	NewapiUsername *string // 成员 new-api 用户名(日志按 username 查、401 自愈重登用)
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // key 槽 / 物理令牌状态(v2 0015)。
 const (
-	KeySlotActive   = "active"
-	KeySlotRevoked  = "revoked"
+	KeySlotActive      = "active"
+	KeySlotRevoked     = "revoked"
 	KeyTokenActive     = "active"
 	KeyTokenRevoked    = "revoked"
 	KeyTokenSuperseded = "superseded" // 轮换后被取代的旧令牌(留作历史归因)
@@ -224,7 +241,6 @@ type MemberKeyToken struct {
 	Status        string
 	CreatedAt     time.Time
 }
-
 
 // grant_type(09 §14 + 08 §3.4)。
 const (

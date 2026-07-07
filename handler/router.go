@@ -59,17 +59,12 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("PATCH /api/v1/organizations/{id}", h.requireAuth(h.handleUpdateOrg))
 	mux.HandleFunc("POST /api/v1/organizations/{id}/archive", h.requireAuth(h.handleArchiveOrg))                // T12 归档
 	mux.HandleFunc("POST /api/v1/organizations/{id}/unarchive", h.requireAuth(h.handleUnarchiveOrg))            // T12 取消归档
-	mux.HandleFunc("POST /api/v1/organizations/{id}/import-tokens", h.requireAuth(h.handleReimportTokens))      // 门B 重新导入(运营方,幂等)
 	mux.HandleFunc("GET /api/v1/organizations/{id}/backfill", h.requireAuth(h.handleGetBackfill))               // 历史回填状态(24-§9)
 	mux.HandleFunc("GET /api/v1/organizations/{id}/newapi-logs", h.requireAuth(h.handleOrgNewapiLogs))          // new-api 完整日志镜像(运营排障)
 	mux.HandleFunc("GET /api/v1/organizations/{id}/token-mappings", h.requireAuth(h.handleOrgTokenMappings))    // 员工 ↔ new-api token 映射(运营排障)
 	mux.HandleFunc("POST /api/v1/organizations/{id}/backfill/requeue", h.requireAuth(h.handleRequeueBackfill))  // 重新回填(运营方,幂等)
 	mux.HandleFunc("POST /api/v1/organizations/{id}/hard-stop", h.requireAuth(h.handleHardStop(true)))          // 运维硬停(禁用 org 用户)
 	mux.HandleFunc("POST /api/v1/organizations/{id}/hard-stop-release", h.requireAuth(h.handleHardStop(false))) // 解除硬停
-	mux.HandleFunc("GET /api/v1/organizations/{id}/approval-rules", h.requireAuth(h.handleGetApprovalRules))
-	mux.HandleFunc("PUT /api/v1/organizations/{id}/approval-rules", h.requireAuth(h.handleSetApprovalRules))
-	mux.HandleFunc("GET /api/v1/organizations/{id}/quota-policies", h.requireAuth(h.handleListPolicies))
-	mux.HandleFunc("PUT /api/v1/organizations/{id}/quota-policies", h.requireAuth(h.handleSetPolicy))
 
 	// 团队。
 	mux.HandleFunc("GET /api/v1/organizations/{id}/teams", h.requireAuth(h.handleListTeams))
@@ -107,12 +102,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/me/tokens/{id}", h.requireAuth(h.handleDeleteMyToken))
 	mux.HandleFunc("POST /api/v1/me/tokens/{id}/key:reveal", h.requireAuth(h.handleRevealMyTokenKey))
 
-	// 额度执行(里程碑2遗留)+ 生命周期(架构B):调额 / 临时权限 / 停用恢复 / 离职。
-	mux.HandleFunc("POST /api/v1/members/{id}/quota:adjust", h.requireAuth(h.memberSelfGuard(h.handleAdjustQuota)))
+	// 生命周期(架构B):追加划账(Transfer,红线) / 停用恢复 / 离职。
 	mux.HandleFunc("POST /api/v1/members/{id}/quota:grant", h.requireAuth(h.memberSelfGuard(h.handleGrantQuota))) // 架构B 追加划账(红线)
-	mux.HandleFunc("POST /api/v1/members/{id}/grants", h.requireAuth(h.memberSelfGuard(h.handleSetGrant)))
-	mux.HandleFunc("GET /api/v1/members/{id}/grants", h.requireAuth(h.memberSelfGuard(h.handleListGrants)))
-	mux.HandleFunc("DELETE /api/v1/grants/{id}", h.requireAuth(h.handleRevokeGrant))
 	mux.HandleFunc("POST /api/v1/members/{id}/password:reset", h.requireAuth(h.memberSelfGuard(h.handleResetMemberPassword))) // C22 重置成员登录密码
 	mux.HandleFunc("POST /api/v1/members/{id}/status", h.requireAuth(h.memberSelfGuard(h.handleSetMemberStatus)))
 	mux.HandleFunc("POST /api/v1/members/{id}/offboard", h.requireAuth(h.memberSelfGuard(h.handleOffboardMember))) // 离职(disable→静默→退额)
@@ -141,10 +132,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/pricing/groups", h.requireAuth(h.handleListBillingGroups))      // 计费分组选择器(T17-6)
 	mux.HandleFunc("PUT /api/v1/organizations/{id}/default-token-group", h.requireAuth(h.handleSetOrgDefaultTokenGroup))
 
-	// 申请-审批(里程碑4,US-06)+ 通知(US-13)+ 成员自助。
-	mux.HandleFunc("POST /api/v1/approvals", h.requireAuth(h.handleSubmitApproval))
-	mux.HandleFunc("GET /api/v1/organizations/{id}/approvals", h.requireAuth(h.handleListApprovals))
-	mux.HandleFunc("POST /api/v1/approvals/{id}/decide", h.requireAuth(h.handleDecideApproval))
+	// 通知(US-13)+ 成员自助。
 	mux.HandleFunc("GET /api/v1/notifications", h.requireAuth(h.handleListNotifications))
 	mux.HandleFunc("POST /api/v1/notifications/{id}/read", h.requireAuth(h.handleMarkNotificationRead))
 

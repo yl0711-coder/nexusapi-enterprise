@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/nexusapi-platform/enterprise/service"
@@ -91,6 +92,8 @@ func (h *Handler) handleDeleteMyToken(w http.ResponseWriter, r *http.Request) {
 
 // POST /me/tokens/{id}/key:reveal — 揭示明文(仅本人;挡支持态;明文只即时回传,不落库不写日志)。
 // 路径含 key: 天然命中红线能力白名单的默认拒(支持态 10403)。
+// B3 镜像 new-api GetFullKey 口径补齐(总监裁定,不自造):CriticalRateLimit(按成员身份限频,
+// 20 次/20 分钟)+ 响应禁缓存(no-store——明文 key 绝不允许被浏览器/中间层缓存)。
 func (h *Handler) handleRevealMyTokenKey(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())
 	tokenID, err := pathInt64(r, "id")
@@ -98,6 +101,11 @@ func (h *Handler) handleRevealMyTokenKey(w http.ResponseWriter, r *http.Request)
 		writeErr(w, r, err)
 		return
 	}
+	if !h.critLim.gate(w, r, fmt.Sprintf("reveal:%d:%d", c.OrgID, c.MemberID)) {
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	key, err := h.svc.RevealMyTokenKey(r.Context(), c, tokenID)
 	if err != nil {
 		writeErr(w, r, err)

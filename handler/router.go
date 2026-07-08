@@ -20,7 +20,8 @@ type Handler struct {
 	signer         *session.Signer
 	log            *slog.Logger
 	version        string
-	authLim        *attemptLimiter // A2:登录/改密账号级失败退避(应用层纵深)
+	authLim        *attemptLimiter  // A2:登录/改密账号级失败退避(应用层纵深)
+	critLim        *criticalLimiter // B3:敏感操作限频(镜像 new-api CriticalRateLimit;揭示明文 key 等)
 	gatewayBaseURL string          // F3(28):对客户展示的 API 接入地址(纯展示,可选;未配置则 mykey 不显示接入示例)
 }
 
@@ -32,7 +33,7 @@ func New(svc *service.Service, signer *session.Signer, log *slog.Logger, version
 	markStarted(time.Now().Unix()) // /metrics uptime 起点
 	// NEXUS_GATEWAY_BASE_URL 在此直读(非注入):纯展示字段,不影响任何逻辑;避免为它改 New 签名波及调用方。
 	return &Handler{svc: svc, signer: signer, log: log, version: version,
-		authLim: newAttemptLimiter(), gatewayBaseURL: os.Getenv("NEXUS_GATEWAY_BASE_URL")}
+		authLim: newAttemptLimiter(), critLim: newCriticalLimiter(), gatewayBaseURL: os.Getenv("NEXUS_GATEWAY_BASE_URL")}
 }
 
 // Routes 返回挂好中间件的根 http.Handler。

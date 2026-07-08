@@ -128,12 +128,7 @@ func (s *Store) ActivatePlatformAccount(ctx context.Context, orgID, memberID int
 	return err
 }
 
-// ClearMemberToken 模型2:清成员当前令牌指针(停用删 token 后调,防悬挂指针;员工恢复后自助重建新 key)。
-func (s *Store) ClearMemberToken(ctx context.Context, orgID, memberID int64) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE member SET newapi_token_id = NULL, key_masked = NULL WHERE id = ? AND org_id = ?`, memberID, orgID)
-	return err
-}
+// ClearMemberToken(模型2 令牌指针清理)已随 grant 反向机器退役删除。
 
 // UpdateMemberStatus 改成员状态(US-05 停用/恢复、account_ttl 到期置 expired)。
 func (s *Store) UpdateMemberStatus(ctx context.Context, orgID, memberID int64, status string) error {
@@ -244,23 +239,7 @@ func (s *Store) ListOrgAdminIDs(ctx context.Context, orgID int64) ([]int64, erro
 	return out, rows.Err()
 }
 
-// ListMembersByTier 列出引用某层级的成员(改层级后重算 override 用,T10)。
-func (s *Store) ListMembersByTier(ctx context.Context, orgID, tierID int64) ([]*model.Member, error) {
-	rows, err := s.db.QueryContext(ctx, memberSelect+` WHERE org_id = ? AND tier_id = ? AND deleted_at IS NULL ORDER BY id`, orgID, tierID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []*model.Member
-	for rows.Next() {
-		m, err := scanMember(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, m)
-	}
-	return out, rows.Err()
-}
+// ListMembersByTier(改层级重算 override 用)已随 override 机器退役删除(架构B 改档不回溯)。
 
 // GetMemberNameByID 取成员显示名(姓名优先,回落登录名;跨 org,操作者名解析用,T14)。不存在返空。
 func (s *Store) GetMemberNameByID(ctx context.Context, id int64) (string, error) {

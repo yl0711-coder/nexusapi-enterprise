@@ -38,16 +38,12 @@ type Service struct {
 	// memberRole 是开通成员时给 new-api 用户的角色(普通用户)。
 	memberRole string
 
-	// settlementMu 串行化所有 forward 结算(RunSettlement:settlement-worker + escrow-drain 两入口)与
-	// 历史回填(RunBackfillSlice),使二者绝不并发——回填与 forward-补漏在 600s 重叠带只靠 usage_detail 幂等
-	// 去重(ledger 无按行去重),并发即 TOCTOU 双算(24-§3.3 命根子)。v1 单节点进程内锁即足;
-	// v2 多节点由选主保证单节点跑这两个 worker(见 project_enterprise_platform_multinode_leader)。
+	// settlementMu 串行化所有 forward 结算(RunSettlement:settlement-worker + escrow-drain 两入口)——
+	// forward 与 rescan-补漏在 600s 重叠带只靠 usage_detail 幂等去重(ledger 无按行去重),
+	// 并发即 TOCTOU 双算(24-§3.3 命根子)。v1 单节点进程内锁即足;
+	// v2 多节点由选主保证单节点跑 settlement worker(见 project_enterprise_platform_multinode_leader)。
+	// (历史回填 RunBackfillSlice 曾共此锁,已随门B 整体退役清除,v2 收编按 doc24 重建。)
 	settlementMu sync.Mutex
-
-	// backfillWindowsPerTick 历史回填每 tick 处理的子窗口数上限(串行进单写者,防大回填饿死 forward);
-	// backfillQPS 读 new-api 日志的页/秒限速(24-§4.5)。
-	backfillWindowsPerTick int
-	backfillQPS            int
 
 	// usageDetailRetentionDays 逐条明细保留天数(24-§6):0=永久保留(不清理,回填全历史随时可查的前提);
 	// 设正整数 N 才清 N 天前。默认 0——量涨到千万行级再配天数启用(旋钮,不返工)。
@@ -76,9 +72,6 @@ type Deps struct {
 	Logger   *slog.Logger
 	// FundingEnabled 平台经手钱总闸(v1 恒 false=escrow 休眠;v2 开)。
 	FundingEnabled bool
-	// BackfillWindowsPerTick 历史回填每 tick 子窗口数上限(<=0 默认 8);BackfillQPS 读日志页/秒限速(<=0 默认 5)。
-	BackfillWindowsPerTick int
-	BackfillQPS            int
 	// UsageDetailRetentionDays 逐条明细保留天数(24-§6):0=永久保留(默认,不清理);正整数 N=清 N 天前。
 	UsageDetailRetentionDays int
 	// Leadership B5:leader-only 写工作准入(nil → 默认 envLeadership(true),即单节点/测试恒 leader)。
@@ -92,14 +85,6 @@ func New(d Deps) *Service {
 	log := d.Logger
 	if log == nil {
 		log = slog.Default()
-	}
-	windowsPerTick := d.BackfillWindowsPerTick
-	if windowsPerTick <= 0 {
-		windowsPerTick = 8
-	}
-	qps := d.BackfillQPS
-	if qps <= 0 {
-		qps = 5
 	}
 	leadership := d.Leadership
 	if leadership == nil {
@@ -118,8 +103,6 @@ func New(d Deps) *Service {
 		quotaLocker:              lock.NewInProcessLocker(),
 		fundingEnabled:           d.FundingEnabled,
 		memberRole:               "", // new-api 普通用户角色,空 = 默认普通用户
-		backfillWindowsPerTick:   windowsPerTick,
-		backfillQPS:              qps,
 		usageDetailRetentionDays: d.UsageDetailRetentionDays, // 默认 0 = 永久保留(不清理)
 		leadership:               leadership,
 		offboardQuiesceWait:      quiesce,

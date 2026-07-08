@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"time"
-
-	"github.com/nexusapi-platform/enterprise/model"
 )
 
 // Cursor 是结算水位(settlement_cursor 一行)。org_id=0 为全局 leader 水位。
@@ -92,55 +90,7 @@ func (s *Store) AddToLedgerBucketTx(ctx context.Context, x dbtx, b *LedgerBucket
 	return err
 }
 
-// DeductBalance 乐观扣减组织余额:total_consumed += amount,balance 重算。返回扣后余额。
-// 自开事务(FOR UPDATE 行锁);结算路径改用 DeductBalanceTx 收进外层事务(GZ-01)。
-func (s *Store) DeductBalance(ctx context.Context, orgID, amount int64) (*model.Balance, error) {
-	var bal *model.Balance
-	err := s.WithTx(ctx, func(tx *sql.Tx) error {
-		b, e := s.DeductBalanceTx(ctx, tx, orgID, amount)
-		if e != nil {
-			return e
-		}
-		bal = b
-		return nil
-	})
-	return bal, err
-}
-
-// DeductBalanceTx 在调用方事务(*sql.Tx)上扣减余额:SELECT ... FOR UPDATE + 乐观 UPDATE + 读回,
-// **不自开/提交事务**,由外层 WithTx 统一提交(GZ-01 修复1:与落账、推水位同一事务原子化)。
-// FOR UPDATE 仅在事务内有意义,故 x 必须是 *sql.Tx(结算路径如此调用)。
-func (s *Store) DeductBalanceTx(ctx context.Context, x dbtx, orgID, amount int64) (*model.Balance, error) {
-	var ver int64
-	if err := x.QueryRowContext(ctx,
-		`SELECT version FROM company_balance WHERE org_id = ? FOR UPDATE`, orgID).Scan(&ver); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-	// balance 赋值放前面用原值算,避免 MySQL 左到右求值把 amount 减两次(同 AddRecharge 的坑)。
-	res, err := x.ExecContext(ctx,
-		`UPDATE company_balance
-		    SET balance = total_recharged - total_consumed - total_refunded - ?,
-		        total_consumed = total_consumed + ?,
-		        version = version + 1
-		  WHERE org_id = ? AND version = ?`, amount, amount, orgID, ver)
-	if err != nil {
-		return nil, err
-	}
-	if n, _ := res.RowsAffected(); n != 1 {
-		return nil, ErrOptimisticLock
-	}
-	var b model.Balance
-	if err := x.QueryRowContext(ctx,
-		`SELECT org_id, total_recharged, total_consumed, total_refunded, balance, low_watermark, version
-		 FROM company_balance WHERE org_id = ?`, orgID).Scan(
-		&b.OrgID, &b.TotalRecharged, &b.TotalConsumed, &b.TotalRefunded, &b.Balance, &b.LowWatermark, &b.Version); err != nil {
-		return nil, err
-	}
-	return &b, nil
-}
+// DeductBalance/DeductBalanceTx(company_balance 扣款)已随结算扣款分支拆除删除(33 §12-9,第二账退役)。
 
 // AggregateUsageLedger 从已结算台账聚合用量(看板主数据源,B4:分页安全、不压 new-api)。
 // since 起的 time_bucket;memberFilter!=nil 只算该成员。模型2:按 member_id 聚合(成员共享 org user,
@@ -314,46 +264,6 @@ func (s *Store) SetOrgBillingFlags(ctx context.Context, orgID int64, billing, ha
 	return nil
 }
 
-// ListBillingEnabledOrgs 列出开了计费的组织 id(settlement 只结这些)。
-func (s *Store) ListBillingEnabledOrgs(ctx context.Context) ([]int64, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id FROM organization WHERE billing_enabled = 1 AND deleted_at IS NULL`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
-}
+// ListBillingEnabledOrgs 已随扣款分支退役删除(结算全组织统一落账,不再按 billing_enabled 分流)。
 
-// ListActiveOverridableMembers 列组织内已就绪成员(bootstrap done + **有员工令牌 newapi_token_id**),供硬停/恢复批量 override。
-// HIGH-1 修复(真站审查):模型2 member 表无 newapi_user_id 列(已归 organization),原 WHERE 查它会 ERROR 1054;
-// 判据与 reset.go:49 / applyMemberOverride(quota.go)的 NewapiTokenID != nil 一致——有 token 才有可 override 的额度。
-func (s *Store) ListActiveOverridableMembers(ctx context.Context, orgID int64) ([]*model.Member, error) {
-	rows, err := s.db.QueryContext(ctx,
-		memberSelect+` WHERE org_id = ? AND deleted_at IS NULL AND bootstrap_state = 'done' AND newapi_token_id IS NOT NULL`, orgID)
-	if err != nil {
-		return nil, err
-	}
-	return scanMembersRows(rows)
-}
-
-func scanMembersRows(rows *sql.Rows) ([]*model.Member, error) {
-	defer rows.Close()
-	var out []*model.Member
-	for rows.Next() {
-		m, err := scanMember(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, m)
-	}
-	return out, rows.Err()
-}
+// ListActiveOverridableMembers/scanMembersRows 已随 override 下发机器退役删除(33 §12-4)。

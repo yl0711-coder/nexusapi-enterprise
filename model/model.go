@@ -242,43 +242,7 @@ type MemberKeyToken struct {
 	CreatedAt     time.Time
 }
 
-// grant_type(09 §14 + 08 §3.4)。
-const (
-	GrantQuotaAdd   = "quota_add"   // 临时增额(payload.delta>0)
-	GrantQuotaSub   = "quota_sub"   // 临时减额(payload.delta<0)
-	GrantModelAdd   = "model_add"   // 临时放开模型(payload.model)
-	GrantAccountTTL = "account_ttl" // 临时账号有效期(到期停号)
-)
-
-// grant status(09 §14)。
-const (
-	GrantStatusActive  = "active"
-	GrantStatusExpired = "expired"
-	GrantStatusRevoked = "revoked"
-)
-
-// Grant 对应 member_grant 表(09 §11,落地改名避保留字)。
-type Grant struct {
-	ID          int64
-	OrgID       int64
-	MemberID    int64
-	GrantType   string
-	Payload     GrantPayload
-	Reason      *string
-	Operator    string
-	EffectiveAt time.Time
-	ExpireAt    time.Time
-	Status      string
-	RevertedAt  *time.Time
-	CreatedAt   time.Time
-}
-
-// GrantPayload 是 grant 的载荷(按 grant_type 取用其中字段)。
-type GrantPayload struct {
-	Delta    int64  `json:"delta,omitempty"`    // quota_add/sub:带符号的额度增减(quota)
-	Duration string `json:"duration,omitempty"` // 时长标识:today/3d/week 等
-	Model    string `json:"model,omitempty"`    // model_add:放开的模型名
-}
+// Grant/GrantPayload 及其常量(member_grant 表模型)已随临时 grant 机器退役删除(33 §12-4;表留档)。
 
 // Balance 对应 company_balance 表(09 §7)。balance = total_recharged - total_consumed。
 // 模型2:company_balance 降为派生影子/对账用(真相=工单+日志,余额读穿 escrow);
@@ -329,45 +293,7 @@ type RechargeRequest struct {
 	CreatedAt   time.Time
 }
 
-// approval 状态(09 §14)+ 请求类型。
-const (
-	ApprovalPending     = "pending"       // 待一审(团队负责人)
-	ApprovalL1Approved  = "l1_approved"   // 一审过,待二审(组织管理员)
-	ApprovalApproved    = "approved"      // 终批通过
-	ApprovalRejected    = "rejected"      // 驳回
-	ApprovalAutoApprove = "auto_approved" // 自动通过
-	ApprovalCancelled   = "cancelled"
-
-	ReqQuotaRaise = "quota_raise"
-	ReqModelOpen  = "model_open"
-)
-
-// Approval 对应 approval 表(09 §12)。
-type Approval struct {
-	ID           int64
-	OrgID        int64
-	ApplicantID  int64
-	TeamID       *int64
-	RequestType  string
-	Payload      ApprovalPayload
-	State        string
-	IsLevel2     bool
-	L1ReviewerID *int64
-	L2ReviewerID *int64
-	RejectReason *string
-	CreatedAt    time.Time
-
-	// ApplicantName 申请人显示名(瞬态,列表 join 填充,非 approval 表列;T9)。
-	ApplicantName string
-}
-
-// ApprovalPayload 是申请载荷。
-type ApprovalPayload struct {
-	Model    string `json:"model,omitempty"`
-	Amount   int64  `json:"amount,omitempty"`   // 申请额度(quota)
-	Duration string `json:"duration,omitempty"` // today/3d/week
-	Reason   string `json:"reason,omitempty"`
-}
+// Approval/ApprovalPayload 及其常量(approval 表模型)已随审批子系统退役删除(33 §12-4;表留档)。
 
 // Notification 对应 notification 表(站内通知,US-13)。
 type Notification struct {

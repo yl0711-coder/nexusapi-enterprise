@@ -60,10 +60,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("PATCH /api/v1/organizations/{id}", h.requireAuth(h.handleUpdateOrg))
 	mux.HandleFunc("POST /api/v1/organizations/{id}/archive", h.requireAuth(h.handleArchiveOrg))                // T12 归档
 	mux.HandleFunc("POST /api/v1/organizations/{id}/unarchive", h.requireAuth(h.handleUnarchiveOrg))            // T12 取消归档
-	mux.HandleFunc("GET /api/v1/organizations/{id}/backfill", h.requireAuth(h.handleGetBackfill))               // 历史回填状态(24-§9)
 	mux.HandleFunc("GET /api/v1/organizations/{id}/newapi-logs", h.requireAuth(h.handleOrgNewapiLogs))          // new-api 完整日志镜像(运营排障)
 	mux.HandleFunc("GET /api/v1/organizations/{id}/token-mappings", h.requireAuth(h.handleOrgTokenMappings))    // 员工 ↔ new-api token 映射(运营排障)
-	mux.HandleFunc("POST /api/v1/organizations/{id}/backfill/requeue", h.requireAuth(h.handleRequeueBackfill))  // 重新回填(运营方,幂等)
 	mux.HandleFunc("POST /api/v1/organizations/{id}/hard-stop", h.requireAuth(h.handleHardStop(true)))          // 运维硬停(禁用 org 用户)
 	mux.HandleFunc("POST /api/v1/organizations/{id}/hard-stop-release", h.requireAuth(h.handleHardStop(false))) // 解除硬停
 

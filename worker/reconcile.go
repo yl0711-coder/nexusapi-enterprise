@@ -69,11 +69,6 @@ func (w *ReconcileWorker) Run(ctx context.Context) {
 					w.log.Error("计费对账失败(下轮重试)", "err", berr)
 					w.svc.RecordWorkerFailure(ctx, "reconcile", "billing", berr)
 				}
-				// 回填-台账对账安全网(24-§9):已回填组织 SUM(ledger) vs new-api stat 权威值,漂移即告警(只读)。
-				if berr := w.svc.ReconcileBackfillLedger(rc); berr != nil {
-					w.log.Error("回填-台账对账失败(下轮重试)", "err", berr)
-					w.svc.RecordWorkerFailure(ctx, "reconcile", "backfill_ledger", berr)
-				}
 				// 订阅旁路再断言(31-ADR §7 纵深):周期重设 wallet_only + 告警 active 订阅。
 				if werr := w.svc.ReassertWalletOnly(rc); werr != nil {
 					w.log.Error("订阅旁路再断言失败(下轮重试)", "err", werr)

@@ -103,13 +103,14 @@ func (s *Service) CreateOrg(ctx context.Context, c session.Claims, in CreateOrgI
 		return nil, apperr.Internal("").WithCause(err)
 	}
 
-	// 建组织必有默认档(B1:干掉隐藏兜底)。自动建一个保守"基础档"tier + 设为组织默认 + 建 org 级月度重置策略。
-	// 基础档额度为可见、可改的默认值(具体数额由商务/运营按客户调),非隐藏常量。
+	// 建组织必有默认档(B1:干掉隐藏兜底)。自动建一个保守"基础档"tier + 设为组织默认。
+	// 架构B:档位额度=AmountRaw(开通成员时金库→成员的首笔划账额,OpenMember 硬性要求非空正数)——
+	// 原 A 版写 MonthlyLimit(0032 废弃字段)+月度重置策略,默认档会开不了成员,已修正;
+	// 重置策略机器随 33 §12-4 退役,不再写 quota_policy。基础档额度可见、可改(商务/运营按客户调),非隐藏常量。
 	baseLimit := DefaultBaseTierMonthlyQuota
-	baseTierID, terr := s.store.CreateTier(ctx, &model.Tier{OrgID: orgID, Name: "基础档", MonthlyLimit: &baseLimit})
+	baseTierID, terr := s.store.CreateTier(ctx, &model.Tier{OrgID: orgID, Name: "基础档", AmountRaw: &baseLimit})
 	if terr == nil {
 		_ = s.store.SetDefaultTier(ctx, orgID, baseTierID)
-		_ = s.store.UpsertQuotaPolicy(ctx, &repo.QuotaPolicy{OrgID: orgID, Scope: "org", ScopeID: orgID, Period: "monthly", LimitQuota: baseLimit, ResetAnchor: "00:00"})
 	} else {
 		s.log.Error("建组织默认档失败", "org_id", orgID, "err", terr)
 	}

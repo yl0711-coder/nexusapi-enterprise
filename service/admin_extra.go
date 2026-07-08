@@ -77,35 +77,8 @@ func (s *Service) SetOrgDefaultTokenGroup(ctx context.Context, c session.Claims,
 	return s.store.GetOrganization(ctx, orgID)
 }
 
-// GetApprovalRules 取审批阈值(O/A)。
-func (s *Service) GetApprovalRules(ctx context.Context, c session.Claims, orgID int64) (*repo.ApprovalRules, error) {
-	if err := assertOrgScope(c, orgID); err != nil {
-		return nil, err
-	}
-	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
-		return nil, err
-	}
-	return s.store.GetApprovalRules(ctx, orgID)
-}
-
-// SetApprovalRules 配置审批阈值(E13,组织管理员;改阈值只影响新申请)。
-func (s *Service) SetApprovalRules(ctx context.Context, c session.Claims, orgID int64, autoMax, l1Max *int64, autoDays *int) (*repo.ApprovalRules, error) {
-	if err := assertOrgScope(c, orgID); err != nil {
-		return nil, err
-	}
-	if err := assertRole(c, session.RoleOrgAdmin); err != nil {
-		return nil, err
-	}
-	// C11:审批阈值/自动过期天数不得为负。
-	if (autoMax != nil && *autoMax < 0) || (l1Max != nil && *l1Max < 0) || (autoDays != nil && *autoDays < 0) {
-		return nil, apperr.InvalidParam("审批阈值与自动过期天数不得为负")
-	}
-	if err := s.store.SetApprovalRules(ctx, orgID, autoMax, l1Max, autoDays); err != nil {
-		return nil, apperr.Internal("").WithCause(err)
-	}
-	s.audit(ctx, c, orgID, "set_approval_rules", "organization", &orgID, nil)
-	return s.store.GetApprovalRules(ctx, orgID)
-}
+// 审批阈值(Get/SetApprovalRules)与配额策略(List/SetQuotaPolicy)service 方法已随
+// 审批/周期重置机器退役删除(33 §12-4;handler/路由已先行摘除,此处清扫残留)。
 
 // UpdateMember 改成员团队/层级/显示名(PATCH /members/:id,A/L)。改层级会重算 override 下发。
 // v1 加 displayName(19-F2:导入/开通的成员管理员可随时改名)。
@@ -169,55 +142,3 @@ func (s *Service) AssignRole(ctx context.Context, c session.Claims, orgID, membe
 	return nil
 }
 
-// ListQuotaPolicies 列配额策略(A/L)。
-func (s *Service) ListQuotaPolicies(ctx context.Context, c session.Claims, orgID int64) ([]*repo.QuotaPolicy, error) {
-	if err := assertOrgScope(c, orgID); err != nil {
-		return nil, err
-	}
-	if err := assertRole(c, session.RoleOrgAdmin, session.RoleTeamLeader); err != nil {
-		return nil, err
-	}
-	all, err := s.store.ListQuotaPolicies(ctx, orgID)
-	if err != nil {
-		return nil, err
-	}
-	// A8:team_leader 只能读**本团队**策略(与写侧 SetQuotaPolicy 同口径:仅 team 维度、本 TeamID);
-	// org_admin/operator 看全 org。避免越团队读到别团队/别人的额度上限(org 内信息泄露)。
-	if c.Role == session.RoleTeamLeader {
-		var mine []*repo.QuotaPolicy
-		for _, p := range all {
-			if p.Scope == "team" && p.ScopeID == c.TeamID {
-				mine = append(mine, p)
-			}
-		}
-		return mine, nil
-	}
-	return all, nil
-}
-
-// SetQuotaPolicy 建/改配额策略(A/L)。
-func (s *Service) SetQuotaPolicy(ctx context.Context, c session.Claims, orgID int64, p *repo.QuotaPolicy) error {
-	if err := assertOrgScope(c, orgID); err != nil {
-		return err
-	}
-	if err := assertRole(c, session.RoleOrgAdmin, session.RoleTeamLeader); err != nil {
-		return err
-	}
-	if p.Scope != "org" && p.Scope != "team" && p.Scope != "member" {
-		return apperr.InvalidParam("scope 须为 org/team/member")
-	}
-	// team_leader 只能设本团队(team 维度)策略,不得越权设 org/他团队额度策略(P1-2)。
-	// org_admin/operator 不受此限。本端点 MVP 白名单外(灰度不可达),开控制面第一天即生效。
-	if c.Role == session.RoleTeamLeader && (p.Scope != "team" || p.ScopeID != c.TeamID) {
-		return apperr.Forbidden("团队负责人只能设置本团队的额度策略")
-	}
-	if p.Period != "daily" && p.Period != "weekly" && p.Period != "monthly" {
-		return apperr.InvalidParam("period 须为 daily/weekly/monthly")
-	}
-	p.OrgID = orgID
-	if err := s.store.UpsertQuotaPolicy(ctx, p); err != nil {
-		return apperr.Internal("").WithCause(err)
-	}
-	s.audit(ctx, c, orgID, "set_quota_policy", "quota_policy", &p.ScopeID, map[string]any{"scope": p.Scope, "period": p.Period, "limit": p.LimitQuota})
-	return nil
-}

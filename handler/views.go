@@ -103,32 +103,6 @@ func toMemberView(m *model.Member) memberView {
 	}
 }
 
-type grantView struct {
-	ID        int64  `json:"id"`
-	MemberID  int64  `json:"member_id"`
-	GrantType string `json:"grant_type"`
-	Delta     int64  `json:"delta,omitempty"`
-	Model     string `json:"model,omitempty"`
-	Reason    string `json:"reason,omitempty"`
-	Operator  string `json:"operator"`
-	ExpireAt  string `json:"expire_at"`
-	Status    string `json:"status"`
-	CreatedAt string `json:"created_at"`
-}
-
-func toGrantView(g *model.Grant) grantView {
-	v := grantView{
-		ID: g.ID, MemberID: g.MemberID, GrantType: g.GrantType,
-		Delta: g.Payload.Delta, Model: g.Payload.Model, Operator: g.Operator,
-		ExpireAt: g.ExpireAt.Format(time.RFC3339), Status: g.Status,
-		CreatedAt: g.CreatedAt.Format(time.RFC3339),
-	}
-	if g.Reason != nil {
-		v.Reason = *g.Reason
-	}
-	return v
-}
-
 // displayCurrency 对客展示币种(A3:应与主站 QuotaDisplayType 一致;MVP 默认 USD,上线读主站 option)。
 const displayCurrency = "USD"
 
@@ -188,29 +162,6 @@ func toRechargeReqView(rq *model.RechargeRequest) rechargeReqView {
 		v.Note = *rq.Note
 	}
 	return v
-}
-
-type approvalView struct {
-	ID            int64  `json:"id"`
-	ApplicantID   int64  `json:"applicant_id"`
-	ApplicantName string `json:"applicant_name,omitempty"`
-	TeamID        *int64 `json:"team_id"`
-	RequestType   string `json:"request_type"`
-	Model         string `json:"model,omitempty"`
-	Amount        int64  `json:"amount_quota"`
-	Duration      string `json:"duration"`
-	Reason        string `json:"reason,omitempty"`
-	State         string `json:"state"`
-	IsLevel2      bool   `json:"is_level2"`
-	CreatedAt     string `json:"created_at"`
-}
-
-func toApprovalView(a *model.Approval) approvalView {
-	return approvalView{
-		ID: a.ID, ApplicantID: a.ApplicantID, ApplicantName: a.ApplicantName, TeamID: a.TeamID, RequestType: a.RequestType,
-		Model: a.Payload.Model, Amount: a.Payload.Amount, Duration: a.Payload.Duration, Reason: a.Payload.Reason,
-		State: a.State, IsLevel2: a.IsLevel2, CreatedAt: a.CreatedAt.Format(time.RFC3339),
-	}
 }
 
 type notificationView struct {

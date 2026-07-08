@@ -87,12 +87,15 @@ func (l *ledgerRuntime) markBucket(memberID int64, bucket string) {
 	l.topupSeen[memberID] = bucket
 }
 
-// moneyFrozen 读急停开关(读失败视为未冻结——fail-open,配置读挂不应停服;冻结是显式人工动作)。
+// moneyFrozen 读急停开关。**fail-closed(39号体检阻断-3,涉钱红线)**:读失败视为已冻结——
+// 急停的语义就是"出事时拦住钱",DB 抖动/异常正是最该冻结的时刻,绝不能恰好放行。
+// (平台其它读失败处 fail-open 是对的:观测/展示不该因读挂阻断业务;急停开关是唯一例外。)
+// 影响面=划账/订阅补满/reconcile 修复写被暂拒(可重试);检测与告警不经此函数、恒开。
 func (s *Service) moneyFrozen(ctx context.Context) bool {
 	frozen, err := s.store.GetSettingBool(ctx, "money_freeze")
 	if err != nil {
-		s.log.Error("读 money_freeze 失败(按未冻结处理,fail-open)", "err", err)
-		return false
+		s.log.Error("🔴读 money_freeze 失败,按已冻结处理拦住钱动作(fail-closed;读取恢复后自动解除)", "err", err)
+		return true
 	}
 	return frozen
 }

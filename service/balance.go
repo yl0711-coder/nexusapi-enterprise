@@ -8,6 +8,7 @@ package service
 import (
 	"context"
 	"errors"
+	"runtime/debug"
 	"sync"
 
 	"github.com/nexusapi-platform/enterprise/pkg/apperr"
@@ -99,6 +100,19 @@ func (s *Service) sumMemberQuotas(ctx context.Context, members []repo.MemberBala
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
+			// 39号体检阻断-2:请求路径 fan-out goroutine 必须自带 recover——http server 的 recover
+			// 只护 handler 自身 goroutine,这里 panic 会崩整个进程。panic 转 firstErr:单请求 5xx,不是全站挂。
+			defer func() {
+				if v := recover(); v != nil {
+					s.log.Error("余额求和 goroutine panic(已恢复,转为请求错误)", "panic", v, "stack", string(debug.Stack()))
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = apperr.Internal("")
+						cancel()
+					}
+					mu.Unlock()
+				}
+			}()
 			defer wg.Done()
 			defer func() { <-sem }()
 			if ctx.Err() != nil {

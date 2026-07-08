@@ -87,6 +87,15 @@ func (s *Service) ProvisionMemberServiceAccount(ctx context.Context, orgID, memb
 		return 0, mapUpstream(cause)
 	}
 
+	// ①.5 C1 硬校验(33 §11/总监裁定):验新建成员 user 的 quota=0。AllowAdopt=false 已防接管既有号;
+	// 此处防 new-api 侧「新用户初始额度」(QuotaForNewUser)配置送钱——新号带非零额度会使首笔划账后
+	// 成员额度 > 划账意图值(平台账本外的白送钱,守恒破坏)。非零即隔离,提示运维清零该配置后重试。
+	if q0, qerr := s.upstream.GetUserQuota(ctx, res.NewapiUserID); qerr != nil {
+		return quarantine("verify_zero_quota", qerr)
+	} else if q0 != 0 {
+		return quarantine("verify_zero_quota", fmt.Errorf("新建成员 user 初始 quota=%d≠0(new-api 侧疑配了新用户赠送额度,破坏划账守恒),请将 new-api「新用户初始额度」清零后重试", q0))
+	}
+
 	// ② 凭证加密落库(旋转 token 语义:取到必须立即存,丢了只能密码重登再取)。
 	atEnc, e1 := s.keyring.EncryptString(res.AccessToken)
 	pwEnc, e2 := s.keyring.EncryptString(pw)

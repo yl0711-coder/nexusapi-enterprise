@@ -48,14 +48,7 @@ func (w *SettlementWorker) Run(ctx context.Context) {
 				} else if n > 0 {
 					w.log.Info("settlement 扣费", "deducted_quota", n)
 				}
-				// 历史回填(24):forward 之后**同 goroutine 串行**跑一片(tick 分片,不另起并发 goroutine)。
-				// 与 forward 共用 settlementMu,回填与 forward-补漏绝不并发写 ledger(命根子)。独立超时,不占 forward 的。
-				bc, bcancel := context.WithTimeout(ctx, 45*time.Second)
-				if berr := w.svc.RunBackfillSlice(bc); berr != nil {
-					w.log.Error("历史回填分片失败(保持 running,下轮从 cursor_ts 续)", "err", berr)
-					w.svc.RecordWorkerFailure(ctx, "settlement", "backfill", berr)
-				}
-				bcancel()
+				// 历史回填机器已随门B 整体退役清除(总监裁定 2026-07-07;v2 收编场景按 doc24 重建)。
 				// 完整日志镜像只服务排障,不进 settlement 账本。独立短超时,失败只告警下轮补。
 				lc, lcancel := context.WithTimeout(ctx, 20*time.Second)
 				if lerr := w.svc.RunLogMirrorSlice(lc); lerr != nil {

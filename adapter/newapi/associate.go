@@ -40,16 +40,20 @@ func (a *Adapter) GetSelfInfo(ctx context.Context, cred MemberCred) (*SelfInfo, 
 	return &info, nil
 }
 
-// UserToken 是导入用的令牌快照(门B F4:带过来分组/模型限制/状态/脱敏 key,只展示不改动;明文拿不到)。
+// UserToken 是令牌快照(门B 导入 F4 + 架构B 成员自助令牌列表复用;只读展示,明文拿不到)。
+// 架构B(阶段1)加性补齐:remain_quota/used_quota/allow_ips(成员「我的令牌」页显示额度/剩余/IP/用量)。
 type UserToken struct {
 	ID             int    `json:"id"`
 	Name           string `json:"name"`
 	Group          string `json:"group"`
 	Status         int    `json:"status"` // 1=enabled 2=disabled
 	UnlimitedQuota bool   `json:"unlimited_quota"`
+	RemainQuota    int64  `json:"remain_quota"` // 令牌剩余额度(raw;finite 令牌的子上限)
+	UsedQuota      int64  `json:"used_quota"`   // 令牌已用(raw,new-api 原生计数)
 	ExpiredTime    int64  `json:"expired_time"`
 	ModelLimits    string `json:"model_limits"`
-	KeyMasked      string `json:"key"` // 列表接口已脱敏(buildMaskedTokenResponse)
+	AllowIPs       string `json:"allow_ips"` // IP 白名单(单 IP/CIDR,逗号分隔;空=不限)
+	KeyMasked      string `json:"key"`       // 列表接口已脱敏(buildMaskedTokenResponse)
 }
 
 // ListUserTokens 列该用户名下**全部**令牌(门B 导入/漂移同步用)。

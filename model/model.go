@@ -25,11 +25,14 @@ const (
 	MemberStatusProvisioning = "provisioning"
 )
 
-// bootstrap_state(10 §2.5)。
+// bootstrap_state(10 §2.5 + 架构B 0030)。
 const (
 	BootstrapPending = "pending"
 	BootstrapDone    = "done"
 	BootstrapFailed  = "failed"
+	// BootstrapQuarantined 架构B 孤儿隔离(34 §3-③):CreateUser 成功后续 saga 步骤失败,
+	// new-api 无干净删 user 能力 → disable + 本标记;worker/统计一律跳过;可重试(重入新名重建)。
+	BootstrapQuarantined = "quarantined"
 )
 
 // 通用状态(team/tier)。
@@ -116,11 +119,11 @@ type OrgUnit struct {
 
 // OrgEscrowConfig 对应 org_escrow_config 表(0021)。生效阈值=COALESCE(ThresholdManualOverride, ThresholdAuto)。
 type OrgEscrowConfig struct {
-	OrgID                 int64
-	ThresholdAuto         int64  // 每天按近7天补货点重算
+	OrgID                   int64
+	ThresholdAuto           int64  // 每天按近7天补货点重算
 	ThresholdManualOverride *int64 // 运维手动定(优先);nil=用 auto
-	ConsumedBaseline      *int64    // B1:funding 激活时快照的 SUM(ledger);窗口纠偏/对账只算此后增量。nil=未快照
-	UpdatedAt             time.Time
+	ConsumedBaseline        *int64 // B1:funding 激活时快照的 SUM(ledger);窗口纠偏/对账只算此后增量。nil=未快照
+	UpdatedAt               time.Time
 }
 
 // EffectiveThreshold 生效续充阈值:手动覆盖优先,否则自动值。
@@ -143,16 +146,30 @@ type EscrowBucket struct {
 	UpdatedAt time.Time
 }
 
-// Tier 对应 tier 表(09 §5)。ModelSet/ModelCap 以 JSON 字符串透传(本期不解析)。
+// 档位额度型 / 可见性(架构B 0032,31-ADR §5):fixed=固定/单次(不重置)| subscription=订阅/周期(worker 补满)。
+// 无「无上限」档。visibility:all=全组织成员可用(无需 grant 行)/ assigned=须经 tier_grant 授权到成员或团队。
+const (
+	TierQuotaFixed         = "fixed"
+	TierQuotaSubscription  = "subscription"
+	TierVisibilityAll      = "all"
+	TierVisibilityAssigned = "assigned"
+)
+
+// Tier 对应 tier 表(09 §5 + 架构B 0032)。ModelSet/ModelCap 以 JSON 字符串透传(本期不解析)。
+// 架构B:额度落成员 user.quota(AmountRaw 为唯一额度值);旧三档 limit 保留废弃(0032,代码停引用)。
 type Tier struct {
 	ID           int64
 	OrgID        int64
 	Name         string
 	ModelSet     []string         // 允许的模型集合;空 = 继承组织默认
 	ModelCap     map[string]int64 // 单模型日上限(quota),如 {"claude-opus":50000};软限额(E4)
-	DailyLimit   *int64
-	WeeklyLimit  *int64
-	MonthlyLimit *int64
+	QuotaType    string           // 架构B(0032):fixed | subscription
+	AmountRaw    *int64           // 架构B(0032):额度值(raw quota;建成员必设、正数、≤成员帽、不可 0)
+	ResetPeriod  *string          // 架构B(0032):subscription 的周期 daily|weekly|monthly;fixed=nil
+	Visibility   string           // 架构B(0032):all | assigned(经 tier_grant 授权)
+	DailyLimit   *int64           // Deprecated: 架构A 遗留(0032 废弃,读兼容保留)
+	WeeklyLimit  *int64           // Deprecated: 架构A 遗留(0032 废弃,读兼容保留)
+	MonthlyLimit *int64           // Deprecated: 架构A 遗留(0032 废弃,读兼容保留)
 	NewapiGroup  *string
 	IsDefault    bool
 	Status       string
@@ -185,14 +202,14 @@ type Member struct {
 	// 架构B(0030):成员=各自 new-api user(平台托管服务账号)。凭证密文不进本结构(单独 repo 方法取,防密文到处传)。
 	NewapiUserID   *int64  // 成员自己的 new-api user id(nil=未开通/旧A版数据)
 	NewapiUsername *string // 成员 new-api 用户名(日志按 username 查、401 自愈重登用)
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // key 槽 / 物理令牌状态(v2 0015)。
 const (
-	KeySlotActive   = "active"
-	KeySlotRevoked  = "revoked"
+	KeySlotActive      = "active"
+	KeySlotRevoked     = "revoked"
 	KeyTokenActive     = "active"
 	KeyTokenRevoked    = "revoked"
 	KeyTokenSuperseded = "superseded" // 轮换后被取代的旧令牌(留作历史归因)
@@ -225,44 +242,7 @@ type MemberKeyToken struct {
 	CreatedAt     time.Time
 }
 
-
-// grant_type(09 §14 + 08 §3.4)。
-const (
-	GrantQuotaAdd   = "quota_add"   // 临时增额(payload.delta>0)
-	GrantQuotaSub   = "quota_sub"   // 临时减额(payload.delta<0)
-	GrantModelAdd   = "model_add"   // 临时放开模型(payload.model)
-	GrantAccountTTL = "account_ttl" // 临时账号有效期(到期停号)
-)
-
-// grant status(09 §14)。
-const (
-	GrantStatusActive  = "active"
-	GrantStatusExpired = "expired"
-	GrantStatusRevoked = "revoked"
-)
-
-// Grant 对应 member_grant 表(09 §11,落地改名避保留字)。
-type Grant struct {
-	ID          int64
-	OrgID       int64
-	MemberID    int64
-	GrantType   string
-	Payload     GrantPayload
-	Reason      *string
-	Operator    string
-	EffectiveAt time.Time
-	ExpireAt    time.Time
-	Status      string
-	RevertedAt  *time.Time
-	CreatedAt   time.Time
-}
-
-// GrantPayload 是 grant 的载荷(按 grant_type 取用其中字段)。
-type GrantPayload struct {
-	Delta    int64  `json:"delta,omitempty"`    // quota_add/sub:带符号的额度增减(quota)
-	Duration string `json:"duration,omitempty"` // 时长标识:today/3d/week 等
-	Model    string `json:"model,omitempty"`    // model_add:放开的模型名
-}
+// Grant/GrantPayload 及其常量(member_grant 表模型)已随临时 grant 机器退役删除(33 §12-4;表留档)。
 
 // Balance 对应 company_balance 表(09 §7)。balance = total_recharged - total_consumed。
 // 模型2:company_balance 降为派生影子/对账用(真相=工单+日志,余额读穿 escrow);
@@ -313,45 +293,7 @@ type RechargeRequest struct {
 	CreatedAt   time.Time
 }
 
-// approval 状态(09 §14)+ 请求类型。
-const (
-	ApprovalPending     = "pending"       // 待一审(团队负责人)
-	ApprovalL1Approved  = "l1_approved"   // 一审过,待二审(组织管理员)
-	ApprovalApproved    = "approved"      // 终批通过
-	ApprovalRejected    = "rejected"      // 驳回
-	ApprovalAutoApprove = "auto_approved" // 自动通过
-	ApprovalCancelled   = "cancelled"
-
-	ReqQuotaRaise = "quota_raise"
-	ReqModelOpen  = "model_open"
-)
-
-// Approval 对应 approval 表(09 §12)。
-type Approval struct {
-	ID           int64
-	OrgID        int64
-	ApplicantID  int64
-	TeamID       *int64
-	RequestType  string
-	Payload      ApprovalPayload
-	State        string
-	IsLevel2     bool
-	L1ReviewerID *int64
-	L2ReviewerID *int64
-	RejectReason *string
-	CreatedAt    time.Time
-
-	// ApplicantName 申请人显示名(瞬态,列表 join 填充,非 approval 表列;T9)。
-	ApplicantName string
-}
-
-// ApprovalPayload 是申请载荷。
-type ApprovalPayload struct {
-	Model    string `json:"model,omitempty"`
-	Amount   int64  `json:"amount,omitempty"`   // 申请额度(quota)
-	Duration string `json:"duration,omitempty"` // today/3d/week
-	Reason   string `json:"reason,omitempty"`
-}
+// Approval/ApprovalPayload 及其常量(approval 表模型)已随审批子系统退役删除(33 §12-4;表留档)。
 
 // Notification 对应 notification 表(站内通知,US-13)。
 type Notification struct {

@@ -57,7 +57,7 @@ func TestIntegration_KeyIDAttribution(t *testing.T) {
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	upstream := newapi.New(newapi.Config{BaseURL: newapiURL, AdminToken: adminToken, AdminUserID: adminUID, Timeout: 15 * time.Second}, nil)
-	svc := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log, ObserveMode: true})
+	svc := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log})
 
 	// 2) 直接用真实 repo 接口造 member + 轮换的两条 token 行(走 FinalizeBootstrap/UpdateMemberKey 真实写链)。
 	const orgID, memberID, userID = int64(1), int64(1), int64(90001)
@@ -66,12 +66,16 @@ func TestIntegration_KeyIDAttribution(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'attr-org', 'attr-org-slug')`, orgID); err != nil {
 		t.Fatalf("建组织失败: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO member (id, org_id, login_email) VALUES (?, ?, 'attr@test.local')`, memberID, orgID); err != nil {
+	// 架构B:成员=各自 new-api user,归因主键是 member.newapi_user_id(BE③ 归因改造);
+	// 造数按 B 模型给成员挂 user id,token 断言(token→member 且 member.newapi_user_id→org)自然通过。
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO member (id, org_id, login_email, newapi_user_id, newapi_username) VALUES (?, ?, 'attr@test.local', ?, 'attr_m1')`,
+		memberID, orgID, userID); err != nil {
 		t.Fatalf("建成员失败: %v", err)
 	}
 	masked1, masked2 := "sk-aaaa...v001", "sk-bbbb...v002"
 	t1 := tok1
-	m1 := &model.Member{ID: memberID, OrgID: orgID, NewapiTokenID: &t1, KeyMasked: &masked1, KeyRotation: 1} // 模型2:归因走 token,member 不持 user_id
+	m1 := &model.Member{ID: memberID, OrgID: orgID, NewapiTokenID: &t1, KeyMasked: &masked1, KeyRotation: 1}
 	if err := store.FinalizeBootstrap(ctx, m1, "nexus_m1_v1"); err != nil {
 		t.Fatalf("FinalizeBootstrap(建主 key)失败: %v", err)
 	}

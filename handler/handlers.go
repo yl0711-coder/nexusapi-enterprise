@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/nexusapi-platform/enterprise/pkg/apperr"
 	"github.com/nexusapi-platform/enterprise/repo"
 	"github.com/nexusapi-platform/enterprise/service"
 )
@@ -119,15 +120,15 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, err)
 		return
 	}
-	// 改动⑥-2:/me 透出 mvp_mode,前端据此藏掉本期封锁的菜单/按钮(真正拦截以后端 mvpGate 为准)。
 	// A3(28):透出本人组织状态,员工"我的用量·当前状态"显示真实状态(组织硬停等),不再硬编码"正常"。
 	// F3(28):透出 API 接入地址(纯展示,未配置则前端不显示接入示例)。
+	// 组长契约增补(33 §12-①):顶层回传 quota_per_unit——member/org_admin 靠它做 raw↔美元换算。
 	writeOK(w, r, http.StatusOK, struct {
 		memberView
-		MvpMode        bool   `json:"mvp_mode"`
 		OrgStatus      string `json:"org_status,omitempty"`
 		GatewayBaseURL string `json:"gateway_base_url,omitempty"`
-	}{toMemberView(m), h.mvpMode, h.svc.MyOrgStatus(r.Context(), c), h.gatewayBaseURL})
+		QuotaPerUnit   int64  `json:"quota_per_unit"`
+	}{toMemberView(m), h.svc.MyOrgStatus(r.Context(), c), h.gatewayBaseURL, h.svc.QuotaPerUnitSetting(r.Context())})
 }
 
 // ---- 组织 ----
@@ -136,7 +137,7 @@ func (h *Handler) handleListOrgs(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())
 	page, size, offset := parsePaging(r, 20)
 	includeArchived := r.URL.Query().Get("include_archived") == "true" // T12:默认隐藏已归档
-	q := strings.TrimSpace(r.URL.Query().Get("q"))                    // B1(28):服务端搜索(名称/slug)
+	q := strings.TrimSpace(r.URL.Query().Get("q"))                     // B1(28):服务端搜索(名称/slug)
 	orgs, total, err := h.svc.ListOrgs(r.Context(), c, q, size, offset, includeArchived)
 	if err != nil {
 		writeErr(w, r, err)
@@ -176,12 +177,6 @@ type createOrgReq struct {
 	AdminEmail      string `json:"admin_email"`
 	AdminPassword   string `json:"admin_password"`
 	NewapiUserGroup string `json:"newapi_user_group"` // 改动①:运营手填 new-api 用户分组(必填)
-	// 门B 关联现有 new-api 用户(v1,19-F1;缺省=门A 新建)。
-	Associate *struct {
-		NewapiUserID int64  `json:"newapi_user_id"`
-		AccessToken  string `json:"access_token"`
-		NamePolicy   string `json:"name_policy"` // inherit(默认)/random
-	} `json:"associate"`
 }
 
 func (h *Handler) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
@@ -195,11 +190,6 @@ func (h *Handler) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		Name: in.Name, Slug: in.Slug, AdminEmail: in.AdminEmail, AdminPassword: in.AdminPassword,
 		NewapiUserGroup: in.NewapiUserGroup,
 	}
-	if in.Associate != nil {
-		svcIn.Associate = &service.AssociateOrgInput{
-			NewapiUserID: in.Associate.NewapiUserID, AccessToken: in.Associate.AccessToken, NamePolicy: in.Associate.NamePolicy,
-		}
-	}
 	res, err := h.svc.CreateOrg(r.Context(), c, svcIn)
 	if err != nil {
 		writeErr(w, r, err)
@@ -211,8 +201,6 @@ func (h *Handler) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		"admin_email":     res.AdminEmail,
 		// 初始密码仅本次回显一次,供运营方交付客户管理员。
 		"admin_initial_password": res.AdminInitialPassword,
-		"imported_members":       res.ImportedMembers,
-		"import_failed":          res.ImportFailed,
 	})
 }
 
@@ -231,53 +219,6 @@ func (h *Handler) handleHardStop(stop bool) http.HandlerFunc {
 		}
 		writeOK(w, r, http.StatusOK, map[string]any{"hard_stopped": stop})
 	}
-}
-
-// handleReimportTokens 门B"重新导入"(运营方,幂等):补齐导入失败/后来新增的令牌成员。
-func (h *Handler) handleReimportTokens(w http.ResponseWriter, r *http.Request) {
-	c, _ := claimsFrom(r.Context())
-	orgID, err := pathInt64(r, "id")
-	if err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	imported, skipped, failed, err := h.svc.ReimportOrgTokens(r.Context(), c, orgID)
-	if err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	writeOK(w, r, http.StatusOK, map[string]any{"imported": imported, "skipped": skipped, "failed": failed})
-}
-
-// handleGetBackfill 读历史回填状态(24-§9:回填中 / 已同步·起点 / 失败)。运营方 + org_admin。
-func (h *Handler) handleGetBackfill(w http.ResponseWriter, r *http.Request) {
-	c, _ := claimsFrom(r.Context())
-	orgID, err := pathInt64(r, "id")
-	if err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	v, err := h.svc.GetBackfillStatus(r.Context(), c, orgID)
-	if err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	writeOK(w, r, http.StatusOK, v)
-}
-
-// handleRequeueBackfill 运营方"重新回填"(24-§9,幂等)。
-func (h *Handler) handleRequeueBackfill(w http.ResponseWriter, r *http.Request) {
-	c, _ := claimsFrom(r.Context())
-	orgID, err := pathInt64(r, "id")
-	if err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	if err := h.svc.RequeueBackfill(r.Context(), c, orgID); err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	writeOK(w, r, http.StatusOK, map[string]any{"requeued": true})
 }
 
 func (h *Handler) handleGetOrg(w http.ResponseWriter, r *http.Request) {
@@ -463,7 +404,12 @@ func (h *Handler) handleListTiers(w http.ResponseWriter, r *http.Request) {
 	}
 	views := make([]tierView, 0, len(tiers))
 	for _, t := range tiers {
-		views = append(views, toTierView(t))
+		v := toTierView(t)
+		// 组长契约增补(33 §12-④):tier 读取随对象带出 grants 数组(best-effort,读挂给空数组)。
+		if gs, gerr := h.svc.TierGrants(r.Context(), c, orgID, t.ID); gerr == nil {
+			v.Grants = gs
+		}
+		views = append(views, v)
 	}
 	writeOK(w, r, http.StatusOK, views)
 }
@@ -472,7 +418,11 @@ type createTierReq struct {
 	Name         string           `json:"name"`
 	ModelSet     []string         `json:"model_set"`
 	ModelCap     map[string]int64 `json:"model_cap"`
-	DailyLimit   *int64           `json:"daily_limit"`
+	QuotaType    string           `json:"quota_type"`   // 架构B:fixed(默认)| subscription
+	AmountRaw    *int64           `json:"amount_raw"`   // 架构B:额度值(raw)
+	ResetPeriod  *string          `json:"reset_period"` // 架构B:daily|weekly|monthly(仅 subscription)
+	Visibility   string           `json:"visibility"`   // 架构B:all | assigned(默认)
+	DailyLimit   *int64           `json:"daily_limit"`  // Deprecated: 架构A 遗留
 	WeeklyLimit  *int64           `json:"weekly_limit"`
 	MonthlyLimit *int64           `json:"monthly_limit"`
 	NewapiGroup  *string          `json:"newapi_group"`
@@ -491,8 +441,9 @@ func (h *Handler) handleCreateTier(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t, err := h.svc.CreateTier(r.Context(), c, orgID, service.CreateTierInput{
-		Name: in.Name, ModelSet: in.ModelSet, ModelCap: in.ModelCap, DailyLimit: in.DailyLimit,
-		WeeklyLimit: in.WeeklyLimit, MonthlyLimit: in.MonthlyLimit, NewapiGroup: in.NewapiGroup,
+		Name: in.Name, ModelSet: in.ModelSet, ModelCap: in.ModelCap,
+		QuotaType: in.QuotaType, AmountRaw: in.AmountRaw, ResetPeriod: in.ResetPeriod, Visibility: in.Visibility,
+		DailyLimit: in.DailyLimit, WeeklyLimit: in.WeeklyLimit, MonthlyLimit: in.MonthlyLimit, NewapiGroup: in.NewapiGroup,
 	})
 	if err != nil {
 		writeErr(w, r, err)
@@ -506,7 +457,11 @@ type updateTierReq struct {
 	Name         *string           `json:"name"`
 	ModelSet     *[]string         `json:"model_set"` // 传了(含空数组)=改;不传=保持
 	ModelCap     *map[string]int64 `json:"model_cap"`
-	DailyLimit   *int64            `json:"daily_limit"`
+	QuotaType    *string           `json:"quota_type"`   // 架构B
+	AmountRaw    *int64            `json:"amount_raw"`   // 架构B
+	ResetPeriod  *string           `json:"reset_period"` // 架构B(传空串=清空)
+	Visibility   *string           `json:"visibility"`   // 架构B
+	DailyLimit   *int64            `json:"daily_limit"`  // Deprecated: 架构A 遗留
 	WeeklyLimit  *int64            `json:"weekly_limit"`
 	MonthlyLimit *int64            `json:"monthly_limit"`
 	NewapiGroup  *string           `json:"newapi_group"`
@@ -526,8 +481,16 @@ func (h *Handler) handleUpdateTier(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	su := service.UpdateTierInput{
-		Name: in.Name, DailyLimit: in.DailyLimit, WeeklyLimit: in.WeeklyLimit,
+		Name: in.Name, QuotaType: in.QuotaType, AmountRaw: in.AmountRaw, Visibility: in.Visibility,
+		DailyLimit: in.DailyLimit, WeeklyLimit: in.WeeklyLimit,
 		MonthlyLimit: in.MonthlyLimit, NewapiGroup: in.NewapiGroup,
+	}
+	if in.ResetPeriod != nil {
+		if *in.ResetPeriod == "" {
+			su.SetResetPeriod = true // 显式清空(subscription→fixed)
+		} else {
+			su.ResetPeriod = in.ResetPeriod
+		}
 	}
 	if in.ModelSet != nil {
 		su.SetModelSet = true
@@ -573,6 +536,56 @@ func (h *Handler) handleSetDefaultTier(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeOK(w, r, http.StatusOK, map[string]any{"tier_id": tierID, "is_default": true})
+}
+
+// POST /tiers/{id}/grants — 档位授权到 all/成员/团队(org_admin;33 §12-④)。
+func (h *Handler) handleCreateTierGrant(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	tierID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	var in struct {
+		TargetType string `json:"target_type"` // all | member | team
+		TargetID   int64  `json:"target_id"`
+	}
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	g, err := h.svc.CreateTierGrant(r.Context(), c, c.OrgID, tierID, in.TargetType, in.TargetID)
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusCreated, g)
+}
+
+// DELETE /tiers/{id}/grants — 撤销档位授权(org_admin;body {grant_id},33 §12-④)。
+func (h *Handler) handleDeleteTierGrant(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	tierID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	var in struct {
+		GrantID int64 `json:"grant_id"`
+	}
+	if err := decodeJSON(r, &in); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	if in.GrantID <= 0 {
+		writeErr(w, r, apperr.InvalidParam("grant_id 必填"))
+		return
+	}
+	if err := h.svc.DeleteTierGrant(r.Context(), c, c.OrgID, tierID, in.GrantID); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{"grant_id": in.GrantID, "deleted": true})
 }
 
 // ---- 成员 ----
@@ -662,15 +675,15 @@ func (h *Handler) handleOpenMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, err)
 		return
 	}
-	// api_key 明文仅此一次回显(10 §1.8.1)。
+	// 架构B:开通不铸 key(令牌由成员在 /me/tokens 自助建);回显登录凭证仅此一次(33 §3.2)。
 	writeOK(w, r, http.StatusCreated, map[string]any{
-		"member_id":        res.MemberID,
-		"api_key":          res.APIKey,
-		"key_masked":       res.KeyMasked,
-		"login_email":      res.LoginEmail,
-		"initial_password": res.InitialPassword, // 仅此一次,交付成员、首登改密
-		"tier_id":          res.TierID,
-		"models":           res.Models,
+		"member_id":         res.MemberID,
+		"login_email":       res.LoginEmail,
+		"initial_password":  res.InitialPassword, // 仅此一次,交付成员、首登改密
+		"newapi_user_id":    res.NewapiUserID,
+		"initial_quota_raw": res.InitialQuotaRaw,
+		"tier_id":           res.TierID,
+		"models":            res.Models,
 	})
 }
 
@@ -686,80 +699,21 @@ func (h *Handler) handleGetMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, err)
 		return
 	}
-	// F3(28):本人视角附加档位名/可用模型清单(mykey 自助闭环:员工知道自己能调哪些模型),best-effort。
+	// 架构B(33 §3.5/§12-②):详情附额度快照(remaining_raw/used_raw/granted_raw/token_count,best-effort)。
+	snap := h.svc.MemberQuotaSnapshotOf(r.Context(), m)
+	// F3(28):本人视角附加档位名/可用模型清单(自助闭环:成员知道自己能调哪些模型),best-effort。
 	if c.MemberID == memberID {
 		ms, tn := h.svc.MemberTierInfo(r.Context(), c.OrgID, m)
 		writeOK(w, r, http.StatusOK, struct {
 			memberView
-			TierName string   `json:"tier_name,omitempty"`
-			ModelSet []string `json:"model_set,omitempty"`
-		}{toMemberView(m), tn, ms})
+			TierName string                       `json:"tier_name,omitempty"`
+			ModelSet []string                     `json:"model_set,omitempty"`
+			Quota    *service.MemberQuotaSnapshot `json:"quota,omitempty"`
+		}{toMemberView(m), tn, ms, snap})
 		return
 	}
-	writeOK(w, r, http.StatusOK, toMemberView(m))
-}
-
-func (h *Handler) handleRotateKey(w http.ResponseWriter, r *http.Request) {
-	c, _ := claimsFrom(r.Context())
-	memberID, err := pathInt64(r, "id")
-	if err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	apiKey, masked, err := h.svc.RotateKey(r.Context(), c, c.OrgID, memberID)
-	if err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	writeOK(w, r, http.StatusOK, map[string]any{"api_key": apiKey, "key_masked": masked})
-}
-
-// handleRevealKey 即时取成员当前令牌明文,仅供前端复制(27-§3.2)。运营方一律 403;明文只即时回传,不落库/不写日志。
-func (h *Handler) handleRevealKey(w http.ResponseWriter, r *http.Request) {
-	c, _ := claimsFrom(r.Context())
-	memberID, err := pathInt64(r, "id")
-	if err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	apiKey, err := h.svc.RevealKey(r.Context(), c, memberID)
-	if err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	writeOK(w, r, http.StatusOK, map[string]any{"api_key": apiKey})
-}
-
-// handleCreateMemberToken 员工自助建/重建 API key,选模型分组(改动③)。
-func (h *Handler) handleCreateMemberToken(w http.ResponseWriter, r *http.Request) {
-	c, _ := claimsFrom(r.Context())
-	memberID, err := pathInt64(r, "id")
-	if err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	var in struct {
-		Group string `json:"group"`
-	}
-	if err := decodeJSON(r, &in); err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	apiKey, masked, err := h.svc.CreateMemberToken(r.Context(), c, memberID, in.Group)
-	if err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	writeOK(w, r, http.StatusCreated, map[string]any{"api_key": apiKey, "key_masked": masked})
-}
-
-// handleMemberUsableGroups 列本企业可用模型分组(改动③:自助建 key 的分组选择器)。
-func (h *Handler) handleMemberUsableGroups(w http.ResponseWriter, r *http.Request) {
-	c, _ := claimsFrom(r.Context())
-	groups, err := h.svc.MemberUsableGroups(r.Context(), c)
-	if err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	writeOK(w, r, http.StatusOK, map[string]any{"groups": groups})
+	writeOK(w, r, http.StatusOK, struct {
+		memberView
+		Quota *service.MemberQuotaSnapshot `json:"quota,omitempty"`
+	}{toMemberView(m), snap})
 }

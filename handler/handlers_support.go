@@ -221,7 +221,8 @@ func (h *Handler) handleEscrowRefill(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, r, http.StatusOK, bal)
 }
 
-// GET /organizations/{id}/budget-ref — 额度参考条(#4·B:已用$/预付$,藏价有意例外,O/A)。
+// GET /organizations/{id}/budget-ref — 额度参考条(#4:已用/当前余额,O/A)。
+// 架构B(BE③):预付口径改读求和(balance_raw=金库+Σ成员),company_balance 第二账退役(33 §5)。
 func (h *Handler) handleBudgetRef(w http.ResponseWriter, r *http.Request) {
 	c, _ := claimsFrom(r.Context())
 	orgID, err := pathInt64(r, "id")
@@ -235,8 +236,8 @@ func (h *Handler) handleBudgetRef(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeOK(w, r, http.StatusOK, map[string]any{
-		"consumed_quota":  ref.ConsumedQuota,
-		"recharged_quota": ref.RechargedQuota,
+		"consumed_quota": ref.ConsumedQuota,
+		"balance_raw":    ref.BalanceRaw,
 	})
 }
 

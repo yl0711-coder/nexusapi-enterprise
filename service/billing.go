@@ -371,9 +371,7 @@ func (s *Service) GetBillingSettings(ctx context.Context, c session.Claims, orgI
 	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
 		return nil, err
 	}
-	if err := s.mvpHidePrice(c); err != nil { // MVP(观测)藏价:客户直连不可读计费开关/阈值;运营方/支持态正常
-		return nil, err
-	}
+	// 藏价机制已废除(架构B,33 §12-7,ADR §9 镜像可见性):org_admin 正常可读计费开关/阈值。
 	f, err := s.store.GetOrgBillingFlags(ctx, orgID)
 	if err != nil {
 		return nil, apperr.Internal("").WithCause(err)
@@ -414,15 +412,10 @@ func (s *Service) recomputeOrgStatus(ctx context.Context, orgID int64, b *model.
 		return err
 	}
 
-	// GZ-04 方案②:settlement 不再直接下发 override(消除双写者),这里只翻组织状态旗标(上面已落库)。
-	// 硬停仍是逐组织开关、默认关(用户拍板 2026-06-17)。开了 hard_stop 且状态涉及 stopped 进/出时,
-	// 触发一次"即时收敛"——逐成员经唯一下发出口 applyMemberOverride 按新状态重算下发(应硬停→0,恢复→正常额),
-	// 硬停/恢复当拍生效;其余状态变化(active↔low)不改下发值,无需收敛。
+	// 架构B:billing 状态翻旗只落库,不再经 override 即时收敛下发(A 版机器已退役)。
+	// 硬停/恢复是显式运营动作 HardStopOrg(disable/enable 金库 + fan-out 成员 user),不由计费状态联动。
 	flags, ferr := s.store.GetOrgBillingFlags(ctx, orgID)
 	hardStop := ferr == nil && flags.HardStopEnabled
-	if hardStop && (target == model.OrgStatusStopped || org.Status == model.OrgStatusStopped) {
-		s.convergeOrgQuotas(ctx, orgID)
-	}
 	hsState := "disabled"
 	if hardStop {
 		hsState = "enabled"

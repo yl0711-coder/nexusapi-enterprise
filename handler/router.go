@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/nexusapi-platform/enterprise/pkg/apperr"
 	"github.com/nexusapi-platform/enterprise/pkg/session"
 	"github.com/nexusapi-platform/enterprise/service"
 	"github.com/nexusapi-platform/enterprise/web"
@@ -19,20 +20,20 @@ type Handler struct {
 	signer         *session.Signer
 	log            *slog.Logger
 	version        string
-	mvpMode        bool            // 改动⑥:MVP 灰度封锁(mvpGate 路由白名单 + /me 透出 mvp_mode 给前端藏菜单)
-	authLim        *attemptLimiter // A2:登录/改密账号级失败退避(应用层纵深)
+	authLim        *attemptLimiter  // A2:登录/改密账号级失败退避(应用层纵深)
+	critLim        *criticalLimiter // B3:敏感操作限频(镜像 new-api CriticalRateLimit;揭示明文 key 等)
 	gatewayBaseURL string          // F3(28):对客户展示的 API 接入地址(纯展示,可选;未配置则 mykey 不显示接入示例)
 }
 
 // New 构造 Handler。
-func New(svc *service.Service, signer *session.Signer, log *slog.Logger, version string, mvpMode bool) *Handler {
+func New(svc *service.Service, signer *session.Signer, log *slog.Logger, version string) *Handler {
 	if log == nil {
 		log = slog.Default()
 	}
 	markStarted(time.Now().Unix()) // /metrics uptime 起点
 	// NEXUS_GATEWAY_BASE_URL 在此直读(非注入):纯展示字段,不影响任何逻辑;避免为它改 New 签名波及调用方。
-	return &Handler{svc: svc, signer: signer, log: log, version: version, mvpMode: mvpMode,
-		authLim: newAttemptLimiter(), gatewayBaseURL: os.Getenv("NEXUS_GATEWAY_BASE_URL")}
+	return &Handler{svc: svc, signer: signer, log: log, version: version,
+		authLim: newAttemptLimiter(), critLim: newCriticalLimiter(), gatewayBaseURL: os.Getenv("NEXUS_GATEWAY_BASE_URL")}
 }
 
 // Routes 返回挂好中间件的根 http.Handler。
@@ -59,17 +60,10 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("PATCH /api/v1/organizations/{id}", h.requireAuth(h.handleUpdateOrg))
 	mux.HandleFunc("POST /api/v1/organizations/{id}/archive", h.requireAuth(h.handleArchiveOrg))                // T12 归档
 	mux.HandleFunc("POST /api/v1/organizations/{id}/unarchive", h.requireAuth(h.handleUnarchiveOrg))            // T12 取消归档
-	mux.HandleFunc("POST /api/v1/organizations/{id}/import-tokens", h.requireAuth(h.handleReimportTokens))      // 门B 重新导入(运营方,幂等)
-	mux.HandleFunc("GET /api/v1/organizations/{id}/backfill", h.requireAuth(h.handleGetBackfill))               // 历史回填状态(24-§9)
 	mux.HandleFunc("GET /api/v1/organizations/{id}/newapi-logs", h.requireAuth(h.handleOrgNewapiLogs))          // new-api 完整日志镜像(运营排障)
 	mux.HandleFunc("GET /api/v1/organizations/{id}/token-mappings", h.requireAuth(h.handleOrgTokenMappings))    // 员工 ↔ new-api token 映射(运营排障)
-	mux.HandleFunc("POST /api/v1/organizations/{id}/backfill/requeue", h.requireAuth(h.handleRequeueBackfill))  // 重新回填(运营方,幂等)
 	mux.HandleFunc("POST /api/v1/organizations/{id}/hard-stop", h.requireAuth(h.handleHardStop(true)))          // 运维硬停(禁用 org 用户)
 	mux.HandleFunc("POST /api/v1/organizations/{id}/hard-stop-release", h.requireAuth(h.handleHardStop(false))) // 解除硬停
-	mux.HandleFunc("GET /api/v1/organizations/{id}/approval-rules", h.requireAuth(h.handleGetApprovalRules))
-	mux.HandleFunc("PUT /api/v1/organizations/{id}/approval-rules", h.requireAuth(h.handleSetApprovalRules))
-	mux.HandleFunc("GET /api/v1/organizations/{id}/quota-policies", h.requireAuth(h.handleListPolicies))
-	mux.HandleFunc("PUT /api/v1/organizations/{id}/quota-policies", h.requireAuth(h.handleSetPolicy))
 
 	// 团队。
 	mux.HandleFunc("GET /api/v1/organizations/{id}/teams", h.requireAuth(h.handleListTeams))
@@ -86,35 +80,42 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/v1/tiers/{id}", h.requireAuth(h.handleUpdateTier))
 	mux.HandleFunc("DELETE /api/v1/tiers/{id}", h.requireAuth(h.handleDeleteTier))
 	mux.HandleFunc("POST /api/v1/tiers/{id}/default", h.requireAuth(h.handleSetDefaultTier))
+	mux.HandleFunc("POST /api/v1/tiers/{id}/grants", h.requireAuth(h.handleCreateTierGrant))   // 档位授权(33 §12-④)
+	mux.HandleFunc("DELETE /api/v1/tiers/{id}/grants", h.requireAuth(h.handleDeleteTierGrant)) // 撤销授权 body {grant_id}
 
-	// 成员(开通成员 = 代发 key,US-01)。
+	// 成员(架构B:开通成员=建平台账号+成员服务账号 saga,不再铸 key;成员维度端点统一过 memberSelfGuard)。
+	// A 版「org 凭证建 token」路由已退役(key:rotate / key:reveal / key:ip-whitelist / members/{id}/tokens /
+	// usable-groups,33 §5):成员令牌全走 /me/tokens*(下方)。
 	mux.HandleFunc("GET /api/v1/organizations/{id}/members", h.requireAuth(h.handleListMembers))
 	mux.HandleFunc("POST /api/v1/organizations/{id}/members", h.requireAuth(h.handleOpenMember))
 	mux.HandleFunc("POST /api/v1/organizations/{id}/members:bulk", h.requireAuth(h.handleBulkOpen))
 	mux.HandleFunc("POST /api/v1/organizations/{id}/members:bulk-status", h.requireAuth(h.handleBulkStatus))
-	mux.HandleFunc("GET /api/v1/members/{id}", h.requireAuth(h.handleGetMember))
-	mux.HandleFunc("PATCH /api/v1/members/{id}", h.requireAuth(h.handleUpdateMember))
-	mux.HandleFunc("POST /api/v1/members/{id}/role", h.requireAuth(h.handleAssignRole))
-	mux.HandleFunc("POST /api/v1/members/{id}/key:rotate", h.requireAuth(h.handleRotateKey))
-	mux.HandleFunc("POST /api/v1/members/{id}/key:reveal", h.requireAuth(h.handleRevealKey)) // 揭示明文 key 供复制(operator 403,path 含 key: 命中支持态红线墙)
-	mux.HandleFunc("POST /api/v1/members/{id}/key:ip-whitelist", h.requireAuth(h.handleSetKeyIP))
-	// 改动③:员工自助建 key(选模型分组)+ 列本企业可用模型分组(分组选择器)。MVP 白名单已含。
-	mux.HandleFunc("POST /api/v1/members/{id}/tokens", h.requireAuth(h.handleCreateMemberToken))
-	mux.HandleFunc("GET /api/v1/members/{id}/usable-groups", h.requireAuth(h.handleMemberUsableGroups))
+	mux.HandleFunc("GET /api/v1/members/{id}", h.requireAuth(h.memberSelfGuard(h.handleGetMember)))
+	mux.HandleFunc("PATCH /api/v1/members/{id}", h.requireAuth(h.memberSelfGuard(h.handleUpdateMember)))
+	mux.HandleFunc("POST /api/v1/members/{id}/role", h.requireAuth(h.memberSelfGuard(h.handleAssignRole)))
 
-	// 额度执行(里程碑2):调额 / 临时权限 / 停用恢复。
-	mux.HandleFunc("POST /api/v1/members/{id}/quota:adjust", h.requireAuth(h.handleAdjustQuota))
-	mux.HandleFunc("POST /api/v1/members/{id}/grants", h.requireAuth(h.handleSetGrant))
-	mux.HandleFunc("GET /api/v1/members/{id}/grants", h.requireAuth(h.handleListGrants))
-	mux.HandleFunc("DELETE /api/v1/grants/{id}", h.requireAuth(h.handleRevokeGrant))
-	mux.HandleFunc("POST /api/v1/members/{id}/password:reset", h.requireAuth(h.handleResetMemberPassword)) // C22 重置成员登录密码
-	mux.HandleFunc("POST /api/v1/members/{id}/status", h.requireAuth(h.handleSetMemberStatus))
-	mux.HandleFunc("POST /api/v1/members/{id}/offboard", h.requireAuth(h.handleOffboardMember))                // 离职(删token+软删)
-	mux.HandleFunc("POST /api/v1/members/{id}/restore", h.requireAuth(h.handleRestoreMember))                  // 恢复入职
-	mux.HandleFunc("GET /api/v1/organizations/{id}/members/offboarded", h.requireAuth(h.handleListOffboarded)) // 离职列表
+	// 成员自助令牌(架构B,33 §3.5 member 组:member-only,后台用成员服务账号凭证代调 new-api)。
+	mux.HandleFunc("GET /api/v1/me/tokens", h.requireAuth(h.handleListMyTokens))
+	mux.HandleFunc("POST /api/v1/me/tokens", h.requireAuth(h.handleCreateMyToken))
+	mux.HandleFunc("PATCH /api/v1/me/tokens/{id}", h.requireAuth(h.handleUpdateMyToken))
+	mux.HandleFunc("DELETE /api/v1/me/tokens/{id}", h.requireAuth(h.handleDeleteMyToken))
+	mux.HandleFunc("POST /api/v1/me/tokens/{id}/key:reveal", h.requireAuth(h.handleRevealMyTokenKey))
 
-	// 计费(里程碑3a):余额 / 入账 / 申请充值(钱进 + 只读 + 告警;扣费 3b 下一轮)。
-	mux.HandleFunc("GET /api/v1/organizations/{id}/balance", h.requireAuth(h.handleGetBalance))
+	// 生命周期(架构B):追加划账(Transfer,红线) / 停用恢复 / 离职。
+	mux.HandleFunc("POST /api/v1/members/{id}/quota:grant", h.requireAuth(h.memberSelfGuard(h.handleGrantQuota))) // 架构B 追加划账(红线)
+	mux.HandleFunc("POST /api/v1/members/{id}/password:reset", h.requireAuth(h.memberSelfGuard(h.handleResetMemberPassword))) // C22 重置成员登录密码
+	mux.HandleFunc("POST /api/v1/members/{id}/status", h.requireAuth(h.memberSelfGuard(h.handleSetMemberStatus)))
+	mux.HandleFunc("POST /api/v1/members/{id}/offboard", h.requireAuth(h.memberSelfGuard(h.handleOffboardMember))) // 离职(disable→静默→退额)
+	mux.HandleFunc("POST /api/v1/members/{id}/restore", h.requireAuth(h.memberSelfGuard(h.handleRestoreMember)))   // 恢复(enable+如新建重新分配,{tier_id})
+	mux.HandleFunc("GET /api/v1/organizations/{id}/members/offboarded", h.requireAuth(h.handleListOffboarded))     // 离职列表
+
+	// 余额/账本(架构B BE③,只读):读求和余额 + 分配账本三级可见(31-ADR §15)。
+	mux.HandleFunc("GET /api/v1/organizations/{id}/balance", h.requireAuth(h.handleOrgBalance)) // 读求和:金库+Σ成员(取代 company_balance 视图)
+	mux.HandleFunc("GET /api/v1/organizations/{id}/ledger", h.requireAuth(h.handleOrgLedger))   // 本组织划账流水(O/A)
+	mux.HandleFunc("GET /api/v1/ledger", h.requireAuth(h.handleAllLedger))                      // 全平台流水(仅运营方)
+	mux.HandleFunc("GET /api/v1/me/balance", h.requireAuth(h.handleMyBalance))                  // 成员本人额度/已用/剩余
+	mux.HandleFunc("GET /api/v1/me/ledger", h.requireAuth(h.handleMyLedger))                    // 成员到账记录(仅 to_user=本人)
+	// 计费(里程碑3a 遗留):入账 / 申请充值(fundingEnabled 恒关时 service 层 404)。
 	mux.HandleFunc("GET /api/v1/organizations/{id}/recharges", h.requireAuth(h.handleListRecharges))
 	mux.HandleFunc("POST /api/v1/organizations/{id}/recharges", h.requireAuth(h.handleRecharge))
 	mux.HandleFunc("GET /api/v1/organizations/{id}/recharge-requests", h.requireAuth(h.handleListRechargeRequests))
@@ -130,10 +131,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/pricing/groups", h.requireAuth(h.handleListBillingGroups))      // 计费分组选择器(T17-6)
 	mux.HandleFunc("PUT /api/v1/organizations/{id}/default-token-group", h.requireAuth(h.handleSetOrgDefaultTokenGroup))
 
-	// 申请-审批(里程碑4,US-06)+ 通知(US-13)+ 成员自助。
-	mux.HandleFunc("POST /api/v1/approvals", h.requireAuth(h.handleSubmitApproval))
-	mux.HandleFunc("GET /api/v1/organizations/{id}/approvals", h.requireAuth(h.handleListApprovals))
-	mux.HandleFunc("POST /api/v1/approvals/{id}/decide", h.requireAuth(h.handleDecideApproval))
+	// 通知(US-13)+ 成员自助。
 	mux.HandleFunc("GET /api/v1/notifications", h.requireAuth(h.handleListNotifications))
 	mux.HandleFunc("POST /api/v1/notifications/{id}/read", h.requireAuth(h.handleMarkNotificationRead))
 
@@ -144,9 +142,9 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/organizations/{id}/budget-ref", h.requireAuth(h.handleBudgetRef))                // #4 额度参考条(已用$/预付$)
 	mux.HandleFunc("GET /api/v1/organizations/{id}/escrow-balance", h.requireAuth(h.handleEscrowBalance))        // R3 读穿余额(窗口+托管)
 	mux.HandleFunc("POST /api/v1/organizations/{id}/escrow/refill", h.requireAuth(h.handleEscrowRefill))         // R3 手工续充
-	mux.HandleFunc("GET /api/v1/members/{id}/usage", h.requireAuth(h.handleMemberUsage))
-	mux.HandleFunc("GET /api/v1/members/{id}/usage/timeseries", h.requireAuth(h.handleMemberUsageTimeSeries)) // M2 成员折线图
-	mux.HandleFunc("GET /api/v1/members/{id}/usage/detail", h.requireAuth(h.handleMemberUsageDetail))         // M2 成员下钻逐条明细
+	mux.HandleFunc("GET /api/v1/members/{id}/usage", h.requireAuth(h.memberSelfGuard(h.handleMemberUsage)))
+	mux.HandleFunc("GET /api/v1/members/{id}/usage/timeseries", h.requireAuth(h.memberSelfGuard(h.handleMemberUsageTimeSeries))) // M2 成员折线图
+	mux.HandleFunc("GET /api/v1/members/{id}/usage/detail", h.requireAuth(h.memberSelfGuard(h.handleMemberUsageDetail)))         // M2 成员下钻逐条明细
 	mux.HandleFunc("GET /api/v1/organizations/{id}/usage/export", h.requireAuth(h.handleUsageExport))
 	mux.HandleFunc("GET /api/v1/service-status", h.requireAuth(h.handleServiceStatus))
 
@@ -155,14 +153,26 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/support-sessions/{id}", h.requireAuth(h.handleGetSupport))
 	mux.HandleFunc("POST /api/v1/support-sessions/{id}/close", h.requireAuth(h.handleCloseSupport))
 
+	// API 兜底:未注册的 /api/* 路径(含已退役端点)统一 404,不落入下面 SPA 的静态文件语义。
+	// 若无此兜底,"GET /"(SPA 子树)会让未注册写路径命中"同路径存在 GET"而返 405——退役端点应 404
+	// 藏存在性(33 §3.5 端点白名单;原 mvpGate 的 404 语义随闸拆除后由此路由层兜底承接)。
+	// 按 method 逐个注册(不能裸注册 "/api/":全 method+子树会与 "GET /" 互不更精确,ServeMux 判冲突 panic;
+	// 分 method 后同 method 间路径更专者赢、异 method 不相交,合法)。已注册 pattern 更精确、优先,不受影响。
+	apiNotFound := func(w http.ResponseWriter, r *http.Request) {
+		writeErr(w, r, apperr.NotFound(""))
+	}
+	// 不含 HEAD:ServeMux 的 GET pattern 隐式匹配 HEAD,单独注册 "HEAD /api/" 会与既有 "GET /api/v1/…" 判冲突。
+	for _, m := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		mux.HandleFunc(m+" /api/", apiNotFound)
+	}
+
 	// 前端 SPA(catch-all,最不具体,/api/v1 与 /healthz 等更具体的先匹配):
 	// /api/v1/* 之外的路径走内嵌静态前端;/ 返回 index.html。
 	mux.Handle("GET /", http.FileServerFS(web.FS))
 
-	// 中间件链:request_id → 安全头 → 访问日志/指标 → recover → body 上限 → MVP 封锁闸 → mux
-	// (GZ-05 安全头挂最外层;P2 body 上限在 recover 内、闸/mux 外:超限读 body 时报错,recover 兜底;
-	// 改动⑥ mvpGate 紧贴 mux:非白名单写操作 404)。
-	return withRequestID(securityHeaders(h.accessLog(h.recoverPanic(maxBodyBytes(h.mvpGate(mux))))))
+	// 中间件链:request_id → 安全头 → 访问日志/指标 → recover → body 上限 → mux
+	// (GZ-05 安全头挂最外层;P2 body 上限在 recover 内、mux 外:超限读 body 时报错,recover 兜底)。
+	return withRequestID(securityHeaders(h.accessLog(h.recoverPanic(maxBodyBytes(mux)))))
 }
 
 func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {

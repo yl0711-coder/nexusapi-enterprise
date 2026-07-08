@@ -128,12 +128,7 @@ func (s *Store) ActivatePlatformAccount(ctx context.Context, orgID, memberID int
 	return err
 }
 
-// ClearMemberToken 模型2:清成员当前令牌指针(停用删 token 后调,防悬挂指针;员工恢复后自助重建新 key)。
-func (s *Store) ClearMemberToken(ctx context.Context, orgID, memberID int64) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE member SET newapi_token_id = NULL, key_masked = NULL WHERE id = ? AND org_id = ?`, memberID, orgID)
-	return err
-}
+// ClearMemberToken(模型2 令牌指针清理)已随 grant 反向机器退役删除。
 
 // UpdateMemberStatus 改成员状态(US-05 停用/恢复、account_ttl 到期置 expired)。
 func (s *Store) UpdateMemberStatus(ctx context.Context, orgID, memberID int64, status string) error {
@@ -244,23 +239,7 @@ func (s *Store) ListOrgAdminIDs(ctx context.Context, orgID int64) ([]int64, erro
 	return out, rows.Err()
 }
 
-// ListMembersByTier 列出引用某层级的成员(改层级后重算 override 用,T10)。
-func (s *Store) ListMembersByTier(ctx context.Context, orgID, tierID int64) ([]*model.Member, error) {
-	rows, err := s.db.QueryContext(ctx, memberSelect+` WHERE org_id = ? AND tier_id = ? AND deleted_at IS NULL ORDER BY id`, orgID, tierID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []*model.Member
-	for rows.Next() {
-		m, err := scanMember(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, m)
-	}
-	return out, rows.Err()
-}
+// ListMembersByTier(改层级重算 override 用)已随 override 机器退役删除(架构B 改档不回溯)。
 
 // GetMemberNameByID 取成员显示名(姓名优先,回落登录名;跨 org,操作者名解析用,T14)。不存在返空。
 func (s *Store) GetMemberNameByID(ctx context.Context, id int64) (string, error) {
@@ -273,15 +252,31 @@ func (s *Store) GetMemberNameByID(ctx context.Context, id int64) (string, error)
 	return name, err
 }
 
+// GetMemberAny 取成员**含软删行**(架构B 生命周期用:离职成员的幂等补退/恢复入职都要能读到软删行;
+// 常规读一律用 GetMember,勿混用)。强制 org_id 谓词。
+func (s *Store) GetMemberAny(ctx context.Context, orgID, id int64) (*model.Member, error) {
+	row := s.db.QueryRowContext(ctx, memberSelect+` WHERE id = ? AND org_id = ?`, id, orgID)
+	return scanMember(row)
+}
+
+// UpdateMemberTierGroup 恢复入职按新档位重设档位指针 + 分组快照(架构B RestoreMember)。
+func (s *Store) UpdateMemberTierGroup(ctx context.Context, orgID, memberID, tierID int64, group string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE member SET tier_id = ?, newapi_group = ? WHERE id = ? AND org_id = ?`, tierID, group, memberID, orgID)
+	return err
+}
+
 // GetMember 取成员,强制 org_id 谓词(跨 org → ErrNotFound)。
 func (s *Store) GetMember(ctx context.Context, orgID, id int64) (*model.Member, error) {
 	row := s.db.QueryRowContext(ctx, memberSelect+` WHERE id = ? AND org_id = ? AND deleted_at IS NULL`, id, orgID)
 	return scanMember(row)
 }
 
-// GetMemberByNewapiTokenID 模型2 结算归因:按 new-api token id 反查平台成员 + 稳定 key_id。
-// 成员共享 org user,归因只能走 token→member_key_token→member(绝不能按 user_id)。无 org 谓词(leader 跨租户);
-// 命不中(非平台 token/无对应行)返 found=false。轮换后旧 token_id 仍命中(member_key_token append-only)。
+// GetMemberByNewapiTokenID 按 new-api token id 反查平台成员 + 稳定 key_id(member_key_token)。
+// 架构B(BE③ 归因改造):归因主键已改 user_id(GetMemberByNewapiUserID);本方法用于
+// token 一致性断言(token→member 与 member.newapi_user_id→org 自洽)+ A 版遗留数据(token 挂 org user)兜底。
+// 无 org 谓词(leader 跨租户);命不中(非平台 token/无对应行)返 found=false。
+// 轮换后旧 token_id 仍命中(member_key_token append-only)。
 // M4 时点归因(20-§6):member 读取**不过滤 deleted_at**——离职(软删)成员的迟同步/历史消费仍归原成员,不丢行不串人。
 func (s *Store) GetMemberByNewapiTokenID(ctx context.Context, newapiTokenID int64) (*model.Member, int64, bool, error) {
 	var orgID, memberID, keyID int64
@@ -315,7 +310,12 @@ func (s *Store) GetMemberByEmail(ctx context.Context, email string) (*model.Memb
 
 // ListMembers 按过滤 + 分页列成员;返回行与过滤后总数(10 §1.5)。
 func (s *Store) ListMembers(ctx context.Context, orgID int64, f MemberFilter) ([]*model.Member, int, error) {
-	where := []string{"org_id = ?", "deleted_at IS NULL"}
+	// 组长契约增补(33 §12-⑤):offboarded(软删)默认不进主列表;status=offboarded 显式查时切换谓词。
+	deletedPred := "deleted_at IS NULL"
+	if f.Status == model.MemberStatusOffboarded {
+		deletedPred = "deleted_at IS NOT NULL"
+	}
+	where := []string{"org_id = ?", deletedPred}
 	args := []any{orgID}
 	if f.Q != "" {
 		where = append(where, "(display_name LIKE ? OR login_email LIKE ? OR key_masked LIKE ?)")

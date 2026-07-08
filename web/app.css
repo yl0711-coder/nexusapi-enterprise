@@ -130,8 +130,8 @@ input[type=checkbox]{width:15px;height:15px;accent-color:var(--brand);cursor:poi
 .log-table .c-time{width:112px}.log-table .c-org{width:190px}.log-table .c-type{width:90px}.log-table .c-member{width:170px}.log-table .c-token{width:230px}.log-table .c-model{width:250px}.log-table .c-channel{width:210px}.log-table .c-group{width:160px}.log-table .c-prompt{width:105px}.log-table .c-completion{width:105px}.log-table .c-quota{width:105px}.log-table .c-timeuse{width:110px}.log-table .c-ip{width:140px}.log-table .c-detail{width:auto;min-width:360px}
 .token-map-table{min-width:1460px;table-layout:fixed}
 .token-map-table .tm-member{width:260px}.token-map-table .tm-status{width:110px}.token-map-table .tm-token{width:260px}.token-map-table .tm-key{width:290px}.token-map-table .tm-tokenid{width:180px}.token-map-table .tm-version{width:100px}.token-map-table .tm-state{width:110px}
-.member-table{min-width:1120px;table-layout:fixed}
-.member-table .m-name{width:310px}.member-table .m-team{width:170px}.member-table .m-status{width:110px}.member-table .m-key{width:260px}.member-table .m-actions{width:270px}
+.member-table{min-width:1420px;table-layout:fixed}
+.member-table .m-name{width:250px}.member-table .m-team{width:130px}.member-table .m-tier{width:150px}.member-table .m-granted{width:110px}.member-table .m-used{width:110px}.member-table .m-remain{width:150px}.member-table .m-status{width:96px}.member-table .m-actions{width:330px}
 .employee-table{min-width:1760px;table-layout:fixed}
 .employee-table .e-org{width:230px}.employee-table .e-member{width:300px}.employee-table .e-team{width:190px}.employee-table .e-status{width:100px}.employee-table .e-key{width:270px}.employee-table .e-tokenid{width:100px}.employee-table .e-group{width:150px}.employee-table .e-used,.employee-table .e-limit,.employee-table .e-remain{width:120px}.employee-table .e-actions{width:150px}
 .cell-clip{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -215,3 +215,15 @@ input[type=checkbox]{width:15px;height:15px;accent-color:var(--brand);cursor:poi
 @media(max-width:920px){.footer{grid-column:1}}
 /* 窄屏 header 收敛:隐角色标签与邮箱文本,留头像+帮助/设置/退出,防 logo 折行 */
 @media(max-width:640px){.top{gap:8px;padding:0 10px}.demolbl{display:none}.me>span:not(.av):not(.lk){display:none}}
+
+/* 架构B:账本方向 / 成员自管令牌表 / 档位表 / 禁用按钮 */
+.ldg-in{color:var(--ok);font-weight:650;white-space:nowrap}
+.ldg-out{color:var(--warn);font-weight:650;white-space:nowrap}
+.btn:disabled,.btn[disabled]{opacity:.45;cursor:not-allowed}
+.token-self-table{min-width:1320px;table-layout:fixed}
+.token-self-table .ts-name{width:160px}.token-self-table .ts-key{width:250px}.token-self-table .ts-group{width:130px}.token-self-table .ts-quota{width:120px}.token-self-table .ts-remain{width:110px}.token-self-table .ts-ip{width:150px}.token-self-table .ts-status{width:86px}.token-self-table .ts-used{width:110px}.token-self-table .ts-actions{width:150px}
+.token-self-table th,.token-self-table td{white-space:nowrap;vertical-align:middle}
+.token-self-table .cell-clip{display:inline-block;vertical-align:middle;max-width:calc(100% - 36px)}
+.tier-table{min-width:1300px;table-layout:fixed}
+.tier-table .t-name{width:170px}.tier-table .t-type{width:140px}.tier-table .t-amount{width:130px}.tier-table .t-group{width:130px}.tier-table .t-models{width:auto;min-width:240px}.tier-table .t-grants{width:210px}.tier-table .t-actions{width:190px}
+.tier-table th,.tier-table td{vertical-align:middle}

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/nexusapi-platform/enterprise/pkg/session"
 	"github.com/nexusapi-platform/enterprise/repo"
 )
 
@@ -43,41 +42,4 @@ func TestIntegration_A7_MigrationResumeIdempotent(t *testing.T) {
 	t.Logf("A7 ok: 删 0016 记录后重跑(ADD COLUMN 撞 1060)被容忍、迁移续成不卡死")
 }
 
-// TestIntegration_A8_TeamLeaderQuotaReadFilter:A8——team_leader 读配额策略只返本团队,org_admin 看全 org。
-func TestIntegration_A8_TeamLeaderQuotaReadFilter(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	svc, store, _ := v1Svc(t, ctx, "nexus_a8", true)
-	const orgID, teamA, teamB = int64(1), int64(10), int64(20)
-	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'a8-org', 'a8-slug')`, orgID); err != nil {
-		t.Fatalf("建组织失败: %v", err)
-	}
-	for _, p := range []*repo.QuotaPolicy{
-		{OrgID: orgID, Scope: "team", ScopeID: teamA, Period: "monthly", LimitQuota: 100},
-		{OrgID: orgID, Scope: "team", ScopeID: teamB, Period: "monthly", LimitQuota: 200},
-		{OrgID: orgID, Scope: "org", ScopeID: orgID, Period: "monthly", LimitQuota: 999},
-	} {
-		if err := store.UpsertQuotaPolicy(ctx, p); err != nil {
-			t.Fatalf("建策略失败: %v", err)
-		}
-	}
-
-	admin := session.Claims{Role: session.RoleOrgAdmin, OrgID: orgID}
-	all, err := svc.ListQuotaPolicies(ctx, admin, orgID)
-	if err != nil {
-		t.Fatalf("org_admin 读失败: %v", err)
-	}
-	if len(all) != 3 {
-		t.Fatalf("org_admin 应看到全部 3 条,实 %d", len(all))
-	}
-
-	tl := session.Claims{Role: session.RoleTeamLeader, OrgID: orgID, TeamID: teamA}
-	mine, err := svc.ListQuotaPolicies(ctx, tl, orgID)
-	if err != nil {
-		t.Fatalf("team_leader 读失败: %v", err)
-	}
-	if len(mine) != 1 || mine[0].ScopeID != teamA {
-		t.Fatalf("A8 team_leader 只应看到本团队(teamA=%d)策略,实 %d 条: %+v", teamA, len(mine), mine)
-	}
-	t.Logf("A8 ok: team_leader 读配额只返本团队(1 条,scope_id=%d);org_admin 看全 org(3 条)", teamA)
-}
+// TestIntegration_A8_TeamLeaderQuotaReadFilter 已随配额策略机器退役删除(33 §12-4)。

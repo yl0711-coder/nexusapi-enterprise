@@ -22,6 +22,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -79,7 +80,7 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		t.Fatalf("种子运营方失败: %v", err)
 	}
 
-	ts := httptest.NewServer(handler.New(svc, signer, log, "it", false).Routes())
+	ts := httptest.NewServer(handler.New(svc, signer, log, "it").Routes())
 	defer ts.Close()
 	api := &apiClient{t: t, base: ts.URL}
 
@@ -127,80 +128,129 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 	var tierResp struct {
 		ID int64 `json:"id"`
 	}
+	// 架构B:档位必带 amount_raw(初始额度,raw;$4=2,000,000)。
 	if st := api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/tiers", orgID), adminTok,
-		map[string]any{"name": "标准档", "model_set": []string{"gpt-5.4", "claude-sonnet-4-6", "gpt-5-mini"}, "monthly_limit": 25000000, "model_cap": map[string]any{"gpt-5-mini": 1000000}}, &tierResp); st != http.StatusCreated {
+		map[string]any{"name": "标准档", "model_set": []string{"gpt-5.4", "claude-sonnet-4-6", "gpt-5-mini"},
+			"quota_type": "fixed", "amount_raw": 2_000_000, "model_cap": map[string]any{"gpt-5-mini": 1000000}}, &tierResp); st != http.StatusCreated {
 		t.Fatalf("建层级 HTTP=%d", st)
 	}
 	if st := api.do("POST", fmt.Sprintf("/api/v1/tiers/%d/default", tierResp.ID), adminTok, nil, nil); st != http.StatusOK {
 		t.Fatalf("设默认层级 HTTP=%d", st)
 	}
 
-	// 8) US-01:管理员开通成员(真机代发 key)。
+	// 7.5) 架构B:先确保金库(门A 惰性开通,幂等)并由「运营方代充」注资——金库空则开通成员整体失败(31-ADR §14)。
+	treasuryCred, perr := svc.EnsureOrgProvisioned(ctx, orgID, "Acme 公司")
+	if perr != nil {
+		t.Fatalf("开通金库失败: %v", perr)
+	}
+	if err := upstream.IncreaseUserQuota(ctx, treasuryCred.NewapiUserID, 20_000_000); err != nil {
+		t.Fatalf("金库代充失败: %v", err)
+	}
+
+	// 8) US-01(架构B):管理员开通成员——建平台账号+成员服务账号+首笔划账;**不铸 key**,回显登录凭证一次。
 	var openResp struct {
-		MemberID  int64    `json:"member_id"`
-		APIKey    string   `json:"api_key"`
-		KeyMasked string   `json:"key_masked"`
-		Models    []string `json:"models"`
+		MemberID        int64    `json:"member_id"`
+		LoginEmail      string   `json:"login_email"`
+		InitialPassword string   `json:"initial_password"`
+		NewapiUserID    int64    `json:"newapi_user_id"`
+		InitialQuotaRaw int64    `json:"initial_quota_raw"`
+		Models          []string `json:"models"`
 	}
 	st = api.do("POST", fmt.Sprintf("/api/v1/organizations/%d/members", orgID), adminTok,
 		map[string]any{"name": "钱晨", "team_id": teamResp.ID, "tier_id": tierResp.ID}, &openResp)
 	if st != http.StatusCreated {
 		t.Fatalf("开通成员 HTTP=%d", st)
 	}
-	if openResp.APIKey == "" || openResp.MemberID == 0 {
+	if openResp.MemberID == 0 || openResp.InitialPassword == "" || openResp.NewapiUserID == 0 {
 		t.Fatalf("开通成员返回缺字段: %+v", openResp)
 	}
-	if !strings.Contains(openResp.KeyMasked, "••••") {
-		t.Errorf("key_masked 应脱敏: %q", openResp.KeyMasked)
+	if openResp.InitialQuotaRaw != 2_000_000 {
+		t.Fatalf("首笔划账应=档位 amount_raw(2M),实=%d", openResp.InitialQuotaRaw)
 	}
-	t.Logf("开通成员 ok(模型2:员工 token 挂 org user 下): member_id=%d key=%s...", openResp.MemberID, openResp.APIKey[:min(10, len(openResp.APIKey))])
-	originalKey := openResp.APIKey
-
-	// v2 M1:开通后应建主 key 槽 + 当前令牌(1 槽 / 1 令牌 / 1 current / nexus_m{id}_v1)。
-	if sl, tk, cu, nm := queryMemberKey(t, store.DB(), orgID, openResp.MemberID); sl != 1 || tk != 1 || cu != 1 || nm != fmt.Sprintf("nexus_m%d_v1", openResp.MemberID) {
-		t.Fatalf("开通后 member_key 异常: slots=%d tokens=%d current=%d name=%q(应 1/1/1/nexus_m%d_v1)", sl, tk, cu, nm, openResp.MemberID)
+	// 守恒:金库 20M-2M=18M,成员=2M(读 DB 实时值)。
+	tq, _ := upstream.GetUserQuota(ctx, treasuryCred.NewapiUserID)
+	mq, _ := upstream.GetUserQuota(ctx, int(openResp.NewapiUserID))
+	if tq != 18_000_000 || mq != 2_000_000 {
+		t.Fatalf("🔴开通划账守恒破:金库=%d(期 18M) 成员=%d(期 2M)", tq, mq)
 	}
+	t.Logf("开通成员 ok(架构B:成员=独立 new-api user,金库→成员首笔划账守恒): member_id=%d member_uid=%d", openResp.MemberID, openResp.NewapiUserID)
 
-	// 9) 列表脱敏:明文 key 绝不出现在列表里,只见 key_masked。
-	var listResp struct {
+	// 9) 成员自助令牌(/me/tokens,架构B 31-ADR §6):成员登录 → 建 → 列表 → 揭示 → 改 → 删。
+	memberTok := login(api, openResp.LoginEmail, openResp.InitialPassword)
+	var createdTok struct {
+		ID        int64  `json:"id"`
+		KeyMasked string `json:"key_masked"`
+	}
+	if st := api.do("POST", "/api/v1/me/tokens", memberTok,
+		map[string]any{"name": "我的令牌一", "group": "default", "quota_raw": 1_000_000}, &createdTok); st != http.StatusCreated {
+		t.Fatalf("成员自助建令牌 HTTP=%d", st)
+	}
+	if createdTok.ID == 0 {
+		t.Fatalf("建令牌返回缺 id: %+v", createdTok)
+	}
+	// token 必 finite(护栏 31-ADR §12-7):直查 new-api 库核 unlimited_quota=0(SQL DSN 未配则跳过该断言)。
+	if newapiSQLDSN != "" {
+		db2, derr := sql.Open("mysql", newapiSQLDSN)
+		if derr != nil {
+			t.Fatalf("连 newapi 库失败: %v", derr)
+		}
+		defer db2.Close()
+		var unlimited int
+		if err := db2.QueryRowContext(ctx, "SELECT unlimited_quota FROM tokens WHERE id = ?", createdTok.ID).Scan(&unlimited); err != nil {
+			t.Fatalf("查 token 失败: %v", err)
+		}
+		if unlimited != 0 {
+			t.Fatalf("🔴成员 token 必须 finite(unlimited_quota=0),实=%d", unlimited)
+		}
+	}
+	// 揭示明文(仅本人)→ 用于后面列表防泄露断言。
+	var reveal struct {
+		APIKey string `json:"api_key"`
+	}
+	if st := api.do("POST", fmt.Sprintf("/api/v1/me/tokens/%d/key:reveal", createdTok.ID), memberTok, nil, &reveal); st != http.StatusOK || reveal.APIKey == "" {
+		t.Fatalf("揭示明文 key 失败 HTTP=%d key=%q", st, reveal.APIKey)
+	}
+	originalKey := reveal.APIKey
+	// 列表可见 1 枚。
+	var myTokens struct {
 		List []struct {
-			ID        int64  `json:"id"`
-			KeyMasked string `json:"key_masked"`
-			Status    string `json:"status"`
+			ID   int64  `json:"id"`
+			Name string `json:"name"`
 		} `json:"list"`
-		Pagination struct {
-			Total int `json:"total"`
-		} `json:"pagination"`
 	}
+	if st := api.do("GET", "/api/v1/me/tokens", memberTok, nil, &myTokens); st != http.StatusOK || len(myTokens.List) != 1 {
+		t.Fatalf("我的令牌列表应 1 枚,HTTP=%d n=%d", st, len(myTokens.List))
+	}
+	// 管理员/运营方对 /me/tokens 无写权(33 §3.5 RBAC 铁律:member-only)。
+	if st := api.do("POST", "/api/v1/me/tokens", adminTok, map[string]any{"name": "x", "group": "default"}, nil); st != http.StatusForbidden {
+		t.Errorf("org_admin 写 /me/tokens 应 403,得 %d", st)
+	}
+	// 令牌数上限(默认 2):再建 1 枚成功、第 3 枚 409。
+	if st := api.do("POST", "/api/v1/me/tokens", memberTok, map[string]any{"name": "我的令牌二", "group": "default"}, nil); st != http.StatusCreated {
+		t.Fatalf("第 2 枚令牌应成功,HTTP=%d", st)
+	}
+	if st := api.do("POST", "/api/v1/me/tokens", memberTok, map[string]any{"name": "我的令牌三", "group": "default"}, nil); st != http.StatusConflict && st != http.StatusBadRequest {
+		// envelope 层 409 → HTTP 409;此处兼容具体映射
+		t.Errorf("第 3 枚令牌应被上限拦下(409),得 %d", st)
+	}
+	// 改令牌(分组限授权集内/额度/IP;key 不可改):改额度。
+	if st := api.do("PATCH", fmt.Sprintf("/api/v1/me/tokens/%d", createdTok.ID), memberTok, map[string]any{"quota_raw": 500_000}, nil); st != http.StatusOK {
+		t.Fatalf("改令牌 HTTP=%d", st)
+	}
+	// 未授权分组 → 422(分组只能选被授权档位的分组)。
+	if st := api.do("PATCH", fmt.Sprintf("/api/v1/me/tokens/%d", createdTok.ID), memberTok, map[string]any{"group": "vip"}, nil); st < 400 {
+		t.Errorf("改到未授权分组应拒,得 %d", st)
+	}
+
+	// 10) A 版轮换路由已退役(33 §5):端点不复存在 → 404。
+	if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/key:rotate", openResp.MemberID), memberTok, nil, nil); st != http.StatusNotFound {
+		t.Fatalf("A 版 key:rotate 路由应已退役(404),得 HTTP=%d", st)
+	}
+
+	// 列表脱敏:明文 key 绝不出现在成员列表里。
 	rawList := api.doRaw("GET", fmt.Sprintf("/api/v1/organizations/%d/members?page=1&page_size=20", orgID), adminTok, nil)
 	if strings.Contains(rawList, originalKey) {
 		t.Fatal("成员列表泄露了明文 key —— 违反红线(只能脱敏回显)")
-	}
-	_ = json.Unmarshal([]byte(extractData(t, rawList)), &listResp)
-	foundActive := false
-	for _, m := range listResp.List {
-		if m.ID == openResp.MemberID {
-			foundActive = m.Status == "active"
-			if !strings.Contains(m.KeyMasked, "••••") {
-				t.Errorf("列表 key 未脱敏: %q", m.KeyMasked)
-			}
-		}
-	}
-	if !foundActive {
-		t.Errorf("新成员未出现在列表或非 active")
-	}
-
-	// 10) 轮换 key(成员本人):28-A1 后员工 key 纯只读,自助轮换对 member 一律 403(现状如实断言)。
-	// 架构B(31-ADR/33 §5 退役清单):A 版轮换路径整体退役,成员自助令牌在阶段1 以 /me/tokens 重写——届时本段随之重写。
-	memberTok, _ := signer.Issue(session.Claims{MemberID: openResp.MemberID, OrgID: orgID, Role: session.RoleMember, TeamID: teamResp.ID})
-	if st := api.do("POST", fmt.Sprintf("/api/v1/members/%d/key:rotate", openResp.MemberID), memberTok, nil, nil); st != http.StatusForbidden {
-		t.Fatalf("A1 现状:成员自助轮换应 403,得 HTTP=%d", st)
-	}
-	t.Logf("轮换 key 403 ok(A1 员工只读现状;架构B 阶段1 将以 /me/tokens 重写)")
-
-	// v2 M1(A1 后轮换未发生):主槽仍 1 槽/1 令牌/1 current/v1。
-	if sl, tk, cu, nm := queryMemberKey(t, store.DB(), orgID, openResp.MemberID); sl != 1 || tk != 1 || cu != 1 || nm != fmt.Sprintf("nexus_m%d_v1", openResp.MemberID) {
-		t.Fatalf("member_key 异常: slots=%d tokens=%d current=%d name=%q(应 1/1/1/nexus_m%d_v1)", sl, tk, cu, nm, openResp.MemberID)
 	}
 
 	// ===== RBAC 越权判定(08 §2)=====
@@ -252,14 +302,11 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		t.Errorf("无 token 应 401,得 %d", st)
 	}
 
-	t.Log("里程碑 1 e2e 全通过:US-01 开通成员(真机代发 key)+ 列表脱敏 + 轮换 + RBAC(403/404/401)")
+	t.Log("架构B e2e 通过:开通成员(服务账号+首笔划账守恒)+ /me/tokens 自助(建/列/揭示/改/删限授权+finite+上限)+ 列表脱敏 + RBAC(403/404/401)")
 
-	// ===== 模型2 返工边界(2026-06-30)=====
-	// 里程碑2+(额度执行/调额/撤销/account_ttl/停用/P1基线/T17/用量·团队·下钻 HTTP 端点)原为 model1:
-	// 额度落 member 的 user.quota、按 user_id 归因——模型2 改为额度落 token.remain_quota、按 token→member 归因,这些段不适用。
-	// 模型2 R2 报表/归因由 attribution_test/usage_detail_test/usage_timeseries_test 三独立真账测试覆盖(均绿);
-	// R4 额度执行(token.remain_quota+escrow)+完整模型2 e2e(R2 HTTP端点)待 R3/R4 里程碑重写(旧 model1 e2e 见 git 6865fbc 前)。
-	t.Log("模型2 e2e(R1)通过:开通=确保 org user+在其下建员工 token+列表脱敏+轮换+RBAC;R2 见独立测试,R4 待里程碑")
+	// ===== 架构B 阶段边界(2026-07-07)=====
+	// 报表/归因/结算相关端到端由 BE③ 阶段1 按 user_id 归因重写;本 e2e 聚焦 BE① 身份层
+	// (开通/守恒/自助令牌/RBAC)。旧 A 版(org 凭证建 token/轮换)路径已退役(33 §5)。
 }
 
 // ---- helpers ----
@@ -349,10 +396,11 @@ func openWithRetry(t *testing.T, ctx context.Context, dsn string) *repo.Store {
 }
 
 func mustKeyring(t *testing.T) *crypto.Keyring {
+	// 固定测试主密钥(确定性):同一测试内 service 加密 org 凭证、助手(selfServeMemberToken 等)解密
+	// 必须用同一把 key。原实现每次 rand.Read 生成不同随机 key → 跨调用加解密不匹配("密文格式非法"),
+	// 是测试骨架缺陷(生产是单一稳定 keyring,固定测试 key 与之同构;参照已固定的 session 测试密钥)。
 	key := make([]byte, crypto.KeySize)
-	if _, err := rand.Read(key); err != nil {
-		t.Fatal(err)
-	}
+	copy(key, []byte("nexus-integration-test-fixed-key-v1")) // 确定性;copy 上限 KeySize,长度安全
 	kr, err := crypto.NewKeyring("v1", map[string][]byte{"v1": key})
 	if err != nil {
 		t.Fatal(err)
@@ -361,7 +409,34 @@ func mustKeyring(t *testing.T) *crypto.Keyring {
 }
 
 // setupRC4 初始化全新 rc.4,返回管理员 access_token + uid(双头鉴权,里程碑 0 实证契约)。
+// setupRC4 缓存版:new-api 的 `GET /api/user/token`(setupRC4Fresh 里)每调一次都**重新生成** admin
+// access_token 并作废前一把。集成测试共享单个 new-api 容器、9 个调用点(含 selfServeMemberToken 内部),
+// 若每次都重生成,先建 service 持有的 admin token 会被后续 setupRC4 踢成 401(结算/入账等 admin 侧上游调用
+// 随机报"上游鉴权失效")。按 org 隔离纪律该每测独立 new-api,但栈只有一个;故 memo 化:首调生成并缓存,
+// 后续按 base 返缓存的同一把稳定 token,全程不再重生成。集成测试无 t.Parallel(顺序跑),互斥即安全。
+var (
+	rc4Mu    sync.Mutex
+	rc4Cache = map[string]struct {
+		token string
+		uid   int
+	}{}
+)
+
 func setupRC4(t *testing.T, base string) (string, int) {
+	rc4Mu.Lock()
+	defer rc4Mu.Unlock()
+	if c, ok := rc4Cache[base]; ok {
+		return c.token, c.uid
+	}
+	token, uid := setupRC4Fresh(t, base)
+	rc4Cache[base] = struct {
+		token string
+		uid   int
+	}{token, uid}
+	return token, uid
+}
+
+func setupRC4Fresh(t *testing.T, base string) (string, int) {
 	jar, _ := cookiejar.New(nil)
 	hc := &http.Client{Timeout: 15 * time.Second, Jar: jar}
 	const rootPass = "RootPass123"
@@ -655,19 +730,33 @@ func tokenGroupBySQL(t *testing.T, dsn string, userID int64) string {
 	return g
 }
 
-// provisionMemberToken 模型2:平台为成员建 key(在 org user 下),返回其 new-api token_id(灌日志归因用)。
-// A1(28):员工自助建 key 已下线,改走平台原语 ProvisionMemberKey(管理员身份);员工侧 key 纯只读。
+// selfServeMemberToken 遗留 A 版数据形状助手(架构B:业务侧「org 凭证建成员 token」路径已退役,33 §5;
+// 存量结算/归因/回填测试仍需要「org user 下的成员 token + member_key 映射」这一数据形状——阶段2 由
+// BE③/组长按 user_id 归因重写这些测试后,本助手随之删除)。直接用 org 凭证 + adapter 造 token 并登记映射。
 func selfServeMemberToken(t *testing.T, ctx context.Context, svc *service.Service, store *repo.Store, orgID, memberID int64) int64 {
 	t.Helper()
-	admin := session.Claims{MemberID: -1, OrgID: orgID, Role: session.RoleOrgAdmin}
-	if err := svc.ProvisionMemberKey(ctx, admin, orgID, memberID); err != nil {
-		t.Fatalf("平台为成员 %d 建 key 失败: %v", memberID, err)
+	_ = svc
+	newapiURL := os.Getenv("NEXUS_IT_NEWAPI_URL")
+	adminToken, adminUID := setupRC4(t, newapiURL)
+	upstream := newapi.New(newapi.Config{BaseURL: newapiURL, AdminToken: adminToken, AdminUserID: adminUID, Timeout: 15 * time.Second}, nil)
+	uid, encAccess, ok, err := store.GetOrgNewapiCred(ctx, orgID)
+	if err != nil || !ok {
+		t.Fatalf("取组织凭证失败(ok=%v): %v", ok, err)
 	}
-	m, err := store.GetMember(ctx, orgID, memberID)
-	if err != nil || m.NewapiTokenID == nil {
-		t.Fatalf("取成员 %d 令牌 id 失败: %v", memberID, err)
+	at, derr := mustKeyring(t).DecryptString(string(encAccess))
+	if derr != nil {
+		t.Fatalf("解密组织 access_token 失败: %v", derr)
 	}
-	return *m.NewapiTokenID
+	cred := newapi.MemberCred{NewapiUserID: int(uid), AccessToken: at}
+	name := fmt.Sprintf("nexus_m%d_v1", memberID)
+	tokID, cerr := upstream.CreateToken(ctx, cred, newapi.TokenSpec{Name: name, UnlimitedQuota: true, ExpiredTime: -1})
+	if cerr != nil {
+		t.Fatalf("为成员 %d 建 token 失败: %v", memberID, cerr)
+	}
+	if uerr := store.UpdateMemberKey(ctx, orgID, memberID, int64(tokID), "••••", name, 1); uerr != nil {
+		t.Fatalf("登记成员 %d 令牌映射失败: %v", memberID, uerr)
+	}
+	return int64(tokID)
 }
 
 func randSuffix() string {

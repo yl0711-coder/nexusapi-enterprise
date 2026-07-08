@@ -172,61 +172,8 @@ func TestIntegration_HardStopConvergeRecover(t *testing.T) {
 	t.Logf("B档#1 硬停converge→0与恢复 ok: 余额耗尽→stopped+成员token override 0(硬停停到人);充值回正→active+恢复档额 %d", ml)
 }
 
-// HIGH-1(真站审查):非 observe 周期重置/硬停经 ListActiveOverridableMembers 真下发成员 token。原查询查 member 表不存在的
-// newapi_user_id 列 → ERROR 1054 → 该下发的成员一个都下发不了=漏钱;修后按 newapi_token_id 查。去修复本用例变红。
-func TestIntegration_ResetDownlinkNonObserve(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	svc, store, _, _ := escrowSvc(t, ctx, "nexus_hs") // 非 observe
-	newapiSQLDSN := os.Getenv("NEXUS_IT_NEWAPI_SQL_DSN")
-	const orgID, memberID = int64(701), int64(1)
-	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'hs-org', 'hs-slug')`, orgID); err != nil {
-		t.Fatalf("建组织失败: %v", err)
-	}
-	if _, err := svc.EnsureOrgProvisioned(ctx, orgID, "hs-org"); err != nil {
-		t.Fatalf("开通失败: %v", err)
-	}
-	ml := int64(25_000_000)
-	tierID, terr := store.CreateTier(ctx, &model.Tier{OrgID: orgID, Name: "hs-tier", MonthlyLimit: &ml})
-	if terr != nil {
-		t.Fatalf("建档失败: %v", terr)
-	}
-	if _, err := store.DB().ExecContext(ctx, `INSERT INTO member (id, org_id, tier_id, login_email, status, bootstrap_state) VALUES (?, ?, ?, 'hs@t.local', 'active', 'done')`, memberID, orgID, tierID); err != nil {
-		t.Fatalf("建成员失败: %v", err)
-	}
-	tokenID := selfServeMemberToken(t, ctx, svc, store, orgID, memberID) // token 初始 unlimited_quota=true
-	// 一条 due 的日策略(last_reset_at NULL → 跨当日边界 → 非 observe 触发重置下发)。
-	if err := store.UpsertQuotaPolicy(ctx, &repo.QuotaPolicy{OrgID: orgID, Scope: "org", ScopeID: orgID, Period: "daily", LimitQuota: ml}); err != nil {
-		t.Fatalf("建策略失败: %v", err)
-	}
-
-	if _, err := svc.ResetDuePolicies(ctx); err != nil {
-		t.Fatalf("周期重置失败: %v", err)
-	}
-	// 验:成员 token 从 unlimited 被下发成有限额(HIGH-1 未修则 ListActiveOverridableMembers 报 1054→不下发→仍 unlimited)。
-	ndb, _ := sql.Open("mysql", newapiSQLDSN)
-	defer ndb.Close()
-	var unlimited int
-	var remain int64
-	if err := ndb.QueryRowContext(ctx, `SELECT unlimited_quota, remain_quota FROM tokens WHERE id = ?`, tokenID).Scan(&unlimited, &remain); err != nil {
-		t.Fatalf("查 token 失败: %v", err)
-	}
-	if unlimited != 0 {
-		t.Fatalf("🔴HIGH-1:非 observe 周期重置应把成员 token 下发有限额(unlimited=0),实 unlimited=%d——ListActiveOverridableMembers 未生效=硬停/重置漏钱雷", unlimited)
-	}
-	if remain != ml {
-		t.Fatalf("🔴下发额度应=档月额 %d,实=%d", ml, remain)
-	}
-	// 直接查也应无 1054、返回该就绪成员。
-	all, aerr := store.ListActiveOverridableMembers(ctx, orgID)
-	if aerr != nil {
-		t.Fatalf("🔴HIGH-1:ListActiveOverridableMembers 仍报错(1054?): %v", aerr)
-	}
-	if len(all) != 1 {
-		t.Fatalf("应列出 1 个就绪成员(有 token),实=%d", len(all))
-	}
-	t.Logf("HIGH-1 真账 ok: 非 observe 周期重置经 ListActiveOverridableMembers(改查 newapi_token_id)真下发成员 token 有限额(unlimited→0,remain=%d),无 1054", remain)
-}
+// TestIntegration_ResetDownlinkNonObserve 已随 reset 周期重置 + override 下发机器整体退役而删除
+// (33 §12-4:quota_policy/临时额度不在 B 契约内;架构B 成员额度=其 new-api user.quota,无"下发 token override"一说)。
 
 // M1(真站黑盒复现):停用成员用未过期会话 token 自助建/轮换 key 绕过禁用。修后三自助端点前置 status==active。
 func TestIntegration_DisabledMemberSelfServeBlocked(t *testing.T) {

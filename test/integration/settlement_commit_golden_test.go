@@ -108,10 +108,7 @@ func runGoldenState(t *testing.T, dbName string, orgID int64, settleObserve, bil
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	upstream := newapi.New(newapi.Config{BaseURL: newapiURL, AdminToken: adminToken, AdminUserID: adminUID, Timeout: 15 * time.Second}, nil)
 	deps := service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log, FundingEnabled: true}
-	svcLive := service.New(deps)     // setup + 态2/3 结算
-	depsObs := deps                  // 同依赖,仅观测位不同
-	depsObs.ObserveMode = true       //
-	svcObserve := service.New(depsObs) // 态1 结算
+	svcLive := service.New(deps) // 架构B:observe 挡位退役,三态结算同一 svc(仅 billing_enabled 旗标不同,证明其对落账无分支效应)
 
 	db := store.DB()
 	be := 0
@@ -163,11 +160,8 @@ func runGoldenState(t *testing.T, dbName string, orgID int64, settleObserve, bil
 		t.Fatalf("seed 日志未落库:maxBefore=%d seedLogID=%d", maxBefore, seedLogID)
 	}
 
-	settleSvc := svcLive
-	if settleObserve {
-		settleSvc = svcObserve
-	}
-	if _, err := settleSvc.RunSettlement(ctx); err != nil {
+	_ = settleObserve // 架构B:observe 退役,三态走同一 svcLive;此参数仅保留矩阵签名与"旗标无分支效应"语义
+	if _, err := svcLive.RunSettlement(ctx); err != nil {
 		t.Fatalf("结算失败: %v", err)
 	}
 

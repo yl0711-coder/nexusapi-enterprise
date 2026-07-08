@@ -57,7 +57,7 @@ func TestIntegration_KeyIDAttribution(t *testing.T) {
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	upstream := newapi.New(newapi.Config{BaseURL: newapiURL, AdminToken: adminToken, AdminUserID: adminUID, Timeout: 15 * time.Second}, nil)
-	svc := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log, ObserveMode: true})
+	svc := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log})
 
 	// 2) 直接用真实 repo 接口造 member + 轮换的两条 token 行(走 FinalizeBootstrap/UpdateMemberKey 真实写链)。
 	const orgID, memberID, userID = int64(1), int64(1), int64(90001)

@@ -79,7 +79,7 @@ func TestIntegration_OpenMember_E2E(t *testing.T) {
 		t.Fatalf("种子运营方失败: %v", err)
 	}
 
-	ts := httptest.NewServer(handler.New(svc, signer, log, "it", false).Routes())
+	ts := httptest.NewServer(handler.New(svc, signer, log, "it").Routes())
 	defer ts.Close()
 	api := &apiClient{t: t, base: ts.URL}
 

@@ -6,7 +6,6 @@ package service
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/nexusapi-platform/enterprise/pkg/session"
 	"github.com/nexusapi-platform/enterprise/repo"
@@ -64,42 +63,8 @@ func TestUnit_ComputeAutoThreshold(t *testing.T) {
 	}
 }
 
-func TestUnit_PeriodBoundary(t *testing.T) {
-	loc := time.UTC
-	now := time.Date(2026, 6, 17, 13, 45, 30, 0, loc) // 2026-06-17
-	if got := periodBoundary("daily", now, loc); !got.Equal(time.Date(2026, 6, 17, 0, 0, 0, 0, loc)) {
-		t.Fatalf("daily 应=当日 00:00,得 %v", got)
-	}
-	if got := periodBoundary("monthly", now, loc); !got.Equal(time.Date(2026, 6, 1, 0, 0, 0, 0, loc)) {
-		t.Fatalf("monthly 应=当月 1 日 00:00,得 %v", got)
-	}
-	wk := periodBoundary("weekly", now, loc) // 周边界=本周一 00:00
-	if wk.Weekday() != time.Monday || wk.Hour() != 0 || wk.After(now) {
-		t.Fatalf("weekly 应=本周一 00:00 且不晚于 now,得 %v(%s)", wk, wk.Weekday())
-	}
-	if got := periodBoundary("bad", now, loc); !got.IsZero() {
-		t.Fatalf("未知周期应返回零值,得 %v", got)
-	}
-}
-
-func TestUnit_DurationToExpiry(t *testing.T) {
-	now := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
-	if got, err := durationToExpiry("3d", now); err != nil || !got.Equal(now.Add(72*time.Hour)) {
-		t.Fatalf("3d 应=now+72h,得 %v err=%v", got, err)
-	}
-	if got, err := durationToExpiry("week", now); err != nil || !got.Equal(now.AddDate(0, 0, 7)) {
-		t.Fatalf("week 应=now+7d,得 %v err=%v", got, err)
-	}
-	if got, err := durationToExpiry("", now); err != nil || !got.Equal(time.Date(2026, 6, 18, 0, 0, 0, 0, time.UTC)) {
-		t.Fatalf("空(today)应=次日 00:00 UTC,得 %v err=%v", got, err)
-	}
-	if _, err := durationToExpiry("garbage", now); err == nil {
-		t.Fatalf("非法时长应报错")
-	}
-	if _, err := durationToExpiry(now.Add(-time.Hour).Format(time.RFC3339), now); err == nil {
-		t.Fatalf("过去的 RFC3339 应报错(须未来)")
-	}
-}
+// TestUnit_PeriodBoundary / TestUnit_DurationToExpiry 已随 periodBoundary(周期重置机器)、
+// durationToExpiry(临时 grant 时长)退役而删除(33 §12-4)。
 
 func TestUnit_MaskKey(t *testing.T) {
 	if got := maskKey("sk-nexus-abcdef1234"); got != "sk-nexus••••1234" {

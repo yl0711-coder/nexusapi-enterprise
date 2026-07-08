@@ -7,7 +7,6 @@ package integration
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -47,8 +46,9 @@ func v1Svc(t *testing.T, ctx context.Context, dbName string, observe bool) (*ser
 	signer, _ := session.NewSigner([]byte("integration-test-session-key-32b!!"), time.Hour)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	upstream := newapi.New(newapi.Config{BaseURL: newapiURL, AdminToken: adminToken, AdminUserID: adminUID, Timeout: 15 * time.Second}, nil)
+	_ = observe // 架构B:观测模式已退役;observe 形参暂留兼容既有 v1Svc 调用签名
 	svc := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: mustKeyring(t), Signer: signer, Logger: log,
-		ObserveMode: observe, FundingEnabled: false}) // v1 生产形态:escrow 休眠
+		FundingEnabled: false}) // escrow 休眠
 	return svc, store, upstream
 }
 
@@ -191,81 +191,8 @@ func TestIntegration_ReportAllOrgs(t *testing.T) {
 	t.Logf("裁定B+M4+A1 真账 ok: billing 关组织照落账(成员5000000/3次调用)+企业自建令牌归未知桶(3000000)不丢行;调用次数=底层请求数非桶行数")
 }
 
-// 门B(20-§8):role 闸拒 admin;user_id 不符拒;关联成功导入令牌;重复关联拒;
-// 【#6 涉钱红线】关联全程企业池子余额分文不动(AssocPoolUntouched)。
-func TestIntegration_AssociateOrg(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	svc, _, upstream := v1Svc(t, ctx, "nexus_v1asc", true)
-	opc := session.Claims{Role: session.RoleOperator}
-	// 造"企业现有用户":普通用户 + 预存池子 + 2 枚现有令牌。
-	entCred := mkEnterpriseUser(t, ctx, upstream, "entuser1")
-	const entQuota = int64(777_000_000)
-	if err := upstream.ManageUserQuota(ctx, entCred.NewapiUserID, newapi.QuotaOverride, entQuota); err != nil {
-		t.Fatalf("预存企业池子失败: %v", err)
-	}
-	for i := 1; i <= 2; i++ {
-		if _, err := upstream.CreateToken(ctx, entCred, newapi.TokenSpec{Name: fmt.Sprintf("ent_tok_%d", i), UnlimitedQuota: true, ExpiredTime: -1}); err != nil {
-			t.Fatalf("造企业令牌失败: %v", err)
-		}
-	}
-	if err := upstream.AddOrgUsableGroup(ctx, "default", "vip"); err != nil { // 分组可用前置
-		t.Fatalf("预配可用分组失败: %v", err)
-	}
-
-	// ① role 闸:用 admin(root)自己关联 → 拒。
-	adminUID := 1
-	if _, err := svc.CreateOrg(ctx, opc, service.CreateOrgInput{
-		Name: "坏关联", Slug: "asc-bad1", AdminEmail: "b1@t.local", NewapiUserGroup: "default",
-		Associate: &service.AssociateOrgInput{NewapiUserID: int64(adminUID), AccessToken: os.Getenv("NEXUS_IT_ADMIN_TOKEN_UNUSED") + "invalid"},
-	}); err == nil {
-		t.Fatalf("🔴无效/admin token 关联应拒")
-	}
-	// ② user_id 不符:token 是企业用户的,录入 id+1 → 拒。
-	if _, err := svc.CreateOrg(ctx, opc, service.CreateOrgInput{
-		Name: "坏关联2", Slug: "asc-bad2", AdminEmail: "b2@t.local", NewapiUserGroup: "default",
-		Associate: &service.AssociateOrgInput{NewapiUserID: int64(entCred.NewapiUserID + 1), AccessToken: entCred.AccessToken},
-	}); err == nil {
-		t.Fatalf("🔴user_id 与 token 不符应拒(防串号)")
-	}
-	// ③ 正常关联:导入 2 成员;池子分文不动。
-	res, err := svc.CreateOrg(ctx, opc, service.CreateOrgInput{
-		Name: "企业甲", Slug: "asc-ok", AdminEmail: "ok@t.local", NewapiUserGroup: "default",
-		Associate: &service.AssociateOrgInput{NewapiUserID: int64(entCred.NewapiUserID), AccessToken: entCred.AccessToken, NamePolicy: "inherit"},
-	})
-	if err != nil {
-		t.Fatalf("关联失败: %v", err)
-	}
-	if res.ImportedMembers != 2 || res.ImportFailed != 0 {
-		t.Fatalf("🔴应导入 2 成员失败 0,实 imported=%d failed=%d", res.ImportedMembers, res.ImportFailed)
-	}
-	if res.Org.CreatedByPlatform {
-		t.Fatalf("🔴关联组织 created_by_platform 应=false")
-	}
-	after, _ := upstream.GetUserQuota(ctx, entCred.NewapiUserID)
-	if after != entQuota {
-		t.Fatalf("🔴【#6 涉钱红线】关联全程企业池子应分文不动:%d → %d", entQuota, after)
-	}
-	// 客户余额=读求和=企业池子(关联组织非 0,M5/v1-R1)。
-	adminC := session.Claims{Role: session.RoleOrgAdmin, OrgID: res.Org.ID, MemberID: res.AdminMemberID}
-	gb, berr := svc.GetBalance(ctx, adminC, res.Org.ID)
-	if berr != nil || gb.AvailableQuota != entQuota {
-		t.Fatalf("🔴关联组织读求和余额应=%d(非 0!),实=%v err=%v", entQuota, gb, berr)
-	}
-	// ④ 重复关联同一企业用户 → 拒。
-	if _, err := svc.CreateOrg(ctx, opc, service.CreateOrgInput{
-		Name: "企业乙", Slug: "asc-dup", AdminEmail: "dup@t.local", NewapiUserGroup: "default",
-		Associate: &service.AssociateOrgInput{NewapiUserID: int64(entCred.NewapiUserID), AccessToken: entCred.AccessToken},
-	}); err == nil {
-		t.Fatalf("🔴重复关联同一 new-api 用户应拒")
-	}
-	// ⑤ 幂等重导:再跑 0 新增。
-	imp, skipped, failed, rerr := svc.ReimportOrgTokens(ctx, opc, res.Org.ID)
-	if rerr != nil || imp != 0 || skipped != 2 || failed != 0 {
-		t.Fatalf("重导应幂等 0 新增且跳过已导入,实 imported=%d skipped=%d failed=%d err=%v", imp, skipped, failed, rerr)
-	}
-	t.Logf("门B 真账 ok: 校验闸(坏token/串号/重复=拒)+导入2成员(继承名)+池子 %d 分文不动(#6红线)+关联组织读求和余额非0+重导幂等", entQuota)
-}
+// TestIntegration_AssociateOrg(门B 关联+导入)已随门B 整体退役而删除(总监决策 2026-07-07 + ADR §11:
+// 组织一律门A 新建,不导入既有 key、不关联老 user 当金库;架构B 金库=平台建的 new-api user)。
 
 // 硬停(20-§4):disable org 用户(new-api status=2)+组织标 hard_stopped+管理写被屏蔽;解除恢复。
 func TestIntegration_HardStopDisableUser(t *testing.T) {

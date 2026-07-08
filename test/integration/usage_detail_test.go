@@ -53,7 +53,7 @@ func TestIntegration_UsageDetail(t *testing.T) {
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	upstream := newapi.New(newapi.Config{BaseURL: newapiURL, AdminToken: adminToken, AdminUserID: adminUID, Timeout: 15 * time.Second}, nil)
-	svc := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log, ObserveMode: true})
+	svc := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log})
 
 	const orgID, memberID, userID, tok1 = int64(1), int64(1), int64(91001), int64(91011)
 	db := store.DB()
@@ -164,7 +164,7 @@ func TestIntegration_UsageDetail(t *testing.T) {
 		t.Fatalf("AC-8 默认保留期=0 应不清理,100 天前明细应仍在,实 %d 行", oldCnt0)
 	}
 	// 3b) retention=90 的 svc(同一 store):清 100 天前、近 3 行保留。
-	svcPurge := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log, ObserveMode: true, UsageDetailRetentionDays: 90})
+	svcPurge := service.New(service.Deps{Store: store, Upstream: upstream, Keyring: keyring, Signer: signer, Logger: log, UsageDetailRetentionDays: 90})
 	if err := svcPurge.PurgeOldUsageDetail(ctx); err != nil {
 		t.Fatalf("配置清理失败: %v", err)
 	}

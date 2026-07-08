@@ -102,74 +102,105 @@ func TestIntegration_SettlementDeductDedup(t *testing.T) {
 // 整条链,其中扣款分支已删(链条起点消失),且 override 硬停在 B 下被 disable 硬停取代(31-ADR §4.5,归 BE①)。
 // 保留骨架供阶段2 组长对齐时决定删除或改写为 disable 链路验收。
 func TestIntegration_HardStopConvergeRecover(t *testing.T) {
-	t.Skip("架构B退役:结算扣款分支已拆(33 §12-9),余额驱动 override 硬停链不存在;硬停改 disable(BE① HardStopOrg),阶段2 组长裁定本用例去留")
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// B2 重写(总监裁定:重写为 disable 路径,不删):架构B 硬停=disable 金库 + fan-out disable
+	// **全部成员 user**(硬停停到人,原用例灵魂保留);解除=enable 金库 + **只 enable 应 active 成员**
+	// (个别停用的不解——其 disable 语义独立于硬停)。A 版"余额耗尽→stopped→override→0"链随
+	// 扣款分支/override 机器退役(33 §12-9),硬停改显式运维动作(HardStopOrg),不由计费状态联动。
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	svc, store, _, _ := escrowSvc(t, ctx, "nexus_hstop") // 非 observe
+	svc, store, upstream, _ := escrowSvc(t, ctx, "nexus_hstop")
 	newapiSQLDSN := os.Getenv("NEXUS_IT_NEWAPI_SQL_DSN")
-	const orgID, memberID = int64(802), int64(1)
-	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug, billing_enabled, hard_stop_enabled) VALUES (?, 'hstop-org', 'hstop-slug', 1, 1)`, orgID); err != nil {
+	const orgID, m1, m2 = int64(802), int64(1), int64(2)
+	// 金库 + 注资 + 档位 + 两个成员 saga 开通(m1 保持 active;m2 稍后个别停用,验解除时"不解")。
+	treasuryCred := mkEnterpriseUser(t, ctx, upstream, "hstop-treasury")
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug, newapi_user_id) VALUES (?, 'hstop-org', 'hstop-slug', ?)`, orgID, treasuryCred.NewapiUserID); err != nil {
 		t.Fatalf("建组织失败: %v", err)
 	}
-	cred, perr := svc.EnsureOrgProvisioned(ctx, orgID, "hstop-org")
-	if perr != nil {
-		t.Fatalf("开通失败: %v", perr)
+	if err := upstream.IncreaseUserQuota(ctx, treasuryCred.NewapiUserID, 10_000_000); err != nil {
+		t.Fatalf("金库注资失败: %v", err)
 	}
-	ml := int64(25_000_000)
-	tierID, terr := store.CreateTier(ctx, &model.Tier{OrgID: orgID, Name: "hstop-tier", MonthlyLimit: &ml})
+	amount := int64(2_000_000)
+	tierID, terr := store.CreateTier(ctx, &model.Tier{OrgID: orgID, Name: "hstop-tier", AmountRaw: &amount})
 	if terr != nil {
 		t.Fatalf("建档失败: %v", terr)
 	}
-	if _, err := store.DB().ExecContext(ctx, `INSERT INTO member (id, org_id, tier_id, login_email, status, bootstrap_state) VALUES (?, ?, ?, 'hstop@t.local', 'active', 'done')`, memberID, orgID, tierID); err != nil {
-		t.Fatalf("建成员失败: %v", err)
+	uids := map[int64]int{}
+	for i, mid := range []int64{m1, m2} {
+		if _, err := store.DB().ExecContext(ctx, `INSERT INTO member (id, org_id, tier_id, login_email, status, bootstrap_state) VALUES (?, ?, ?, ?, 'provisioning', 'pending')`, mid, orgID, tierID, fmt.Sprintf("hstop%d@t.local", i+1)); err != nil {
+			t.Fatalf("建成员 %d 失败: %v", mid, err)
+		}
+		uid, perr := svc.ProvisionMemberServiceAccount(ctx, orgID, mid, "", amount, "test")
+		if perr != nil {
+			t.Fatalf("开通成员 %d 服务账号失败: %v", mid, perr)
+		}
+		if err := store.ActivatePlatformAccount(ctx, orgID, mid); err != nil {
+			t.Fatalf("置 active 失败: %v", err)
+		}
+		uids[mid] = uid
 	}
-	tokenID := selfServeMemberToken(t, ctx, svc, store, orgID, memberID) // 初始 unlimited
-	opc := session.Claims{Role: session.RoleOperator, OrgID: orgID}
-	const A = int64(10_000_000)
-	if _, err := svc.Recharge(ctx, opc, orgID, service.RechargeInput{AmountQuota: A, TransferNo: "hs-1"}); err != nil {
-		t.Fatalf("入账失败: %v", err)
+	admin := session.Claims{Role: session.RoleOrgAdmin, OrgID: orgID, MemberID: 999}
+	// m2 个别停用(独立 disable 语义;解除硬停时它必须保持 disabled)。
+	if err := svc.SetMemberStatus(ctx, admin, orgID, m2, false); err != nil {
+		t.Fatalf("个别停用 m2 失败: %v", err)
 	}
-	ndb, _ := sql.Open("mysql", newapiSQLDSN)
-	defer ndb.Close()
-	var maxLogID int64
-	_ = ndb.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM logs`).Scan(&maxLogID)
-	logTS := time.Now().Unix() - 300
-	if _, err := store.DB().ExecContext(ctx, `UPDATE settlement_cursor SET last_settled_ts=?, last_settled_log_id=? WHERE org_id=0`, logTS-1, maxLogID); err != nil {
-		t.Fatalf("置结算水位失败: %v", err)
-	}
-	const consume = int64(15_000_000) // > A → 结算后 balance ≤0
-	seedConsumptionLogTok(t, newapiSQLDSN, int64(cred.NewapiUserID), tokenID, "gpt-hs", consume, logTS)
 
-	tokUnlimRemain := func() (unlim int, remain int64) {
-		_ = ndb.QueryRowContext(ctx, `SELECT unlimited_quota, remain_quota FROM tokens WHERE id=?`, tokenID).Scan(&unlim, &remain)
-		return
+	ndb, err := sql.Open("mysql", newapiSQLDSN)
+	if err != nil {
+		t.Fatalf("连 newapi 库失败: %v", err)
+	}
+	defer ndb.Close()
+	userStatus := func(uid int) int {
+		var st sql.NullInt64
+		_ = ndb.QueryRowContext(ctx, `SELECT status FROM users WHERE id = ?`, uid).Scan(&st)
+		return int(st.Int64)
 	}
 	orgStatus := func() (s string) {
 		_ = store.DB().QueryRowContext(ctx, `SELECT status FROM organization WHERE id=?`, orgID).Scan(&s)
 		return
 	}
-	if _, err := svc.RunSettlement(ctx); err != nil {
-		t.Fatalf("结算失败: %v", err)
+
+	// 硬停(运营方):金库 + 全部成员 user(含已个别停用的 m2,幂等)都 disable。
+	op := session.Claims{Role: session.RoleOperator}
+	if err := svc.HardStopOrg(ctx, op, orgID, true); err != nil {
+		t.Fatalf("硬停失败: %v", err)
 	}
-	if s := orgStatus(); s != model.OrgStatusStopped {
-		t.Fatalf("🔴余额耗尽应 stopped,实=%s", s)
+	if st := userStatus(treasuryCred.NewapiUserID); st != 2 {
+		t.Fatalf("🔴硬停应 disable 金库 user(status=2),实=%d", st)
 	}
-	unlim, remain := tokUnlimRemain()
-	if unlim != 0 || remain != 0 {
-		t.Fatalf("🔴硬停应把成员 token override→0(unlimited=0/remain=0),实 unlimited=%d/remain=%d(HIGH-1类:硬停没停到人=漏钱)", unlim, remain)
+	for mid, uid := range uids {
+		if st := userStatus(uid); st != 2 {
+			t.Fatalf("🔴硬停 fan-out 应 disable 成员 %d 的 user(status=2,硬停没停到人=漏钱),实=%d", mid, st)
+		}
 	}
-	// 恢复:充值回正 → active → converge → 成员 token 恢复到档月额(非 0)。
-	if _, err := svc.Recharge(ctx, opc, orgID, service.RechargeInput{AmountQuota: 30_000_000, TransferNo: "hs-2"}); err != nil {
-		t.Fatalf("恢复充值失败: %v", err)
+	if s := orgStatus(); s != model.OrgStatusHardStopped {
+		t.Fatalf("🔴硬停后组织应 hard_stopped,实=%s", s)
+	}
+	// 硬停期间管理写被屏蔽(fail-closed)。
+	if err := svc.SetMemberStatus(ctx, admin, orgID, m1, false); err == nil {
+		t.Fatalf("🔴硬停期间管理写应被屏蔽(403),实成功")
+	}
+	// 幂等:重复硬停不报错。
+	if err := svc.HardStopOrg(ctx, op, orgID, true); err != nil {
+		t.Fatalf("重复硬停应幂等,实错: %v", err)
+	}
+
+	// 解除:金库 + m1(应 active)enable;m2(个别停用)保持 disabled——不解。
+	if err := svc.HardStopOrg(ctx, op, orgID, false); err != nil {
+		t.Fatalf("解除硬停失败: %v", err)
+	}
+	if st := userStatus(treasuryCred.NewapiUserID); st != 1 {
+		t.Fatalf("🔴解除应 enable 金库 user(status=1),实=%d", st)
+	}
+	if st := userStatus(uids[m1]); st != 1 {
+		t.Fatalf("🔴解除应 enable 应 active 成员 m1(status=1),实=%d", st)
+	}
+	if st := userStatus(uids[m2]); st != 2 {
+		t.Fatalf("🔴解除不得解个别停用成员 m2(其 disable 独立于硬停,应保持 status=2),实=%d", st)
 	}
 	if s := orgStatus(); s != model.OrgStatusActive {
-		t.Fatalf("🔴充值回正应 active,实=%s", s)
+		t.Fatalf("🔴解除后组织应 active,实=%s", s)
 	}
-	_, remain2 := tokUnlimRemain()
-	if remain2 != ml {
-		t.Fatalf("🔴恢复应下发档月额 %d,实 remain=%d", ml, remain2)
-	}
-	t.Logf("B档#1 硬停converge→0与恢复 ok: 余额耗尽→stopped+成员token override 0(硬停停到人);充值回正→active+恢复档额 %d", ml)
+	t.Logf("B2 硬停disable路径真账 ok: 硬停=disable金库+fan-out停到人(m1/m2 user全status=2)+管理写屏蔽+幂等;解除=金库+m1恢复、个别停用m2不解、组织回active")
 }
 
 // TestIntegration_ResetDownlinkNonObserve 已随 reset 周期重置 + override 下发机器整体退役而删除

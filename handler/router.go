@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/nexusapi-platform/enterprise/pkg/apperr"
 	"github.com/nexusapi-platform/enterprise/pkg/session"
 	"github.com/nexusapi-platform/enterprise/service"
 	"github.com/nexusapi-platform/enterprise/web"
@@ -152,6 +153,19 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/organizations/{id}/support-sessions", h.requireAuth(h.handleOpenSupport))
 	mux.HandleFunc("GET /api/v1/support-sessions/{id}", h.requireAuth(h.handleGetSupport))
 	mux.HandleFunc("POST /api/v1/support-sessions/{id}/close", h.requireAuth(h.handleCloseSupport))
+
+	// API 兜底:未注册的 /api/* 路径(含已退役端点)统一 404,不落入下面 SPA 的静态文件语义。
+	// 若无此兜底,"GET /"(SPA 子树)会让未注册写路径命中"同路径存在 GET"而返 405——退役端点应 404
+	// 藏存在性(33 §3.5 端点白名单;原 mvpGate 的 404 语义随闸拆除后由此路由层兜底承接)。
+	// 按 method 逐个注册(不能裸注册 "/api/":全 method+子树会与 "GET /" 互不更精确,ServeMux 判冲突 panic;
+	// 分 method 后同 method 间路径更专者赢、异 method 不相交,合法)。已注册 pattern 更精确、优先,不受影响。
+	apiNotFound := func(w http.ResponseWriter, r *http.Request) {
+		writeErr(w, r, apperr.NotFound(""))
+	}
+	// 不含 HEAD:ServeMux 的 GET pattern 隐式匹配 HEAD,单独注册 "HEAD /api/" 会与既有 "GET /api/v1/…" 判冲突。
+	for _, m := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		mux.HandleFunc(m+" /api/", apiNotFound)
+	}
 
 	// 前端 SPA(catch-all,最不具体,/api/v1 与 /healthz 等更具体的先匹配):
 	// /api/v1/* 之外的路径走内嵌静态前端;/ 返回 index.html。

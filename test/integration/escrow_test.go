@@ -236,53 +236,75 @@ func TestIntegration_OpenMemberFinalizeCompensation(t *testing.T) {
 
 // 步骤5:401 自愈——破坏 org access_token → token 操作 401 → EnsureFreshCred 重登刷新 → 重试成功。
 func TestIntegration_CredSelfHeal401(t *testing.T) {
+	// 架构B 原生 401 自愈(灰度门槛项①,33 §3.2):成员服务账号 access_token 失效 → 成员自助建 key
+	// (CreateMyToken→WithMemberCred)→ 401 → 探活确认失效 → 用存的密码重登刷新 → **原子回存** → 重试成功。
+	// 自愈对象=成员自己的服务账号凭证;旧版从 A 版入口(SetMemberStatus→org 凭证 token 操作)验自愈,
+	// 架构B 的 SetMemberStatus 走 admin 侧 SetUserStatus 不碰 org 凭证,该前提已随模型退役,故重写。
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	svc, store, _, km := escrowSvc(t, ctx, "nexus_heal")
+	svc, store, upstream, km := escrowSvc(t, ctx, "nexus_heal")
 	newapiSQLDSN := os.Getenv("NEXUS_IT_NEWAPI_SQL_DSN")
 	const orgID, memberID = int64(501), int64(1)
-	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'heal-org', 'heal-slug')`, orgID); err != nil {
+	// 金库 + 注资 + 档位 + 成员 saga 开通(架构B 数据形状,照 MemberLifecycle)。
+	treasuryCred := mkEnterpriseUser(t, ctx, upstream, "heal-treasury")
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO organization (id, name, slug, newapi_user_id) VALUES (?, 'heal-org', 'heal-slug', ?)`, orgID, treasuryCred.NewapiUserID); err != nil {
 		t.Fatalf("建组织失败: %v", err)
 	}
-	if _, err := svc.EnsureOrgProvisioned(ctx, orgID, "heal-org"); err != nil {
-		t.Fatalf("开通失败: %v", err)
+	if err := upstream.IncreaseUserQuota(ctx, treasuryCred.NewapiUserID, 10_000_000); err != nil {
+		t.Fatalf("金库注资失败: %v", err)
 	}
-	if _, err := store.DB().ExecContext(ctx, `INSERT INTO member (id, org_id, login_email, status, bootstrap_state) VALUES (?, ?, 'heal@t.local', 'active', 'done')`, memberID, orgID); err != nil {
+	amount := int64(2_000_000)
+	tierID, terr := store.CreateTier(ctx, &model.Tier{OrgID: orgID, Name: "heal-tier", AmountRaw: &amount})
+	if terr != nil {
+		t.Fatalf("建档失败: %v", terr)
+	}
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO member (id, org_id, tier_id, login_email, status, bootstrap_state) VALUES (?, ?, ?, 'heal@t.local', 'provisioning', 'pending')`, memberID, orgID, tierID); err != nil {
 		t.Fatalf("建成员失败: %v", err)
 	}
-	tokenID := selfServeMemberToken(t, ctx, svc, store, orgID, memberID) // 有效凭证下建 token
-
-	// 破坏 org access_token:用**同一把 keyring**加密一个垃圾令牌落库(=失效 access_token)。
-	garbage, err := km.EncryptString("invalid-access-token-xyz")
-	if err != nil {
-		t.Fatalf("加密垃圾令牌失败: %v", err)
+	if _, perr := svc.ProvisionMemberServiceAccount(ctx, orgID, memberID, "", amount, "test"); perr != nil {
+		t.Fatalf("开通服务账号失败: %v", perr)
 	}
-	if _, err := store.DB().ExecContext(ctx, `UPDATE organization SET newapi_access_token_enc = ? WHERE id = ?`, []byte(garbage), orgID); err != nil {
-		t.Fatalf("破坏 access_token 失败: %v", err)
+	if err := store.ActivatePlatformAccount(ctx, orgID, memberID); err != nil {
+		t.Fatalf("置 active 失败: %v", err)
 	}
 
-	// token 操作(禁用)→ 垃圾令牌 401 → withOrgCred → EnsureFreshCred 用存的密码重登刷新 → 重试成功。
-	admin := session.Claims{Role: session.RoleOrgAdmin, OrgID: orgID, MemberID: 999}
-	if err := svc.SetMemberStatus(ctx, admin, orgID, memberID, false); err != nil {
-		t.Fatalf("🔴401 自愈失败:token 操作应经重登自愈成功,实错: %v", err)
+	// 破坏成员服务账号 access_token:同一 keyring 加密垃圾值落库(=凭证失效;密码仍有效,自愈靠它重登)。
+	garbage, gerr := km.EncryptString("invalid-access-token-xyz")
+	if gerr != nil {
+		t.Fatalf("加密垃圾令牌失败: %v", gerr)
 	}
-	// 落库 access_token 已刷新(不再是垃圾)。
+	if _, err := store.DB().ExecContext(ctx, `UPDATE member SET newapi_access_token_enc = ? WHERE id = ?`, []byte(garbage), memberID); err != nil {
+		t.Fatalf("破坏成员凭证失败: %v", err)
+	}
+
+	// 成员自助建 key → WithMemberCred:垃圾凭证 401 → ProbeAccessToken 证死 → 密码重登刷新回存 → 重试成功。
+	mc := session.Claims{Role: session.RoleMember, OrgID: orgID, MemberID: memberID}
+	tv, cerr := svc.CreateMyToken(ctx, mc, service.CreateMyTokenInput{Name: "heal-key", Group: "default"})
+	if cerr != nil {
+		t.Fatalf("🔴401 自愈失败:成员自助建 key 应经重登自愈成功,实错: %v", cerr)
+	}
+	// 落库凭证已刷新(不再是垃圾)。
 	var afterEnc []byte
-	if err := store.DB().QueryRowContext(ctx, `SELECT newapi_access_token_enc FROM organization WHERE id = ?`, orgID).Scan(&afterEnc); err != nil {
+	if err := store.DB().QueryRowContext(ctx, `SELECT newapi_access_token_enc FROM member WHERE id = ?`, memberID).Scan(&afterEnc); err != nil {
 		t.Fatalf("读刷新后凭证失败: %v", err)
 	}
 	if string(afterEnc) == garbage {
-		t.Fatalf("🔴401 自愈应刷新落库 access_token,实仍是垃圾值")
+		t.Fatalf("🔴401 自愈应原子回存刷新后的 access_token,实仍是垃圾值")
 	}
-	// 验禁用确实生效(自愈后重试成功,token status=2)。
-	ndb, _ := sql.Open("mysql", newapiSQLDSN)
+	// token 真建出来(new-api tokens 表 status=1,挂在成员自己的 user 下)。
+	ndb, err := sql.Open("mysql", newapiSQLDSN)
+	if err != nil {
+		t.Fatalf("连 newapi 库失败: %v", err)
+	}
 	defer ndb.Close()
 	var st int
-	_ = ndb.QueryRowContext(ctx, `SELECT status FROM tokens WHERE id = ?`, tokenID).Scan(&st)
-	if st != 2 {
-		t.Fatalf("🔴自愈后禁用应生效 status=2,实=%d", st)
+	if err := ndb.QueryRowContext(ctx, `SELECT status FROM tokens WHERE id = ?`, tv.ID).Scan(&st); err != nil {
+		t.Fatalf("查 token 失败: %v", err)
 	}
-	t.Logf("步骤5 401自愈真账 ok: 破坏 org access_token→token 操作401→EnsureFreshCred 重登刷新落库→重试成功(禁用生效 status=2)")
+	if st != 1 {
+		t.Fatalf("🔴自愈后建出的 token 应 status=1,实=%d", st)
+	}
+	t.Logf("架构B 401 自愈真账 ok: 破坏成员服务账号凭证→自助建 key 401→探活证死→密码重登刷新原子回存→重试成功(token id=%d status=1)", tv.ID)
 }
 
 // 步骤4:成员三态——禁用(token置禁用不删,key保留)/恢复(启用同key)/离职(删token+软删转离职列表)。

@@ -60,7 +60,9 @@ func TestIntegration_UsageDetail(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `INSERT INTO organization (id, name, slug) VALUES (?, 'det-org', 'det-org-slug')`, orgID); err != nil {
 		t.Fatalf("建组织失败: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO member (id, org_id, login_email) VALUES (?, ?, 'det@test.local')`, memberID, orgID); err != nil {
+	// 架构B:归因主键=member.newapi_user_id(BE③ 归因改造),成员须挂 user id 才能被结算归到;
+	// 令牌槽映射(FinalizeBootstrap 建 member_key_slot)继续用于 key_id 归因断言。
+	if _, err := db.ExecContext(ctx, `INSERT INTO member (id, org_id, login_email, newapi_user_id, newapi_username) VALUES (?, ?, 'det@test.local', ?, 'det_m1')`, memberID, orgID, userID); err != nil {
 		t.Fatalf("建成员失败: %v", err)
 	}
 	masked := "sk-dddd...v001"

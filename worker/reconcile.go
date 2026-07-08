@@ -84,6 +84,12 @@ func (w *ReconcileWorker) Run(ctx context.Context) {
 					w.log.Error("用量明细保留清理失败(下轮重试)", "err", perr)
 					w.svc.RecordWorkerFailure(ctx, "reconcile", "purge_usage_detail", perr)
 				}
+				// 金库低预警巡检(29-PRD §4.9,BE③;阶段2 接线,与 VerifyQuotaPerUnit 同批,33 §11 带入项):
+				// 只读只报绝不写 quota/停服(fail-open);内部 leader-gated + 阈值未配置(<=0)静默跳过。
+				if terr := w.svc.CheckTreasuryLowWatermarks(rc); terr != nil {
+					w.log.Error("金库低预警巡检失败(下轮重试)", "err", terr)
+					w.svc.RecordWorkerFailure(ctx, "reconcile", "treasury_low_watermark", terr)
+				}
 			})
 		}
 	}

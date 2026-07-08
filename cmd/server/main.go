@@ -134,6 +134,15 @@ func run(log *slog.Logger) error {
 		UsageDetailRetentionDays: atoiOr("NEXUS_USAGE_DETAIL_RETENTION_DAYS", 0),
 	})
 
+	// QuotaPerUnit 启动自检(33 §3.6/34 §3-④,阶段2 硬项):平台配置与所连 new-api 实际值必须一致,
+	// 不一致拒启动(fail-fast)——两边漂移=金额换算错 50 万倍。dev 联调可 NEXUS_SKIP_QPU_CHECK=true 跳过,
+	// 生产绝不设此开关(上线检查单核对项)。
+	if os.Getenv("NEXUS_SKIP_QPU_CHECK") == "true" {
+		log.Warn("已跳过 QuotaPerUnit 启动自检(NEXUS_SKIP_QPU_CHECK=true,仅限 dev;生产禁设)")
+	} else if err := svc.VerifyQuotaPerUnit(bootCtx); err != nil {
+		return err
+	}
+
 	// 运营方引导账号(首启种子,幂等)。
 	if email := os.Getenv("NEXUS_BOOTSTRAP_OPERATOR_EMAIL"); email != "" {
 		if err := svc.SeedOperator(bootCtx, email, os.Getenv("NEXUS_BOOTSTRAP_OPERATOR_PASSWORD")); err != nil {

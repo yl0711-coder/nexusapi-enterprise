@@ -4,7 +4,7 @@
 //
 // 去抖:按"跨越"告警(高于阈值→跌破那一拍告警一次;回升后再跌破才再告)。状态在进程内存,
 // 重启后首轮"已低于"会再告一次(可接受:重启后重新确认低水位比漏报安全)。
-// 接线:worker 周期调用待组长阶段2 统一接(与 VerifyQuotaPerUnit 同批,33 §11 带入项);多节点由 leader gate 单跑。
+// 接线(阶段2 已接):ReconcileWorker tick 周期调用(与 VerifyQuotaPerUnit 同批,33 §11 带入项);多节点由 leader gate 单跑。
 package service
 
 import (

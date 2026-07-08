@@ -395,10 +395,11 @@ func openWithRetry(t *testing.T, ctx context.Context, dsn string) *repo.Store {
 }
 
 func mustKeyring(t *testing.T) *crypto.Keyring {
+	// 固定测试主密钥(确定性):同一测试内 service 加密 org 凭证、助手(selfServeMemberToken 等)解密
+	// 必须用同一把 key。原实现每次 rand.Read 生成不同随机 key → 跨调用加解密不匹配("密文格式非法"),
+	// 是测试骨架缺陷(生产是单一稳定 keyring,固定测试 key 与之同构;参照已固定的 session 测试密钥)。
 	key := make([]byte, crypto.KeySize)
-	if _, err := rand.Read(key); err != nil {
-		t.Fatal(err)
-	}
+	copy(key, []byte("nexus-integration-test-fixed-key-v1")) // 确定性;copy 上限 KeySize,长度安全
 	kr, err := crypto.NewKeyring("v1", map[string][]byte{"v1": key})
 	if err != nil {
 		t.Fatal(err)

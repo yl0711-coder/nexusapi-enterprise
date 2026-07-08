@@ -106,10 +106,8 @@ func toMemberView(m *model.Member) memberView {
 // displayCurrency 对客展示币种(A3:应与主站 QuotaDisplayType 一致;MVP 默认 USD,上线读主站 option)。
 const displayCurrency = "USD"
 
-// quotaPerUnit 元/美元↔quota 锚定(A4,与主站一致)。
-const quotaPerUnit = 500000.0
-
-func toDisplay(quota int64) float64 { return float64(quota) / quotaPerUnit }
+// 换算锚定值不再硬编码(39号 P2-6):统一走 service.QuotaPerUnitSetting(platform_setting
+// 单一真相源,与启动自检/FE 同口径),由调用方传入。
 
 // balanceView v1 M5(20-§3):客户余额=读求和合计+billing_kind;只回 available,不漏 window/holding 内部拆分。
 type balanceView struct {
@@ -119,10 +117,10 @@ type balanceView struct {
 	Currency         string  `json:"currency"`
 }
 
-func toBalanceView(b *service.CustomerBalance) balanceView {
+func toBalanceView(b *service.CustomerBalance, qpu int64) balanceView {
 	return balanceView{
 		AvailableQuota:   b.AvailableQuota,
-		AvailableDisplay: toDisplay(b.AvailableQuota),
+		AvailableDisplay: float64(b.AvailableQuota) / float64(qpu),
 		BillingKind:      b.BillingKind,
 		Currency:         displayCurrency,
 	}

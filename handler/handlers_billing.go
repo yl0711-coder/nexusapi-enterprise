@@ -26,7 +26,7 @@ func (h *Handler) handleGetBalance(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, err)
 		return
 	}
-	writeOK(w, r, http.StatusOK, toBalanceView(b))
+	writeOK(w, r, http.StatusOK, toBalanceView(b, h.svc.QuotaPerUnitSetting(r.Context())))
 }
 
 // GET /organizations/{id}/recharges — 入账记录(O/A)。

@@ -107,12 +107,18 @@ func (s *Service) CreateOrg(ctx context.Context, c session.Claims, in CreateOrgI
 	// 架构B:档位额度=AmountRaw(开通成员时金库→成员的首笔划账额,OpenMember 硬性要求非空正数)——
 	// 原 A 版写 MonthlyLimit(0032 废弃字段)+月度重置策略,默认档会开不了成员,已修正;
 	// 重置策略机器随 33 §12-4 退役,不再写 quota_policy。基础档额度可见、可改(商务/运营按客户调),非隐藏常量。
+	// 39号 P2-5:失败不吞——"必有默认档"是建组织不变量(开成员依赖默认档 AmountRaw),
+	// CreateTier/SetDefaultTier 任一失败即如实报错(与本流程其它步骤同口径;组织行已建,
+	// 重试建组织会因 slug 冲突提示,运维按报错处置,绝不静默产出"无默认档的残缺组织")。
 	baseLimit := DefaultBaseTierMonthlyQuota
 	baseTierID, terr := s.store.CreateTier(ctx, &model.Tier{OrgID: orgID, Name: "基础档", AmountRaw: &baseLimit})
-	if terr == nil {
-		_ = s.store.SetDefaultTier(ctx, orgID, baseTierID)
-	} else {
-		s.log.Error("建组织默认档失败", "org_id", orgID, "err", terr)
+	if terr != nil {
+		s.log.Error("建组织默认档失败(建组织整体失败)", "org_id", orgID, "err", terr)
+		return nil, apperr.Internal("").WithCause(terr)
+	}
+	if derr := s.store.SetDefaultTier(ctx, orgID, baseTierID); derr != nil {
+		s.log.Error("建组织设默认档失败(建组织整体失败)", "org_id", orgID, "tier_id", baseTierID, "err", derr)
+		return nil, apperr.Internal("").WithCause(derr)
 	}
 
 	org, err := s.store.GetOrganization(ctx, orgID)

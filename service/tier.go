@@ -19,11 +19,10 @@ type CreateTierInput struct {
 	QuotaType    string // fixed(默认)| subscription
 	AmountRaw    *int64 // 额度值(raw;架构B 开通/恢复成员的初始划账额;正数,不可 0/无限)
 	ResetPeriod  *string
-	Visibility   string // all | assigned(默认)
-	DailyLimit   *int64 // Deprecated: 架构A 遗留
-	WeeklyLimit  *int64
-	MonthlyLimit *int64
-	NewapiGroup  *string
+	Visibility  string // all | assigned(默认)
+	NewapiGroup *string
+	// Daily/Weekly/MonthlyLimit(架构A 遗留)已停止接收与落库(39号 P2-4:从不 enforce 的死写入面);
+	// model.Tier 上的同名字段仅作旧数据读兼容(0032)。
 }
 
 // validateTierArchB 架构B 档位字段校验(31-ADR §4.3:额度正数、无无上限;subscription 须带周期)。
@@ -78,7 +77,6 @@ func (s *Service) CreateTier(ctx context.Context, c session.Claims, orgID int64,
 	id, err := s.store.CreateTier(ctx, &model.Tier{
 		OrgID: orgID, Name: in.Name, ModelSet: in.ModelSet, ModelCap: in.ModelCap,
 		QuotaType: in.QuotaType, AmountRaw: in.AmountRaw, ResetPeriod: in.ResetPeriod, Visibility: in.Visibility,
-		DailyLimit: in.DailyLimit, WeeklyLimit: in.WeeklyLimit, MonthlyLimit: in.MonthlyLimit,
 		NewapiGroup: in.NewapiGroup,
 	})
 	if errors.Is(err, repo.ErrConflict) {
@@ -111,9 +109,6 @@ type UpdateTierInput struct {
 	ResetPeriod    *string
 	SetResetPeriod bool // 显式清空 reset_period(subscription→fixed 时)
 	Visibility     *string
-	DailyLimit     *int64 // Deprecated: 架构A 遗留
-	WeeklyLimit    *int64
-	MonthlyLimit   *int64
 	NewapiGroup    *string
 	SetModelSet    bool // 显式置空模型集(区分"不改"与"清空继承")
 	SetModelCap    bool
@@ -148,15 +143,6 @@ func (s *Service) UpdateTier(ctx context.Context, c session.Claims, orgID, tierI
 	}
 	if in.SetModelCap {
 		t.ModelCap = in.ModelCap
-	}
-	if in.DailyLimit != nil {
-		t.DailyLimit = in.DailyLimit
-	}
-	if in.WeeklyLimit != nil {
-		t.WeeklyLimit = in.WeeklyLimit
-	}
-	if in.MonthlyLimit != nil {
-		t.MonthlyLimit = in.MonthlyLimit
 	}
 	if in.NewapiGroup != nil {
 		t.NewapiGroup = in.NewapiGroup

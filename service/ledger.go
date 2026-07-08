@@ -178,9 +178,15 @@ func (s *Service) transferExec(ctx context.Context, orgID int64, fromUID, toUID 
 		return 0, apperr.Internal("").WithCause(ierr)
 	}
 	if !created {
+		// 39号体检 P2-1(涉钱):幂等重放必须先验参数一致——同键但金额/方向/成员不一致时,
+		// 绝不能按"已完成"回幂等成功(接口回 ok 实际一分没划=掉单假到账)。不一致一律 409 如实报。
+		if row.AmountRaw != amountRaw || row.FromUserID != int64(fromUID) || row.ToUserID != int64(toUID) || row.MemberID != memberID {
+			return 0, apperr.New(apperr.CodeInvalidParam, 409, fmt.Sprintf(
+				"幂等键冲突:该键已存在一笔参数不同的划账(已有金额 %d,本次 %d)——本次未执行,请换新幂等键发起", row.AmountRaw, amountRaw))
+		}
 		switch row.Status {
 		case repo.LedgerApplied:
-			return row.DebitedRaw, nil // 重放已完成的划账:幂等成功
+			return row.DebitedRaw, nil // 重放已完成的同参划账:幂等成功
 		case repo.LedgerFailed:
 			return 0, apperr.New(apperr.CodeInvalidParam, 409,
 				"该笔划账此前已判定失败,请换新幂等键重新发起").WithCause(errCauseReplayFailed)

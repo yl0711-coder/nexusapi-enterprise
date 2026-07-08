@@ -28,8 +28,9 @@ func (h *Handler) handleGrantQuota(w http.ResponseWriter, r *http.Request) {
 	}
 	idem := in.IdempotencyKey
 	if idem == "" {
-		// 未显式给幂等键:按秒生成(同秒双击去重;跨秒重试由 Transfer pending+对账环收敛)。
-		idem = fmt.Sprintf("grant:%d:%d:%d", c.OrgID, memberID, time.Now().Unix())
+		// 未显式给幂等键:按秒+金额生成(39号 P2-1:金额掺进键——同秒双击同额仍去重,
+		// 同秒两笔**不同额**各自成单,不再撞键静默丢第二笔;跨秒重试由 Transfer pending+对账环收敛)。
+		idem = fmt.Sprintf("grant:%d:%d:%d:%d", c.OrgID, memberID, time.Now().Unix(), in.AmountRaw)
 	}
 	if err := h.svc.GrantMemberQuota(r.Context(), c, c.OrgID, memberID, in.AmountRaw, in.Reason, idem); err != nil {
 		writeErr(w, r, err)

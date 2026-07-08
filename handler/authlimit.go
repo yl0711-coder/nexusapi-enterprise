@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"crypto/subtle"
 	"errors"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,16 +95,27 @@ func isCredFailure(err error) bool {
 	return errors.As(err, &e) && e.Code == apperr.CodeUnauthenticated
 }
 
-// clientIP 取真实客户端 IP:CF-Connecting-IP(CF 注入)优先,再 X-Forwarded-For 首段,末 RemoteAddr。
+// originVerifySecret 可信代理证明(39号 P2-3):CF 边缘注入 X-Origin-Verify 密钥头(A2 源站锁,
+// 与主站同机制)。仅当请求带匹配的该头(=确经可信 CF/caddy 链路)才采信代理 IP 头;
+// 未配置 env 或头不匹配(直连 8080 伪造头)→ 回落 RemoteAddr,不让伪造头削弱 per-IP 限流。
+// per-account 退避不受此影响(它才是主防线)。
+var originVerifySecret = os.Getenv("NEXUS_ORIGIN_VERIFY_SECRET")
+
+// clientIP 取真实客户端 IP:仅可信链路(X-Origin-Verify 匹配)才信 CF-Connecting-IP /
+// X-Forwarded-For 首段;否则一律 RemoteAddr。
 func clientIP(r *http.Request) string {
-	if ip := r.Header.Get("CF-Connecting-IP"); ip != "" {
-		return ip
-	}
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if i := strings.IndexByte(xff, ','); i >= 0 {
-			return strings.TrimSpace(xff[:i])
+	trusted := originVerifySecret != "" &&
+		subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Origin-Verify")), []byte(originVerifySecret)) == 1
+	if trusted {
+		if ip := r.Header.Get("CF-Connecting-IP"); ip != "" {
+			return ip
 		}
-		return strings.TrimSpace(xff)
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			if i := strings.IndexByte(xff, ','); i >= 0 {
+				return strings.TrimSpace(xff[:i])
+			}
+			return strings.TrimSpace(xff)
+		}
 	}
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		return host

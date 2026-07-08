@@ -127,6 +127,9 @@ async function api(method, path, body) {
   let j = {}; try { j = await r.json(); } catch (e) {}
   if (r.status === 401) { logout(); throw new Error(j.message || "登录已过期"); }
   if (j.code !== 0 && j.code !== undefined) throw new Error(j.message || ("请求失败 " + r.status));
+  // 39号 P2-7:非 2xx 且无信封 code(5xx 空 body / 网关错误页)不再静默返回 undefined——
+  // 如实抛错让页面显示"加载失败",而非误读成"没数据"。
+  if (!r.ok && j.code === undefined) throw new Error("请求失败 " + r.status);
   return j.data;
 }
 // 架构B 单位口径(31-ADR §3):内部/API 全 raw quota;换算只在 UI 边界一次——显示 ÷quota_per_unit、输入 ×quota_per_unit。

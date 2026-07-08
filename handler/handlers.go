@@ -421,11 +421,9 @@ type createTierReq struct {
 	QuotaType    string           `json:"quota_type"`   // 架构B:fixed(默认)| subscription
 	AmountRaw    *int64           `json:"amount_raw"`   // 架构B:额度值(raw)
 	ResetPeriod  *string          `json:"reset_period"` // 架构B:daily|weekly|monthly(仅 subscription)
-	Visibility   string           `json:"visibility"`   // 架构B:all | assigned(默认)
-	DailyLimit   *int64           `json:"daily_limit"`  // Deprecated: 架构A 遗留
-	WeeklyLimit  *int64           `json:"weekly_limit"`
-	MonthlyLimit *int64           `json:"monthly_limit"`
-	NewapiGroup  *string          `json:"newapi_group"`
+	Visibility  string  `json:"visibility"` // 架构B:all | assigned(默认)
+	NewapiGroup *string `json:"newapi_group"`
+	// daily/weekly/monthly_limit(架构A 遗留)已停止接收(39号 P2-4);传了也被忽略。
 }
 
 func (h *Handler) handleCreateTier(w http.ResponseWriter, r *http.Request) {
@@ -443,7 +441,7 @@ func (h *Handler) handleCreateTier(w http.ResponseWriter, r *http.Request) {
 	t, err := h.svc.CreateTier(r.Context(), c, orgID, service.CreateTierInput{
 		Name: in.Name, ModelSet: in.ModelSet, ModelCap: in.ModelCap,
 		QuotaType: in.QuotaType, AmountRaw: in.AmountRaw, ResetPeriod: in.ResetPeriod, Visibility: in.Visibility,
-		DailyLimit: in.DailyLimit, WeeklyLimit: in.WeeklyLimit, MonthlyLimit: in.MonthlyLimit, NewapiGroup: in.NewapiGroup,
+		NewapiGroup: in.NewapiGroup,
 	})
 	if err != nil {
 		writeErr(w, r, err)
@@ -460,11 +458,8 @@ type updateTierReq struct {
 	QuotaType    *string           `json:"quota_type"`   // 架构B
 	AmountRaw    *int64            `json:"amount_raw"`   // 架构B
 	ResetPeriod  *string           `json:"reset_period"` // 架构B(传空串=清空)
-	Visibility   *string           `json:"visibility"`   // 架构B
-	DailyLimit   *int64            `json:"daily_limit"`  // Deprecated: 架构A 遗留
-	WeeklyLimit  *int64            `json:"weekly_limit"`
-	MonthlyLimit *int64            `json:"monthly_limit"`
-	NewapiGroup  *string           `json:"newapi_group"`
+	Visibility  *string `json:"visibility"` // 架构B
+	NewapiGroup *string `json:"newapi_group"`
 }
 
 // PUT /tiers/{id} — 改层级(组织管理员;org 取自会话)。
@@ -482,8 +477,7 @@ func (h *Handler) handleUpdateTier(w http.ResponseWriter, r *http.Request) {
 	}
 	su := service.UpdateTierInput{
 		Name: in.Name, QuotaType: in.QuotaType, AmountRaw: in.AmountRaw, Visibility: in.Visibility,
-		DailyLimit: in.DailyLimit, WeeklyLimit: in.WeeklyLimit,
-		MonthlyLimit: in.MonthlyLimit, NewapiGroup: in.NewapiGroup,
+		NewapiGroup: in.NewapiGroup,
 	}
 	if in.ResetPeriod != nil {
 		if *in.ResetPeriod == "" {

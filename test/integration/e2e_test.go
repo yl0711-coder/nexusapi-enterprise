@@ -22,6 +22,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -408,7 +409,34 @@ func mustKeyring(t *testing.T) *crypto.Keyring {
 }
 
 // setupRC4 初始化全新 rc.4,返回管理员 access_token + uid(双头鉴权,里程碑 0 实证契约)。
+// setupRC4 缓存版:new-api 的 `GET /api/user/token`(setupRC4Fresh 里)每调一次都**重新生成** admin
+// access_token 并作废前一把。集成测试共享单个 new-api 容器、9 个调用点(含 selfServeMemberToken 内部),
+// 若每次都重生成,先建 service 持有的 admin token 会被后续 setupRC4 踢成 401(结算/入账等 admin 侧上游调用
+// 随机报"上游鉴权失效")。按 org 隔离纪律该每测独立 new-api,但栈只有一个;故 memo 化:首调生成并缓存,
+// 后续按 base 返缓存的同一把稳定 token,全程不再重生成。集成测试无 t.Parallel(顺序跑),互斥即安全。
+var (
+	rc4Mu    sync.Mutex
+	rc4Cache = map[string]struct {
+		token string
+		uid   int
+	}{}
+)
+
 func setupRC4(t *testing.T, base string) (string, int) {
+	rc4Mu.Lock()
+	defer rc4Mu.Unlock()
+	if c, ok := rc4Cache[base]; ok {
+		return c.token, c.uid
+	}
+	token, uid := setupRC4Fresh(t, base)
+	rc4Cache[base] = struct {
+		token string
+		uid   int
+	}{token, uid}
+	return token, uid
+}
+
+func setupRC4Fresh(t *testing.T, base string) (string, int) {
 	jar, _ := cookiejar.New(nil)
 	hc := &http.Client{Timeout: 15 * time.Second, Jar: jar}
 	const rootPass = "RootPass123"

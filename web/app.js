@@ -1843,8 +1843,8 @@ VIEWS.mybalance = async () => {
     api("GET", "/me/ledger?page=" + page + "&page_size=50", null).catch(() => ({ list: [], pagination: {} })),
   ]);
   const remain = bal.__err ? null : rawOf(bal, "quota_raw", "remaining_raw", "remain_raw");
-  const used = bal.__err ? null : rawOf(bal, "used_raw", "used_quota_raw");
-  const grantedRaw = bal.__err ? null : rawOf(bal, "granted_raw", "total_granted_raw");
+  const used = bal.__err ? null : rawOf(bal, "consumed_raw", "used_raw", "used_quota_raw"); // 后端契约名 consumed_raw(39号P2-8)
+  const grantedRaw = bal.__err ? null : rawOf(bal, "granted_net_raw", "granted_raw", "total_granted_raw"); // 后端契约名 granted_net_raw
   const granted = grantedRaw != null ? grantedRaw : ((remain != null && used != null) ? remain + used : null);
   const usedUp = remain != null && remain <= 0;
   const bar = usedUp ? `<div class="note" style="background:var(--badbg);border-color:#fecaca;color:#7f1d1d;margin:0 0 14px"><b>额度已用完,请联系管理员。</b>额度用完后你的所有令牌调用都会被拒绝;管理员追加划拨后即恢复。</div>` : "";

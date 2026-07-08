@@ -112,6 +112,23 @@ func (h *Handler) Routes() http.Handler {
 	// 余额/账本(架构B BE③,只读):读求和余额 + 分配账本三级可见(31-ADR §15)。
 	mux.HandleFunc("GET /api/v1/organizations/{id}/balance", h.requireAuth(h.handleOrgBalance)) // 读求和:金库+Σ成员(取代 company_balance 视图)
 	mux.HandleFunc("GET /api/v1/organizations/{id}/ledger", h.requireAuth(h.handleOrgLedger))   // 本组织划账流水(O/A)
+
+	// ── 33 §3.5 契约 /orgs/{id}/*(org_admin 面)——39号体检阻断-1:契约用 /orgs、实现只有
+	// /organizations 致 org_admin/成员核心页整页失败。同 handler 双注册:/organizations/*(运营方面,
+	// FE 34 处在用)原样保留;/orgs/*(org_admin 面,FE 25 处按契约调)按契约补齐。RBAC 在 service 层
+	// 按 claims 判,与入口路径无关,双注册不放宽任何权限。
+	mux.HandleFunc("GET /api/v1/orgs/{id}/members", h.requireAuth(h.handleListMembers))
+	mux.HandleFunc("POST /api/v1/orgs/{id}/members", h.requireAuth(h.handleOpenMember))
+	mux.HandleFunc("GET /api/v1/orgs/{id}/tiers", h.requireAuth(h.handleListTiers))
+	mux.HandleFunc("POST /api/v1/orgs/{id}/tiers", h.requireAuth(h.handleCreateTier))
+	mux.HandleFunc("GET /api/v1/orgs/{id}/balance", h.requireAuth(h.handleOrgBalance))
+	mux.HandleFunc("GET /api/v1/orgs/{id}/ledger", h.requireAuth(h.handleOrgLedger))
+	mux.HandleFunc("GET /api/v1/orgs/{id}/marketplace", h.requireAuth(h.handleOrgMarketplace)) // 模型广场(分组+模型+倍率)
+
+	// 成员模型广场 + 平台设置(33 §3.5;39号阻断-1 两组从未落地的端点)。
+	mux.HandleFunc("GET /api/v1/me/marketplace", h.requireAuth(h.handleMyMarketplace))
+	mux.HandleFunc("GET /api/v1/platform-settings", h.requireAuth(h.handleGetPlatformSettings))
+	mux.HandleFunc("PUT /api/v1/platform-settings", h.requireAuth(h.handlePutPlatformSettings)) // money_freeze 急停在此(operator)
 	mux.HandleFunc("GET /api/v1/ledger", h.requireAuth(h.handleAllLedger))                      // 全平台流水(仅运营方)
 	mux.HandleFunc("GET /api/v1/me/balance", h.requireAuth(h.handleMyBalance))                  // 成员本人额度/已用/剩余
 	mux.HandleFunc("GET /api/v1/me/ledger", h.requireAuth(h.handleMyLedger))                    // 成员到账记录(仅 to_user=本人)

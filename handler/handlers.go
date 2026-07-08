@@ -609,9 +609,12 @@ func (h *Handler) handleListMembers(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, err)
 		return
 	}
+	extras := h.svc.EnrichMemberRows(r.Context(), orgID, members) // 39号复验:列表补 tier_name+额度三列
 	views := make([]memberView, 0, len(members))
 	for _, m := range members {
-		views = append(views, toMemberView(m))
+		v := toMemberView(m)
+		v.MemberRowExtra = extras[m.ID]
+		views = append(views, v)
 	}
 	writeOK(w, r, http.StatusOK, listResp{List: views, Pagination: makePageMeta(page, size, total)})
 }

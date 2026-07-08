@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/nexusapi-platform/enterprise/adapter/newapi"
@@ -209,6 +210,76 @@ func (s *Service) ListMembers(ctx context.Context, c session.Claims, orgID int64
 		f.TeamID = &tid
 	}
 	return s.store.ListMembers(ctx, orgID, f)
+}
+
+// MemberRowExtra 成员列表行富化(39号复验:33 契约 GET /orgs/:id/members 明写"含额度/已用",
+// 原实现只回基本行致列表额度三列全"-")。指针=未开通/读失败时为 nil(FE 显示"-",不冒充 $0)。
+type MemberRowExtra struct {
+	TierName      *string `json:"tier_name,omitempty"`
+	RemainingRaw  *int64  `json:"remaining_raw,omitempty"`   // 成员 user.quota 实时真值
+	ConsumedRaw   *int64  `json:"consumed_raw,omitempty"`    // usage_ledger 报表口径
+	GrantedNetRaw *int64  `json:"granted_net_raw,omitempty"` // Σ到账 − Σ退回(applied 口径)
+}
+
+// EnrichMemberRows 批量富化成员列表行:tier 名一次查表;consumed/granted 本库聚合;
+// remaining 有界并发读 new-api(与 sumMemberQuotas 同并发口径)。**fail-open**:任一成员富化
+// 失败只置 nil 记 warn,不挂整个列表(列表可用性优先;精确值以详情/余额端点为准)。
+func (s *Service) EnrichMemberRows(ctx context.Context, orgID int64, members []*model.Member) map[int64]*MemberRowExtra {
+	out := make(map[int64]*MemberRowExtra, len(members))
+	tierName := map[int64]string{}
+	if tiers, err := s.store.ListTiers(ctx, orgID); err == nil {
+		for _, t := range tiers {
+			tierName[t.ID] = t.Name
+		}
+	} else {
+		s.log.Warn("成员列表富化:读档位失败(tier_name 置空)", "org_id", orgID, "err", err)
+	}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, balanceSumConcurrency)
+	for _, m := range members {
+		ex := &MemberRowExtra{}
+		out[m.ID] = ex
+		if m.TierID != nil {
+			if n, ok := tierName[*m.TierID]; ok {
+				ex.TierName = &n
+			}
+		}
+		if m.NewapiUserID == nil || *m.NewapiUserID == 0 {
+			continue // 未开通:三额度保持 nil
+		}
+		uid := *m.NewapiUserID
+		if c, err := s.store.SumConsumedByNewapiUser(ctx, uid); err == nil {
+			ex.ConsumedRaw = &c
+		} else {
+			s.log.Warn("成员列表富化:读已用失败", "member_id", m.ID, "err", err)
+		}
+		if g, err := s.store.SumAppliedNetByUser(ctx, uid); err == nil {
+			ex.GrantedNetRaw = &g
+		} else {
+			s.log.Warn("成员列表富化:读累计划入失败", "member_id", m.ID, "err", err)
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(memberID int64, uid int64, ex *MemberRowExtra) {
+			defer func() { // 请求路径 fan-out 必带 recover(39号阻断-2 同口径)
+				if v := recover(); v != nil {
+					s.log.Error("成员列表富化 goroutine panic(已恢复,该成员剩余置空)", "member_id", memberID, "panic", v)
+				}
+			}()
+			defer wg.Done()
+			defer func() { <-sem }()
+			if q, err := s.upstream.GetUserQuota(ctx, int(uid)); err == nil {
+				mu.Lock()
+				ex.RemainingRaw = &q
+				mu.Unlock()
+			} else {
+				s.log.Warn("成员列表富化:读剩余失败(置空)", "member_id", memberID, "err", err)
+			}
+		}(m.ID, uid, ex)
+	}
+	wg.Wait()
+	return out
 }
 
 func (s *Service) ListAllMembers(ctx context.Context, c session.Claims, f repo.MemberFilter) ([]repo.MemberOverview, int, error) {

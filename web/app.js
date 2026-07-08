@@ -1125,8 +1125,8 @@ VIEWS.members = async () => {
   const rows = (d.list || []).filter(m => m.role !== "org_admin" && m.role !== "operator").map(m => {
     const nm = m.display_name || m.login_email || ("成员#" + m.id);
     const remain = rawOf(m, "quota_raw", "remaining_raw", "remain_raw");
-    const used = rawOf(m, "used_raw", "used_quota_raw");
-    const granted = rawOf(m, "granted_raw", "total_granted_raw");
+    const used = rawOf(m, "consumed_raw", "used_raw", "used_quota_raw"); // 后端契约名 consumed_raw(39号复验)
+    const granted = rawOf(m, "granted_net_raw", "granted_raw", "total_granted_raw"); // granted_net_raw
     const off = m.status === "offboarded";
     const zero = !off && remain != null && remain <= 0;
     const acts = off
@@ -1267,8 +1267,8 @@ async function openMemberDetail(mid, name) {
   try {
     const m = await api("GET", "/members/" + mid, null);
     const remain = rawOf(m, "quota_raw", "remaining_raw", "remain_raw");
-    const used = rawOf(m, "used_raw", "used_quota_raw");
-    const granted = rawOf(m, "granted_raw", "total_granted_raw");
+    const used = rawOf(m, "consumed_raw", "used_raw", "used_quota_raw"); // 后端契约名 consumed_raw(39号复验)
+    const granted = rawOf(m, "granted_net_raw", "granted_raw", "total_granted_raw"); // granted_net_raw
     modal("成员详情 · " + name, `<table class="kvtable">
       <tr><td class="k">状态</td><td>${pill(memberStatusCN(m.status), m.status === "active" ? "ok" : "mut")}</td></tr>
       <tr><td class="k">档位</td><td>${esc(m.tier_name || "-")}</td></tr>

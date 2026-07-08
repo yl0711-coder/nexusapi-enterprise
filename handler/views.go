@@ -92,6 +92,8 @@ type memberView struct {
 	KeyMasked      *string `json:"key_masked"`
 	BootstrapState string  `json:"bootstrap_state"`
 	CreatedAt      string  `json:"created_at"`
+	// 列表富化(39号复验:契约"含额度/已用"):tier_name + 三额度,详情/单独端点不带(nil 则 omit)。
+	*service.MemberRowExtra
 }
 
 func toMemberView(m *model.Member) memberView {

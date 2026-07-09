@@ -212,13 +212,15 @@ func (s *Service) ListMembers(ctx context.Context, c session.Claims, orgID int64
 	return s.store.ListMembers(ctx, orgID, f)
 }
 
-// MemberRowExtra 成员列表行富化(39号复验:33 契约 GET /orgs/:id/members 明写"含额度/已用",
-// 原实现只回基本行致列表额度三列全"-")。指针=未开通/读失败时为 nil(FE 显示"-",不冒充 $0)。
+// MemberRowExtra 成员列表行富化(33 契约"含额度/已用")。指针=未开通/读失败时 nil(FE 显示"-",不冒充 $0)。
+// 字段名/口径=40号 P2-1/P1-1 统一契约:remaining_raw/used_raw/granted_raw,与 MemberQuotaSnapshot(详情)、
+// MemberBalanceView(/me/balance)同名同算法——已用一律 max(0, granted−remaining) 实时派生
+// (与守恒账本同源,worker 停/急停也不冻结);usage_ledger 只供明细报表,绝不再当"总已用"。
 type MemberRowExtra struct {
-	TierName      *string `json:"tier_name,omitempty"`
-	RemainingRaw  *int64  `json:"remaining_raw,omitempty"`   // 成员 user.quota 实时真值
-	ConsumedRaw   *int64  `json:"consumed_raw,omitempty"`    // usage_ledger 报表口径
-	GrantedNetRaw *int64  `json:"granted_net_raw,omitempty"` // Σ到账 − Σ退回(applied 口径)
+	TierName     *string `json:"tier_name,omitempty"`
+	RemainingRaw *int64  `json:"remaining_raw,omitempty"` // 成员 user.quota 实时真值
+	UsedRaw      *int64  `json:"used_raw,omitempty"`      // = max(0, granted−remaining) 派生
+	GrantedRaw   *int64  `json:"granted_raw,omitempty"`   // Σ净划入(ledger applied 口径)
 }
 
 // EnrichMemberRows 批量富化成员列表行:tier 名一次查表;consumed/granted 本库聚合;
@@ -249,13 +251,8 @@ func (s *Service) EnrichMemberRows(ctx context.Context, orgID int64, members []*
 			continue // 未开通:三额度保持 nil
 		}
 		uid := *m.NewapiUserID
-		if c, err := s.store.SumConsumedByNewapiUser(ctx, uid); err == nil {
-			ex.ConsumedRaw = &c
-		} else {
-			s.log.Warn("成员列表富化:读已用失败", "member_id", m.ID, "err", err)
-		}
 		if g, err := s.store.SumAppliedNetByUser(ctx, uid); err == nil {
-			ex.GrantedNetRaw = &g
+			ex.GrantedRaw = &g
 		} else {
 			s.log.Warn("成员列表富化:读累计划入失败", "member_id", m.ID, "err", err)
 		}
@@ -272,6 +269,14 @@ func (s *Service) EnrichMemberRows(ctx context.Context, orgID int64, members []*
 			if q, err := s.upstream.GetUserQuota(ctx, int(uid)); err == nil {
 				mu.Lock()
 				ex.RemainingRaw = &q
+				// P1-1 统一口径:已用 = max(0, granted−remaining) 实时派生(granted 缺失则 used 留 nil)。
+				if ex.GrantedRaw != nil {
+					u := *ex.GrantedRaw - q
+					if u < 0 {
+						u = 0
+					}
+					ex.UsedRaw = &u
+				}
 				mu.Unlock()
 			} else {
 				s.log.Warn("成员列表富化:读剩余失败(置空)", "member_id", memberID, "err", err)

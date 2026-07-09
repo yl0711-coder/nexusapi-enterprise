@@ -701,16 +701,18 @@ func (h *Handler) handleGetMember(w http.ResponseWriter, r *http.Request) {
 	// F3(28):本人视角附加档位名/可用模型清单(自助闭环:成员知道自己能调哪些模型),best-effort。
 	if c.MemberID == memberID {
 		ms, tn := h.svc.MemberTierInfo(r.Context(), c.OrgID, m)
+		// 40号 P1-2/P2-1:额度快照**拍平到顶层**(嵌入,不再嵌 quota 键)——与列表/自余额同名同层,
+		// 前端全站统一顶层读 remaining_raw/used_raw/granted_raw,契约测(P2-6)锁死。
 		writeOK(w, r, http.StatusOK, struct {
 			memberView
-			TierName string                       `json:"tier_name,omitempty"`
-			ModelSet []string                     `json:"model_set,omitempty"`
-			Quota    *service.MemberQuotaSnapshot `json:"quota,omitempty"`
+			TierName string   `json:"tier_name,omitempty"`
+			ModelSet []string `json:"model_set,omitempty"`
+			*service.MemberQuotaSnapshot
 		}{toMemberView(m), tn, ms, snap})
 		return
 	}
 	writeOK(w, r, http.StatusOK, struct {
 		memberView
-		Quota *service.MemberQuotaSnapshot `json:"quota,omitempty"`
+		*service.MemberQuotaSnapshot
 	}{toMemberView(m), snap})
 }

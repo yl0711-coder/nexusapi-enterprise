@@ -55,6 +55,14 @@ jobs:
         # (GZ-01 涉钱回归保护;此前 GHA newapi 用 SQLite 致扣费段被 if newapiSQLDSN=="" 整段跳过)。
         # compose 自带 depends_on(mysql healthy)解决启动顺序,tmpfs 一次性不落盘,本地已验证全通过。
         run: docker compose -f test/docker-compose.integration.yml up --build --abort-on-container-exit --exit-code-from tests
+      - name: 集成防假绿断言(40号 P2-6:集成用例必须真跑,env 缺失整栈 SKIP 的"裸绿"直接 fail)
+        run: |
+          n=$(docker compose -f test/docker-compose.integration.yml logs tests | grep -cE -- '--- PASS: TestIntegration_' || true)
+          echo "TestIntegration PASS 数: $n"
+          if [ "$n" -lt 30 ]; then
+            echo "::error::集成用例 PASS=$n(<30),疑似 NEXUS_IT_* 未生效整栈 SKIP 假绿——不放行" >&2
+            exit 1
+          fi
 
   image:
     needs: test

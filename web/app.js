@@ -1124,9 +1124,9 @@ VIEWS.members = async () => {
   // 管理类账号(运营方/组织管理员)不进"成员"列表(M7);只列 API 使用成员。
   const rows = (d.list || []).filter(m => m.role !== "org_admin" && m.role !== "operator").map(m => {
     const nm = m.display_name || m.login_email || ("成员#" + m.id);
-    const remain = rawOf(m, "quota_raw", "remaining_raw", "remain_raw");
-    const used = rawOf(m, "consumed_raw", "used_raw", "used_quota_raw"); // 后端契约名 consumed_raw(39号复验)
-    const granted = rawOf(m, "granted_net_raw", "granted_raw", "total_granted_raw"); // granted_net_raw
+    const remain = rawOf(m, "remaining_raw"); // 40号 P2-1 统一契约名(单一名,契约测锁死)
+    const used = rawOf(m, "used_raw");        // 已用 = max(0, granted−remaining) 实时派生(P1-1 单一口径)
+    const granted = rawOf(m, "granted_raw");
     const off = m.status === "offboarded";
     const zero = !off && remain != null && remain <= 0;
     const acts = off
@@ -1266,9 +1266,9 @@ function openMemberMore(mid, name, curName, curTid) {
 async function openMemberDetail(mid, name) {
   try {
     const m = await api("GET", "/members/" + mid, null);
-    const remain = rawOf(m, "quota_raw", "remaining_raw", "remain_raw");
-    const used = rawOf(m, "consumed_raw", "used_raw", "used_quota_raw"); // 后端契约名 consumed_raw(39号复验)
-    const granted = rawOf(m, "granted_net_raw", "granted_raw", "total_granted_raw"); // granted_net_raw
+    const remain = rawOf(m, "remaining_raw"); // 40号 P2-1 统一契约名(单一名,契约测锁死)
+    const used = rawOf(m, "used_raw");        // 已用 = max(0, granted−remaining) 实时派生(P1-1 单一口径)
+    const granted = rawOf(m, "granted_raw");
     modal("成员详情 · " + name, `<table class="kvtable">
       <tr><td class="k">状态</td><td>${pill(memberStatusCN(m.status), m.status === "active" ? "ok" : "mut")}</td></tr>
       <tr><td class="k">档位</td><td>${esc(m.tier_name || "-")}</td></tr>
@@ -1653,8 +1653,8 @@ VIEWS.billing = async () => {
   let mlist = (!bal.__err && (bal.members || bal.member_quotas)) || null;
   if (!mlist) { try { mlist = (await api("GET", "/orgs/" + id + "/members?page=1&page_size=50", null)).list || []; } catch (e) { mlist = []; } }
   const mrows = (mlist || []).filter(m => m.role !== "org_admin" && m.role !== "operator").map(m => {
-    const remain = rawOf(m, "quota_raw", "remaining_raw", "remain_raw");
-    const used = rawOf(m, "used_raw", "used_quota_raw");
+    const remain = rawOf(m, "remaining_raw"); // 40号 P2-1/P2-2:统一契约名
+    const used = rawOf(m, "used_raw");
     const nm = m.display_name || m.name || m.login_email || ("成员#" + (m.member_id || m.id));
     return `<tr><td><span class="cell-clip" title="${esc(nm)}">${esc(nm)}</span></td>
       <td>${pill(memberStatusCN(m.status), m.status === "active" ? "ok" : "mut")}</td>
@@ -1745,9 +1745,9 @@ VIEWS.mytokens = async () => {
   const atCap = limit > 0 && total >= limit;
   const rows = list.map(t => {
     const nm = t.name || "-";
-    const quota = rawOf(t, "quota_raw", "limit_raw");
-    const remain = rawOf(t, "remain_raw", "remaining_raw", "remain_quota_raw");
-    const usedP = rawOf(t, "period_used_raw", "used_raw", "used_quota_raw");
+    const quota = rawOf(t, "quota_raw");   // 令牌维度契约名(MyTokenView,40号 P2-1 同批清多名兜底)
+    const remain = rawOf(t, "remain_raw");
+    const usedP = rawOf(t, "period_used_raw");
     const on = !(t.status === "disabled" || t.status === 2 || t.enabled === false);
     return `<tr>
       <td><span class="cell-clip" title="${esc(nm)}">${esc(nm)}</span></td>
@@ -1777,7 +1777,7 @@ function goTokPage(p) { S.tokPage = Math.max(1, p); renderView(); }
 // 令牌表单(建/编辑共用):分组下拉只列被授权分组(GET /me/marketplace);编辑不含名称与 Key(PATCH 契约仅 分组/额度/IP)。
 function tokenFormHTML(p, t) {
   t = t || {};
-  const q = rawOf(t, "quota_raw", "limit_raw");
+  const q = rawOf(t, "quota_raw"); // 令牌维度契约名
   const gopts = (S.myGroups || []).map(g => `<option value="${esc(g.group)}"${g.group === (t.group || "") ? " selected" : ""}>${esc(g.group)}${g.ratio != null ? `(倍率 ${esc(String(g.ratio))})` : ""}</option>`).join("");
   return `${t.id ? "" : `<div class="fld"><label>令牌名</label><input id="${p}_n" placeholder="my-dev-key"></div>`}
     <div class="fld"><label>分组(仅列你被授权的分组)</label><select id="${p}_g">${gopts || '<option value="">(暂无被授权分组,请联系管理员配置档位授权)</option>'}</select></div>
@@ -1845,9 +1845,9 @@ VIEWS.mybalance = async () => {
     api("GET", "/me/balance", null).catch(() => ({ __err: true })),
     api("GET", "/me/ledger?page=" + page + "&page_size=50", null).catch(() => ({ list: [], pagination: {} })),
   ]);
-  const remain = bal.__err ? null : rawOf(bal, "quota_raw", "remaining_raw", "remain_raw");
-  const used = bal.__err ? null : rawOf(bal, "consumed_raw", "used_raw", "used_quota_raw"); // 后端契约名 consumed_raw(39号P2-8)
-  const grantedRaw = bal.__err ? null : rawOf(bal, "granted_net_raw", "granted_raw", "total_granted_raw"); // 后端契约名 granted_net_raw
+  const remain = bal.__err ? null : rawOf(bal, "remaining_raw"); // 40号 P2-1 统一契约名
+  const used = bal.__err ? null : rawOf(bal, "used_raw");
+  const grantedRaw = bal.__err ? null : rawOf(bal, "granted_raw");
   const granted = grantedRaw != null ? grantedRaw : ((remain != null && used != null) ? remain + used : null);
   const usedUp = remain != null && remain <= 0;
   const bar = usedUp ? `<div class="note" style="background:var(--badbg);border-color:#fecaca;color:#7f1d1d;margin:0 0 14px"><b>额度已用完,请联系管理员。</b>额度用完后你的所有令牌调用都会被拒绝;管理员追加划拨后即恢复。</div>` : "";

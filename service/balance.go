@@ -142,13 +142,16 @@ func (s *Service) sumMemberQuotas(ctx context.Context, members []repo.MemberBala
 const memberExhaustedNotice = "额度已用完,请联系管理员"
 
 // MemberBalanceView 成员本人额度视图(GET /me/balance;29-PRD §4.7:额度/已用/剩余)。
+// 字段名/口径=40号 P2-1/P1-1 统一契约(与 MemberRowExtra/MemberQuotaSnapshot 同名同算法):
+// used_raw = max(0, granted−remaining) 实时派生——绝不再用 usage_ledger 当"总已用"
+// (结算滞后+worker 停/急停时偏差无上界,曾致成员自己账单页"已用$0"对成员撒谎)。
 type MemberBalanceView struct {
-	Provisioned   bool   `json:"provisioned"`               // 是否已开通服务账号(false=下列数值无意义)
-	RemainingRaw  int64  `json:"remaining_raw"`             // 剩余 = 成员 user.quota 实时真值(诚实口径,可能短暂略负)
-	ConsumedRaw   int64  `json:"consumed_raw"`              // 已用 = usage_ledger 按成员 user 累计(报表口径)
-	GrantedNetRaw int64  `json:"granted_net_raw"`           // 累计净划入 = Σ到账 − Σ退回(分配账本 applied 口径)
-	Exhausted     bool   `json:"exhausted"`                 // 额度已用完(remaining<=0)
-	Notice        string `json:"notice,omitempty"`          // 用尽时的对客提示文案
+	Provisioned  bool   `json:"provisioned"`        // 是否已开通服务账号(false=下列数值无意义)
+	RemainingRaw int64  `json:"remaining_raw"`      // 剩余 = 成员 user.quota 实时真值(诚实口径,可能短暂略负)
+	UsedRaw      int64  `json:"used_raw"`           // 已用 = max(0, granted−remaining) 实时派生
+	GrantedRaw   int64  `json:"granted_raw"`        // 累计净划入 = Σ到账 − Σ退回(分配账本 applied 口径)
+	Exhausted    bool   `json:"exhausted"`          // 额度已用完(remaining<=0)
+	Notice       string `json:"notice,omitempty"`   // 用尽时的对客提示文案
 }
 
 // MyBalance 成员看自己的额度/已用/剩余(镜像 new-api 普通用户可见性,31-ADR §9)。
@@ -174,16 +177,15 @@ func (s *Service) MyBalance(ctx context.Context, c session.Claims) (*MemberBalan
 		return nil, mapUpstream(gerr)
 	}
 	v.RemainingRaw = remaining
-	consumed, cerr := s.store.SumConsumedByNewapiUser(ctx, *m.NewapiUserID)
-	if cerr != nil {
-		return nil, apperr.Internal("").WithCause(cerr)
-	}
-	v.ConsumedRaw = consumed
 	net, nerr := s.store.SumAppliedNetByUser(ctx, *m.NewapiUserID)
 	if nerr != nil {
 		return nil, apperr.Internal("").WithCause(nerr)
 	}
-	v.GrantedNetRaw = net
+	v.GrantedRaw = net
+	// P1-1 统一口径:已用 = max(0, granted−remaining) 实时派生(与详情/列表同算法,同屏三列恒自洽)。
+	if u := net - remaining; u > 0 {
+		v.UsedRaw = u
+	}
 	v.Exhausted, v.Notice = memberExhaustedState(remaining)
 	return v, nil
 }

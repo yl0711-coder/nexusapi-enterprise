@@ -711,8 +711,12 @@ func (h *Handler) handleGetMember(w http.ResponseWriter, r *http.Request) {
 		}{toMemberView(m), tn, ms, snap})
 		return
 	}
+	// org_admin/团队负责人视角:档位名也是详情五项之一(40号 P1-2 验收:档位/划入/已用/剩余/令牌数),
+	// 一并回 tier_name(ModelSet 是"本人自助知道能调哪些模型"的语义,管理视角不附)。
+	_, tn := h.svc.MemberTierInfo(r.Context(), c.OrgID, m)
 	writeOK(w, r, http.StatusOK, struct {
 		memberView
+		TierName string `json:"tier_name,omitempty"`
 		*service.MemberQuotaSnapshot
-	}{toMemberView(m), snap})
+	}{toMemberView(m), tn, snap})
 }

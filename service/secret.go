@@ -5,7 +5,9 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -58,9 +60,13 @@ func maskKey(plaintext string) string {
 }
 
 // randEmailSuffix 生成 8 位随机后缀(自动派生 login_email 用)。
+// 40号 P3-3:rand.Read 显式检查(与本文件其余 rand.Read 口径一致;虽非密钥场景,
+// 但吞错写法易被复制到真密钥场景)。失败回退时间戳后缀(仅邮箱占位,唯一性由 DB 约束兜)。
 func randEmailSuffix() string {
 	b := make([]byte, 6)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
 	return strings.ToLower(base64.RawURLEncoding.EncodeToString(b))
 }
 

@@ -268,6 +268,11 @@ func (s *Service) GrantMemberQuota(ctx context.Context, c session.Claims, orgID,
 	if amountRaw <= 0 {
 		return apperr.InvalidParam("划账金额必须为正")
 	}
+	// 40号 P3-1:上限校验前置(复用 maxAdjustQuota,防 int64-max 使后续 cur+amountRaw 溢出为负绕过额度帽;
+	// 当前虽被金库 int32 上限兜住不可利用,仍显式堵死)。
+	if amountRaw > maxAdjustQuota {
+		return apperr.InvalidParam(fmt.Sprintf("划账金额超过单次上限(%d raw)", maxAdjustQuota))
+	}
 	m, err := s.store.GetMember(ctx, orgID, memberID)
 	if errors.Is(err, repo.ErrNotFound) {
 		return apperr.NotFound("成员不存在")

@@ -53,6 +53,15 @@ func (s *Service) SetMemberStatus(ctx context.Context, c session.Claims, orgID, 
 	if err := s.store.BumpMemberSessionEpoch(ctx, orgID, memberID); err != nil {
 		return apperr.Internal("").WithCause(err)
 	}
+	// 40号 P2-4:被停用者若是运营方,主动吊销其全部在途支持会话(epoch 踢线不覆盖支持态 token,
+	// guard 回查是第一道,这里是显式清场;fail-open 只告警——guard 回查兜底)。
+	if !enabled && m.Role == string(session.RoleOperator) {
+		if n, rerr := s.store.RevokeSupportSessionsByActor(ctx, fmt.Sprintf("operator:%d", memberID)); rerr != nil {
+			s.log.Error("停用运营方:吊销其支持会话失败(guard 回查仍会拦)", "member_id", memberID, "err", rerr)
+		} else if n > 0 {
+			s.log.Warn("停用运营方:已吊销其在途支持会话", "member_id", memberID, "count", n)
+		}
+	}
 	s.audit(ctx, c, orgID, "set_member_status", "member", &memberID, map[string]any{"enabled": enabled})
 	return nil
 }
@@ -105,6 +114,14 @@ func (s *Service) OffboardMember(ctx context.Context, c session.Claims, orgID, m
 		}
 		if err := s.store.BumpMemberSessionEpoch(ctx, orgID, memberID); err != nil {
 			s.log.Error("离职:踢线失败(旧会话最长 12h 自然失效)", "member_id", memberID, "err", err)
+		}
+		// 40号 P2-4:离职者若是运营方,吊销其全部在途支持会话(与 SetMemberStatus 停用同口径)。
+		if m.Role == string(session.RoleOperator) {
+			if n, rerr := s.store.RevokeSupportSessionsByActor(ctx, fmt.Sprintf("operator:%d", memberID)); rerr != nil {
+				s.log.Error("离职运营方:吊销其支持会话失败(guard 回查仍会拦)", "member_id", memberID, "err", rerr)
+			} else if n > 0 {
+				s.log.Warn("离职运营方:已吊销其在途支持会话", "member_id", memberID, "count", n)
+			}
 		}
 	}
 

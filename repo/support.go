@@ -36,6 +36,30 @@ func (s *Store) GetSupportSession(ctx context.Context, id int64) (*model.Support
 	return &ss, nil
 }
 
+// RevokeSupportSessionsByActor 吊销某运营方的全部 active 支持会话(40号 P2-4:
+// 停用/离职运营方时其在途支持 token 必须即刻失效,不等 TTL)。返回吊销条数。
+func (s *Store) RevokeSupportSessionsByActor(ctx context.Context, actor string) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE support_session SET state = 'revoked' WHERE actor = ? AND state = 'active'`, actor)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// GetMemberStatusEpochByID 按成员 id 全局轻量查 status+session_epoch(40号 P2-4:支持态 guard
+// 回查运营方本人用——支持态 claims 的 OrgID 是目标 org,按它查运营方必 404,故全局查)。
+func (s *Store) GetMemberStatusEpochByID(ctx context.Context, memberID int64) (status string, epoch int64, err error) {
+	err = s.db.QueryRowContext(ctx,
+		`SELECT status, session_epoch FROM member WHERE id = ? AND deleted_at IS NULL`, memberID).
+		Scan(&status, &epoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", 0, ErrNotFound
+	}
+	return status, epoch, err
+}
+
 // RevokeSupportSession 吊销支持会话(运营方主动结束 / 客户撤销)。
 func (s *Store) RevokeSupportSession(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx,

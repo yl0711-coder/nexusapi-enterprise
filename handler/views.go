@@ -65,7 +65,6 @@ type tierView struct {
 	AmountRaw    *int64           `json:"amount_raw"`             // 架构B:额度值(raw;FE 用 quota_per_unit 换算美元)
 	ResetPeriod  *string          `json:"reset_period,omitempty"` // 架构B:daily|weekly|monthly
 	Visibility   string           `json:"visibility"`             // 架构B:all | assigned
-	MonthlyLimit *int64           `json:"monthly_limit_quota"`    // Deprecated: 架构A 遗留
 	NewapiGroup  *string          `json:"newapi_group"`           // 计费分组(T17-1;nil=回落组织默认/default)
 	IsDefault    bool             `json:"is_default"`
 	Status       string           `json:"status"`
@@ -75,7 +74,7 @@ type tierView struct {
 func toTierView(t *model.Tier) tierView {
 	return tierView{ID: t.ID, OrgID: t.OrgID, Name: t.Name, ModelSet: t.ModelSet, ModelCap: t.ModelCap,
 		QuotaType: t.QuotaType, AmountRaw: t.AmountRaw, ResetPeriod: t.ResetPeriod, Visibility: t.Visibility,
-		MonthlyLimit: t.MonthlyLimit, NewapiGroup: t.NewapiGroup, IsDefault: t.IsDefault, Status: t.Status}
+		NewapiGroup: t.NewapiGroup, IsDefault: t.IsDefault, Status: t.Status}
 }
 
 // memberView 脱敏成员视图:key 只回显 key_masked,绝不含 access_token/password。

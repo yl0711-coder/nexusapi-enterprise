@@ -1293,15 +1293,15 @@ async function doChangeTeam(mid) {
 }
 // 建成员(33 §3.5 POST /orgs/:id/members):tier_id 必填=初始额度;金库不足整单失败(409 如实展示,不半成功)。
 async function openAddMember() {
-  let tiers = [], teams = [];
-  try { tiers = normList(await api("GET", "/orgs/" + S.orgId + "/tiers", null)); } catch (e) {}
+  let tiers = [], teams = [], tiersErr = false;
+  try { tiers = normList(await api("GET", "/orgs/" + S.orgId + "/tiers", null)); } catch (e) { tiersErr = true; toast("档位加载失败:" + e.message); }
   try { teams = (await api("GET", "/organizations/" + S.orgId + "/teams", null)) || []; } catch (e) {}
   const opts = tiers.map(t => `<option value="${t.id}">${esc(t.name)} · ${esc(tierQuotaLabel(t))}${t.is_default ? "(默认)" : ""}</option>`).join("");
   const topts = (teams || []).filter(t => t.status !== "archived").map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join("");
   modal("开通成员", `<div class="fld"><label>姓名</label><input id="am_n" placeholder="钱晨"></div>
     <div class="fld"><label>登录邮箱(可选)</label><input id="am_e" placeholder="留空则自动生成"></div>
     <div class="fld"><label>团队(可选)</label><select id="am_team"><option value="">未分组</option>${topts}</select></div>
-    <div class="fld"><label>初始额度档位(必选)</label><select id="am_t">${opts || `<option value="">(请先到「额度档位」建档位)</option>`}</select></div>
+    <div class="fld"><label>初始额度档位(必选)</label><select id="am_t">${opts || `<option value="">${tiersErr ? "(档位加载失败,请关闭本窗重试)" : "(请先到「额度档位」建档位)"}</option>`}</select></div>
     <div class="note">开通即从组织金库为其划拨初始额度(所选档位额度);<b>金库余额不足会开通失败</b>,请先联系运营方充值。成员登录后在「我的令牌」自助创建 API 令牌。登录邮箱与初始密码开通后回显一次。</div>
     <div class="errline" id="am_err"></div>`,
     `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doAddMember()">开通成员</button>`);
@@ -1380,9 +1380,10 @@ async function doOffboardConfirmed(mid) {
 }
 // 恢复入职(33 §3.5 POST /members/:id/restore {tier_id}):跟新建一样重新分配额度(离职已退额,不自动恢复)。
 async function openRestore(mid, name) {
-  let tiers = []; try { tiers = normList(await api("GET", "/orgs/" + S.orgId + "/tiers", null)); } catch (e) {}
+  let tiers = [], tiersErr = false;
+  try { tiers = normList(await api("GET", "/orgs/" + S.orgId + "/tiers", null)); } catch (e) { tiersErr = true; toast("档位加载失败:" + e.message); }
   const opts = tiers.map(t => `<option value="${t.id}">${esc(t.name)} · ${esc(tierQuotaLabel(t))}</option>`).join("");
-  modal("恢复入职 · " + name, `<div class="fld"><label>额度档位(必选)</label><select id="rs_t">${opts || `<option value="">(请先到「额度档位」建档位)</option>`}</select></div>
+  modal("恢复入职 · " + name, `<div class="fld"><label>额度档位(必选)</label><select id="rs_t">${opts || `<option value="">${tiersErr ? "(档位加载失败,请关闭本窗重试)" : "(请先到「额度档位」建档位)"}</option>`}</select></div>
     <div class="note">离职时额度已退回金库;恢复 = 跟新建一样,按所选档位从金库<b>重新划拨</b>额度。金库余额不足会失败。</div>
     <div class="errline" id="rs_err"></div>`,
     `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doRestore(${mid})">确认恢复</button>`);
@@ -1477,7 +1478,8 @@ VIEWS.tiers = async () => {
   const d = normList(await api("GET", "/orgs/" + S.orgId + "/tiers", null));
   S.tiersCache = d; // 供编辑/授权弹窗回填
   // 分组下拉数据源 = 组织模型广场(GET /orgs/:id/marketplace,分组+倍率;33 §12 增补②)。
-  try { S.orgGroups = marketGroups(await api("GET", "/orgs/" + S.orgId + "/marketplace", null)); } catch (e) { S.orgGroups = []; }
+  S.orgGroupsErr = false;
+  try { S.orgGroups = marketGroups(await api("GET", "/orgs/" + S.orgId + "/marketplace", null)); } catch (e) { S.orgGroups = []; S.orgGroupsErr = true; toast("分组加载失败:" + e.message); }
   const rows = d.map(t => {
     const sub = t.quota_type === "subscription";
     return `<tr><td>${esc(t.name)}${t.is_default ? ' <span class="tag">默认</span>' : ""}</td>
@@ -1504,7 +1506,7 @@ function tierFormHTML(p, t) {
   t = t || {};
   const sub = t.quota_type === "subscription";
   const amtRaw = rawOf(t, "amount_raw");
-  const gopts = ['<option value="">(请选择分组)</option>'].concat(
+  const gopts = [`<option value="">${S.orgGroupsErr ? "(分组加载失败,请刷新页面重试)" : "(请选择分组)"}</option>`].concat(
     (S.orgGroups || []).map(g => `<option value="${esc(g.group)}"${g.group === (t.group || "") ? " selected" : ""}>${esc(g.group)}${g.ratio != null ? `(倍率 ${esc(String(g.ratio))})` : ""}</option>`)).join("");
   return `<div class="fld"><label>档位名称</label><input id="${p}_n" value="${esc(t.name || "")}" placeholder="标准档"></div>
     <div class="fld"><label>额度型(二选一,无“无上限”)</label><select id="${p}_qt" onchange="document.getElementById('${p}_rpwrap').style.display=this.value==='subscription'?'':'none'">
@@ -1731,9 +1733,10 @@ function marketGroups(d) {
 // 端点:GET/POST /me/tokens、PATCH/DELETE /me/tokens/:id、POST /me/tokens/:id/key:reveal;分组下拉=GET /me/marketplace。
 VIEWS.mytokens = async () => {
   const page = S.tokPage || 1;
+  S.myGroupsErr = false;
   const [d, mk] = await Promise.all([
     api("GET", "/me/tokens?page=" + page + "&page_size=50", null),
-    api("GET", "/me/marketplace", null).catch(() => null),
+    api("GET", "/me/marketplace", null).catch((e) => { S.myGroupsErr = true; toast("分组加载失败:" + (e && e.message || "")); return null; }),
   ]);
   S.myGroups = marketGroups(mk);
   const list = d.list || d.items || (Array.isArray(d) ? d : []);
@@ -1780,7 +1783,7 @@ function tokenFormHTML(p, t) {
   const q = rawOf(t, "quota_raw"); // 令牌维度契约名
   const gopts = (S.myGroups || []).map(g => `<option value="${esc(g.group)}"${g.group === (t.group || "") ? " selected" : ""}>${esc(g.group)}${g.ratio != null ? `(倍率 ${esc(String(g.ratio))})` : ""}</option>`).join("");
   return `${t.id ? "" : `<div class="fld"><label>令牌名</label><input id="${p}_n" placeholder="my-dev-key"></div>`}
-    <div class="fld"><label>分组(仅列你被授权的分组)</label><select id="${p}_g">${gopts || '<option value="">(暂无被授权分组,请联系管理员配置档位授权)</option>'}</select></div>
+    <div class="fld"><label>分组(仅列你被授权的分组)</label><select id="${p}_g">${gopts || `<option value="">${S.myGroupsErr ? "(分组加载失败,请刷新重试)" : "(暂无被授权分组,请联系管理员配置档位授权)"}</option>`}</select></div>
     <div class="fld"><label>令牌额度(美元,可选;留空=不单独限额,仅受你的成员总额度约束)</label><input id="${p}_q" type="number" min="0" step="0.01" value="${q != null ? (q / (S.qpu || 500000)) : ""}"></div>
     <div class="fld"><label>IP 白名单(可选,逗号分隔;留空=不限)</label><input id="${p}_ip" value="${esc(t.allow_ips || "")}" placeholder="1.2.3.4,10.0.0.0/8"></div>
     <div class="errline" id="${p}_err"></div>`;

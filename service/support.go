@@ -143,6 +143,12 @@ func (s *Service) CheckSupportGuard(ctx context.Context, c session.Claims, metho
 	if ss.OrgID != c.OrgID {
 		return apperr.NotFound("资源不存在") // 跨 org 隔离
 	}
+	// 40号 P2-4:支持态曾是 epoch 踢线的唯一缺口——回查运营方本人(c.MemberID=运营方真实 id,全局查)
+	// status==active 且 epoch 匹配;运营方被禁用/改密/离职后,其在途支持 token 读写全部即刻失效,不等 TTL。
+	st, ep, aerr := s.store.GetMemberStatusEpochByID(ctx, c.MemberID)
+	if aerr != nil || st != model.MemberStatusActive || ep != int64(c.Epoch) {
+		return apperr.Forbidden("支持会话已失效(运营方账号状态已变更),请重新进入")
+	}
 	if method == http.MethodGet || method == http.MethodHead {
 		return nil
 	}

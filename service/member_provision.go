@@ -150,11 +150,29 @@ func (s *Service) WithMemberCred(ctx context.Context, memberID int64, fn func(cr
 	if perr != nil || alive {
 		return ferr // 凭证没问题(或探活失败),原错误如实上抛
 	}
-	pw, pderr := s.keyring.DecryptString(string(c.PasswordEnc))
+	// 40号 P2-5:自愈段 per-member 锁 + 锁内 probe-first(照 EnsureFreshCred 口径)——
+	// 同成员并发 401 时只旋转一次;后进者锁内重读凭证发现已被别人刷好,直接复用不再旋转
+	// (GET /api/user/token 一调即旋转,无锁并发自愈会互相作废 token 连环 401)。
+	release, lerr := s.quotaLocker.Acquire(ctx, memberCredLockKey(memberID))
+	if lerr != nil {
+		return apperr.Internal("").WithCause(lerr)
+	}
+	defer release()
+	c2, ok2, rerr2 := s.store.GetMemberServiceCred(ctx, memberID)
+	if rerr2 != nil || !ok2 {
+		return ferr // 凭证行异常:原错误如实上抛
+	}
+	if at2, derr2 := s.keyring.DecryptString(string(c2.AccessTokenEnc)); derr2 == nil {
+		fresh := newapi.MemberCred{NewapiUserID: int(c2.NewapiUserID), AccessToken: at2}
+		if alive2, perr2 := s.upstream.ProbeAccessToken(ctx, fresh); perr2 == nil && alive2 {
+			return fn(fresh) // 等锁期间别人已刷好:复用,不再旋转
+		}
+	}
+	pw, pderr := s.keyring.DecryptString(string(c2.PasswordEnc))
 	if pderr != nil {
 		return apperr.Internal("").WithCause(pderr)
 	}
-	newAT, rerr := s.upstream.RefreshAccessToken(ctx, newapi.BootstrapInput{Username: c.NewapiUsername, Password: pw})
+	newAT, rerr := s.upstream.RefreshAccessToken(ctx, newapi.BootstrapInput{Username: c2.NewapiUsername, Password: pw})
 	if rerr != nil {
 		return mapUpstream(rerr)
 	}
@@ -169,6 +187,9 @@ func (s *Service) WithMemberCred(ctx context.Context, memberID int64, fn func(cr
 	cred.AccessToken = newAT
 	return fn(cred)
 }
+
+// memberCredLockKey 成员服务账号凭证旋转的 per-member 串行锁键(40号 P2-5)。
+func memberCredLockKey(memberID int64) string { return fmt.Sprintf("member-cred:%d", memberID) }
 
 // MemberSubHit 上线闸命中项:仍挂 active 订阅的成员(应为空集)。
 type MemberSubHit struct {

@@ -70,14 +70,23 @@ type PlatformSettingsView struct {
 	MemberTokenLimit        int64 `json:"member_token_limit"`         // 成员令牌数上限(默认 2)
 	MemberQuotaCapRaw       int64 `json:"member_quota_cap_raw"`       // 成员额度帽(默认 5e8=$1000,int32 护栏)
 	TreasuryLowWatermarkRaw int64 `json:"treasury_low_watermark_raw"` // 金库低预警阈值(<=0=未启用)
+	// 品牌配置(42号样式-3:品牌属运营配置,后台可改不经代码发版;空=未配置,前端优雅降级不露占位)。
+	BrandProductName  string `json:"brand_product_name"`
+	BrandCompanyName  string `json:"brand_company_name"`
+	BrandSupportEmail string `json:"brand_support_email"`
+	BrandDocURL       string `json:"brand_doc_url"`
 }
 
 // UpdatePlatformSettingsInput PUT 入参(指针=只改给了的字段,部分更新)。
 type UpdatePlatformSettingsInput struct {
-	MoneyFreeze             *bool  `json:"money_freeze"`
-	MemberTokenLimit        *int64 `json:"member_token_limit"`
-	MemberQuotaCapRaw       *int64 `json:"member_quota_cap_raw"`
-	TreasuryLowWatermarkRaw *int64 `json:"treasury_low_watermark_raw"`
+	MoneyFreeze             *bool   `json:"money_freeze"`
+	MemberTokenLimit        *int64  `json:"member_token_limit"`
+	MemberQuotaCapRaw       *int64  `json:"member_quota_cap_raw"`
+	TreasuryLowWatermarkRaw *int64  `json:"treasury_low_watermark_raw"`
+	BrandProductName        *string `json:"brand_product_name"`
+	BrandCompanyName        *string `json:"brand_company_name"`
+	BrandSupportEmail       *string `json:"brand_support_email"`
+	BrandDocURL             *string `json:"brand_doc_url"`
 }
 
 // GetPlatformSettings 平台配置读(operator;33 §3.5 契约列 operator 下,FE 其他角色 403 后回退 /me 的 quota_per_unit)。
@@ -108,7 +117,30 @@ func (s *Service) readPlatformSettings(ctx context.Context) (*PlatformSettingsVi
 	if v.TreasuryLowWatermarkRaw, err = s.store.GetSettingInt64(ctx, treasuryLowWatermarkKey, 0); err != nil {
 		return nil, apperr.Internal("").WithCause(err)
 	}
+	v.BrandProductName, _ = s.store.GetSetting(ctx, "brand_product_name", "")
+	v.BrandCompanyName, _ = s.store.GetSetting(ctx, "brand_company_name", "")
+	v.BrandSupportEmail, _ = s.store.GetSetting(ctx, "brand_support_email", "")
+	v.BrandDocURL, _ = s.store.GetSetting(ctx, "brand_doc_url", "")
 	return v, nil
+}
+
+// BrandingView 公开品牌信息(免鉴权只读,42号样式-3:登录页未登录态就要显示产品名)。
+// 只含非敏感展示字段;任一未配置即为空串,前端优雅降级(绝不露占位邮箱)。
+type BrandingView struct {
+	ProductName  string `json:"product_name"`
+	CompanyName  string `json:"company_name"`
+	SupportEmail string `json:"support_email"`
+	DocURL       string `json:"doc_url"`
+}
+
+// GetBranding 公开品牌读取(无 RBAC:登录页用;字段全为运营自填展示信息,无敏感内容)。
+func (s *Service) GetBranding(ctx context.Context) *BrandingView {
+	v := &BrandingView{}
+	v.ProductName, _ = s.store.GetSetting(ctx, "brand_product_name", "")
+	v.CompanyName, _ = s.store.GetSetting(ctx, "brand_company_name", "")
+	v.SupportEmail, _ = s.store.GetSetting(ctx, "brand_support_email", "")
+	v.DocURL, _ = s.store.GetSetting(ctx, "brand_doc_url", "")
+	return v
 }
 
 // UpdatePlatformSettings 平台配置写(operator;部分更新;quota_per_unit 只读不接受)。
@@ -149,6 +181,27 @@ func (s *Service) UpdatePlatformSettings(ctx context.Context, c session.Claims, 
 			return nil, apperr.Internal("").WithCause(err)
 		}
 		changed["treasury_low_watermark_raw"] = *in.TreasuryLowWatermarkRaw
+	}
+	// 品牌四键(纯展示配置,checkText 防注入长度;空串=清空该项,前端隐藏对应入口)。
+	for _, b := range []struct {
+		val *string
+		key string
+	}{
+		{in.BrandProductName, "brand_product_name"},
+		{in.BrandCompanyName, "brand_company_name"},
+		{in.BrandSupportEmail, "brand_support_email"},
+		{in.BrandDocURL, "brand_doc_url"},
+	} {
+		if b.val == nil {
+			continue
+		}
+		if len(*b.val) > 191 {
+			return nil, apperr.InvalidParam(b.key + " 过长(≤191)")
+		}
+		if err := s.store.SetSetting(ctx, b.key, *b.val, actor); err != nil {
+			return nil, apperr.Internal("").WithCause(err)
+		}
+		changed[b.key] = *b.val
 	}
 	if in.MoneyFreeze != nil {
 		val := "false"

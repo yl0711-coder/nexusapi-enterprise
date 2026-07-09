@@ -23,6 +23,9 @@ const (
 	MemberStatusExpired      = "expired"
 	MemberStatusPending      = "pending"
 	MemberStatusProvisioning = "provisioning"
+	// MemberStatusProvisionFailed 开通失败/隔离终态(42号 P1 修法③):不再冒充 provisioning 污染列表;
+	// 可走 POST /members/{id}/provision:retry 自助救活,或被同邮箱重开自动墓碑让位。
+	MemberStatusProvisionFailed = "provision_failed"
 )
 
 // bootstrap_state(10 §2.5 + 架构B 0030)。

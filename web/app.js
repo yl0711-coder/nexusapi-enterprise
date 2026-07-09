@@ -2,10 +2,24 @@
    设计沿用原型 app.css;数据全来自真实 API(非 mock)。按 /me 的角色拼装菜单与视图。 */
 "use strict";
 const S = { token: localStorage.getItem("nx_token") || "", me: null, role: "", view: "", org: null, orgId: 0, win: 168, gran: "day", qpu: 500000, psettings: null };
-// 品牌/支持集中常量(运营定稿前用占位;company/doc 含"待定"时前端优雅降级不露占位)。改这一处全局生效。
-const BRAND = { product: "企业管理台", company: "(公司名待定)", support: "support@example.com", doc: "(文档地址待定)" };
-const brandCompany = () => BRAND.company.includes("待定") ? "" : BRAND.company;
-const brandDoc = () => BRAND.doc.includes("待定") ? "" : BRAND.doc;
+// 品牌(42号样式-3:运营配置,后台可改不经代码发版)。boot 时从公开端点 GET /branding 拉取;
+// 未配置的字段一律优雅降级:产品名回退中性默认,公司/客服/文档为空则隐藏对应入口——绝不露占位邮箱。
+const BRAND = { product: "企业管理台", company: "", support: "", doc: "" };
+const brandCompany = () => BRAND.company || "";
+const brandDoc = () => BRAND.doc || "";
+async function loadBranding() {
+  try {
+    const b = await api("GET", "/branding", null);
+    if (b) {
+      if (b.product_name) BRAND.product = b.product_name;
+      BRAND.company = b.company_name || "";
+      BRAND.support = b.support_email || "";
+      BRAND.doc = b.doc_url || "";
+      document.title = BRAND.product;
+      const el = document.getElementById("lg_prod"); if (el) el.textContent = BRAND.product;
+    }
+  } catch (e) {}
+}
 // 改动⑦:看板时间窗(小时)。7/30/90 天 + 全部历史(24:门B 回填历史可能远早于默认窗);默认 168=近 7 天。
 const WIN_ALL = 263520; // C4:=后端 maxUsageWindowHours(24*366*30≈30年),口径一致;覆盖全部历史且 since>1970
 function winLabel(h) { return ({ 168: "近 7 天", 720: "近 30 天", 2160: "近 90 天", [WIN_ALL]: "全部历史" })[h] || ("近 " + Math.round(h / 24) + " 天"); }
@@ -159,7 +173,7 @@ const esc = s => String(s == null ? "" : s).replace(/[&<>"'`]/g, c => ({ "&": "&
 // 产物只含 反斜杠/x/u/十六进制,无 ' " < > & → HTML 解码后原样保留,JS 里是字面字符、不闭合字符串。用于 onclick 等内联处理器参数。
 const jsstr = s => String(s == null ? "" : s).replace(/[^a-zA-Z0-9_]/g, c => { const n = c.charCodeAt(0); return n < 256 ? "\\x" + n.toString(16).padStart(2, "0") : "\\u" + n.toString(16).padStart(4, "0"); });
 const roleCN = r => ({ operator: "运营方", org_admin: "组织管理员", team_leader: "团队负责人", member: "成员" }[r] || r);
-const memberStatusCN = s => ({ active: "启用", disabled: "停用", offboarded: "离职", provisioning: "开通中", quarantined: "开通异常" }[s] || s || "-");
+const memberStatusCN = s => ({ active: "启用", disabled: "停用", offboarded: "离职", provisioning: "开通中", quarantined: "开通异常", provision_failed: "开通失败" }[s] || s || "-");
 // D2(28):计费模式中文化,不再对客户/运营直出英文枚举。
 const billingModeCN = s => ({ wallet: "余额钱包", prepaid: "预充值", postpaid: "后付费", subscription: "订阅" }[s] || s || "-");
 
@@ -183,6 +197,7 @@ function logout() { S.token = ""; localStorage.removeItem("nx_token"); location.
 // F2(28):登录框产品名/浏览器标题走 BRAND 单一来源(app.js 在 body 底加载,此时 DOM 已就绪)。
 document.title = BRAND.product;
 { const el = document.getElementById("lg_prod"); if (el) el.textContent = BRAND.product; }
+loadBranding(); // 未登录态(登录页)也拉一次公开品牌(免鉴权端点;42号样式-3)
 
 /* ---------- 启动 ---------- */
 async function boot() {
@@ -191,6 +206,7 @@ async function boot() {
   S.role = S.me.role; S.orgId = S.me.org_id;
   // 架构B:mvpGate 机制退役(33 §12 增补),/me 的 mvp_mode 阶段2 移除;前端按"全功能"口径,不再读该字段。
   await loadQpu(); // 架构B:金额换算基准(quota_per_unit),进 UI 前拿到
+  await loadBranding(); // 42号样式-3:品牌运营配置(产品名/公司/客服/文档)
   const def = { operator: "orgs", org_admin: "dash", team_leader: "members", member: "myusage" }[S.role];
   S.view = def;
   renderShell(); renderSide(); renderView();
@@ -226,7 +242,8 @@ function renderShell() {
 }
 function openHelp() {
   const docLine = brandDoc() ? `<div class="fld"><label>产品文档</label><a href="${esc(brandDoc())}" target="_blank" rel="noopener">${esc(brandDoc())}</a></div>` : "";
-  modal("帮助与支持", `${docLine}<div class="fld"><label>联系客服</label><a href="mailto:${esc(BRAND.support)}">${esc(BRAND.support)}</a></div>
+  const supLine = BRAND.support ? `<div class="fld"><label>联系客服</label><a href="mailto:${esc(BRAND.support)}">${esc(BRAND.support)}</a></div>` : "";
+  modal("帮助与支持", `${docLine}${supLine}
     <div class="note">如遇账号登录、用量统计、成员开通等问题,可邮件联系客服。</div>`,
     `<button class="btn pri" onclick="closeM()">知道了</button>`);
 }
@@ -1083,7 +1100,7 @@ VIEWS.dash = async () => {
   // 架构B:金库余额 KPI + 金库低预警条(低于阈值后端置 low 标记;文案按 29-PRD §4.9)。
   const balCards = kpi("金库余额", balMoney(bal), "组织金库实时余额(充值请联系运营方)");
   const lowBar = (!bal.__err && (bal.low === true || bal.treasury_low === true))
-    ? `<div class="note" style="background:var(--warnbg);border-color:#fde68a;color:#92400e;margin:0 0 14px"><b>组织余额不足,请联系管理员充值。</b>金库偏低时,开通成员 / 划拨额度 / 订阅补满可能失败。</div>` : "";
+    ? `<div class="note" style="background:var(--warnbg);border-color:#fde68a;color:#92400e;margin:0 0 14px"><b>组织余额不足,请联系运营方充值。</b>金库偏低时,开通成员 / 划拨额度 / 订阅补满可能失败。</div>` : "";
   const srch = (iid, cid, ph) => `<input id="${iid}" placeholder="${ph}" oninput="filterEls('${iid}','${cid}')" style="float:right;width:150px;padding:2px 8px;font-size:12px">`;
   // 数据安全承诺条(仅客户 org_admin);文案站得住:MVP 下成员 key 员工自助建、平台不经手,观测不扣款。
   const safebar = S.role === "org_admin" ? `<div class="safebar">额度与消费以 new-api 实际扣费为准;平台负责金库划拨与用量统计,不经手您的请求内容与令牌明文。</div>` : "";
@@ -1128,8 +1145,11 @@ VIEWS.members = async () => {
     const used = rawOf(m, "used_raw");        // 已用 = max(0, granted−remaining) 实时派生(P1-1 单一口径)
     const granted = rawOf(m, "granted_raw");
     const off = m.status === "offboarded";
-    const zero = !off && remain != null && remain <= 0;
-    const acts = off
+    const zero = m.status === "active" && granted != null && granted > 0 && remain != null && remain <= 0; // 42号应修-1:开通中/失败不误标"额度已用完"
+    const pfail = m.status === "provision_failed";
+    const acts = pfail
+      ? `<span class="btn sm pri" onclick="doRetryProvision(${m.id},'${jsstr(nm)}')">重试开通</span>`
+      : off
       ? `<span class="btn sm pri" onclick="openRestore(${m.id},'${jsstr(nm)}')">恢复入职</span>`
       : `<span class="btn sm" onclick="openGrant(${m.id},'${jsstr(nm)}')">划拨额度</span>
          <span class="btn sm" onclick="openMemberLogs(${m.id},'${jsstr(nm)}')">日志</span>
@@ -1141,7 +1161,7 @@ VIEWS.members = async () => {
       <td>${m.tier_name ? esc(m.tier_name) : '<span class="mini">-</span>'}</td>
       <td class="right">${granted != null ? money(granted) : "-"}</td>
       <td class="right">${used != null ? money(used) : "-"}</td>
-      <td class="right">${remain != null ? `<b>${money(remain)}</b>` : "-"}${zero ? '<div class="mini" style="color:var(--bad)">额度已用完,请联系管理员</div>' : ""}</td>
+      <td class="right">${remain != null ? `<b>${money(remain)}</b>` : "-"}${zero ? '<div class="mini" style="color:var(--bad)">额度已用完,请联系管理员</div>' : ""}${pfail ? '<div class="mini" style="color:var(--bad)">开通失败:金库充值后可重试</div>' : ""}</td>
       <td>${pill(memberStatusCN(m.status), m.status === "active" ? "ok" : off ? "bad" : "mut")}</td>
       <td class="right table-actions">${acts}</td></tr>`;
   }).join("");
@@ -1377,6 +1397,12 @@ async function doOffboard(mid, name) {
 async function doOffboardConfirmed(mid) {
   try { await api("POST", "/members/" + mid + "/offboard", null); closeM(); toast("已离职(令牌已停用,未用额度退回金库)"); renderView(); }
   catch (e) { toast(e.message); }
+}
+// 重试开通(42号 P1:POST /members/:id/provision:retry)——金库补钱后自助救活开通失败的成员。
+async function doRetryProvision(mid, name) {
+  if (!confirm("重试为「" + name + "」开通?将按其档位从金库重新划拨初始额度(金库不足会失败)。")) return;
+  try { await api("POST", "/members/" + mid + "/provision:retry", null); toast("重试开通成功"); renderView(); }
+  catch (e) { toast("重试开通失败:" + e.message); }
 }
 // 恢复入职(33 §3.5 POST /members/:id/restore {tier_id}):跟新建一样重新分配额度(离职已退额,不自动恢复)。
 async function openRestore(mid, name) {
@@ -1650,7 +1676,7 @@ VIEWS.billing = async () => {
   const totalRaw = bal.__err ? null : rawOf(bal, "total_raw");
   const total = totalRaw != null ? totalRaw : ((tre != null && msum != null) ? tre + msum : null);
   const low = !bal.__err && (bal.low === true || bal.treasury_low === true);
-  const lowBar = low ? `<div class="note" style="background:var(--warnbg);border-color:#fde68a;color:#92400e;margin:0 0 14px"><b>组织余额不足,请联系管理员充值。</b>金库偏低时,开通成员 / 划拨额度 / 订阅补满可能失败。</div>` : "";
+  const lowBar = low ? `<div class="note" style="background:var(--warnbg);border-color:#fde68a;color:#92400e;margin:0 0 14px"><b>组织余额不足,请联系运营方充值。</b>金库偏低时,开通成员 / 划拨额度 / 订阅补满可能失败。</div>` : "";
   // 各成员额度:balance 若带 members 明细直接用,否则回退成员列表端点(同一 *_raw 口径)。
   let mlist = (!bal.__err && (bal.members || bal.member_quotas)) || null;
   if (!mlist) { try { mlist = (await api("GET", "/orgs/" + id + "/members?page=1&page_size=50", null)).list || []; } catch (e) { mlist = []; } }
@@ -1932,8 +1958,26 @@ VIEWS.psettings = async () => {
       <div class="fld" style="max-width:400px"><label>金库低预警阈值(美元;treasury_low_watermark_raw)</label><input id="pf_low" type="number" min="0" step="1" value="${low != null ? (low / (S.qpu || 500000)) : ""}"><div class="mini" style="margin-top:4px">金库低于该值 → 预警组织管理员 + 运营方</div></div>
       <button class="btn pri" onclick="doSavePlatformSettings()">保存</button>
       <div class="errline" id="pf_err"></div>
+    </div></div>
+    <div class="panel"><div class="ph">品牌信息(全站与登录页展示;改完即时生效)</div><div class="pb">
+      <div class="fld" style="max-width:400px"><label>产品名称</label><input id="pf_bn" value="${esc(ps.brand_product_name || "")}" placeholder="未配置时显示"企业管理台""></div>
+      <div class="fld" style="max-width:400px"><label>公司名称</label><input id="pf_bc" value="${esc(ps.brand_company_name || "")}" placeholder="留空则页脚不显示公司名"></div>
+      <div class="fld" style="max-width:400px"><label>客服邮箱</label><input id="pf_be" value="${esc(ps.brand_support_email || "")}" placeholder="留空则帮助弹层不显示客服入口"></div>
+      <div class="fld" style="max-width:400px"><label>文档地址</label><input id="pf_bd" value="${esc(ps.brand_doc_url || "")}" placeholder="留空则不显示文档链接"></div>
+      <button class="btn pri" onclick="doSaveBranding()">保存品牌信息</button>
+      <div class="errline" id="pf_berr"></div>
     </div></div>`;
 };
+async function doSaveBranding() {
+  setErr("pf_berr", "");
+  const body = {
+    brand_product_name: val("pf_bn").trim(), brand_company_name: val("pf_bc").trim(),
+    brand_support_email: val("pf_be").trim(), brand_doc_url: val("pf_bd").trim(),
+  };
+  if (body.brand_support_email && !/^[^@\s]+@[^@\s]+$/.test(body.brand_support_email)) { setErr("pf_berr", "客服邮箱格式不正确"); return; }
+  try { await api("PUT", "/platform-settings", body); await loadBranding(); toast("品牌信息已保存,全站即时生效"); renderShell(); renderSide(); renderView(); }
+  catch (e) { setErr("pf_berr", e.message); }
+}
 function confirmMoneyFreeze(on) {
   if (on) {
     dangerConfirm("确认开启钱动作急停?", `<p style="color:var(--bad)"><b>这是全平台级红色开关。</b></p>

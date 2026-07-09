@@ -232,3 +232,24 @@ input[type=checkbox]{width:15px;height:15px;accent-color:var(--brand);cursor:poi
 .kvtable td.k{min-width:150px;white-space:nowrap}
 .kvtable td{word-break:break-word}
 table td b,table td .money,td.num{white-space:nowrap;font-variant-numeric:tabular-nums}
+
+/* 42号样式-1:1280 笔记本下宽表操作列不被挤出屏幕 ——
+   ①压缩成员/员工表 min-width;②状态+操作列 sticky 钉右(横滚时始终可点停用/离职/划拨);
+   ③<=1360 视口折叠次要列(团队/档位),保关键列直达。 */
+.member-table{min-width:1180px}
+.member-table .m-name{width:210px}.member-table .m-team{width:110px}.member-table .m-tier{width:120px}
+.member-table .m-granted{width:100px}.member-table .m-used{width:96px}.member-table .m-remain{width:132px}
+.member-table .m-actions{width:312px}
+.employee-table{min-width:1560px}
+.member-table th:last-child,.member-table td:last-child,
+.employee-table th:last-child,.employee-table td:last-child,
+.token-self-table th:last-child,.token-self-table td:last-child{
+  position:sticky;right:0;background:#fff;box-shadow:-8px 0 8px -8px rgba(15,23,42,.12)}
+.member-table th:last-child,.employee-table th:last-child,.token-self-table th:last-child{background:#fafbfe;z-index:1}
+.member-table tbody tr:hover td:last-child,.employee-table tbody tr:hover td:last-child,.token-self-table tbody tr:hover td:last-child{background:#fafbff}
+@media (max-width:1360px){
+  .member-table .m-team,.member-table .m-tier,
+  .member-table th:nth-child(2),.member-table td:nth-child(2),
+  .member-table th:nth-child(3),.member-table td:nth-child(3){display:none}
+  .member-table{min-width:940px}
+}

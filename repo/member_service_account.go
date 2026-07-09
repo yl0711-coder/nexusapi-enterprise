@@ -60,8 +60,9 @@ func (s *Store) GetMemberServiceCred(ctx context.Context, memberID int64) (*Memb
 // MarkMemberQuarantined 孤儿隔离(34 §3-③):CreateUser 成功后续步骤失败,new-api 无干净删 user 能力 →
 // disable(调用方已做)+ 本标记;worker/统计一律跳过 quarantined;可重试(重入走确定性 adopt 或新名重建)。
 func (s *Store) MarkMemberQuarantined(ctx context.Context, orgID, memberID int64) error {
+	// 42号 P1 修法③:status 同步置 provision_failed 终态(不再留 provisioning 冒充"进行中")。
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE member SET bootstrap_state = 'quarantined' WHERE id = ? AND org_id = ?`, memberID, orgID)
+		`UPDATE member SET bootstrap_state = 'quarantined', status = 'provision_failed' WHERE id = ? AND org_id = ?`, memberID, orgID)
 	return err
 }
 

@@ -39,6 +39,22 @@ func (h *Handler) handleGrantQuota(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, r, http.StatusOK, map[string]any{"member_id": memberID, "amount_raw": in.AmountRaw, "idempotency_key": idem})
 }
 
+// POST /members/{id}/provision:retry — 重试开通(42号 P1:金库补钱后自助救活 quarantined/failed 成员;
+// 路径含 provision: 命中支持态红线白名单默认拒;涉钱走 saga 首笔划账)。
+func (h *Handler) handleRetryProvision(w http.ResponseWriter, r *http.Request) {
+	c, _ := claimsFrom(r.Context())
+	memberID, err := pathInt64(r, "id")
+	if err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	if err := h.svc.RetryProvision(r.Context(), c, c.OrgID, memberID); err != nil {
+		writeErr(w, r, err)
+		return
+	}
+	writeOK(w, r, http.StatusOK, map[string]any{"member_id": memberID, "provisioned": true})
+}
+
 // POST /members/{id}/status — 停用/恢复成员(US-05)。
 type setStatusReq struct {
 	Enabled bool `json:"enabled"`

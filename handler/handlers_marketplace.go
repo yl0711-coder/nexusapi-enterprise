@@ -61,3 +61,9 @@ func (h *Handler) handlePutPlatformSettings(w http.ResponseWriter, r *http.Reque
 	}
 	writeOK(w, r, http.StatusOK, v)
 }
+
+// GET /branding — 公开品牌信息(免鉴权只读,42号样式-3:登录页未登录态显示产品名;
+// 字段全为运营自填展示信息,未配置为空串,前端优雅降级不露占位)。
+func (h *Handler) handleBranding(w http.ResponseWriter, r *http.Request) {
+	writeOK(w, r, http.StatusOK, h.svc.GetBranding(r.Context()))
+}

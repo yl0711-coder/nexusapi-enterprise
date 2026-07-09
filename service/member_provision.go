@@ -6,11 +6,15 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base32"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/nexusapi-platform/enterprise/adapter/newapi"
+	"github.com/nexusapi-platform/enterprise/model"
 	"github.com/nexusapi-platform/enterprise/pkg/apperr"
+	"github.com/nexusapi-platform/enterprise/pkg/session"
+	"github.com/nexusapi-platform/enterprise/repo"
 )
 
 // genMemberUsername 生成成员 new-api 随机用户名(≤20 字符,31-ADR §11:无法编码可读工号,撞名由调用方重试)。
@@ -225,4 +229,68 @@ func (s *Service) CheckActiveSubscriptions(ctx context.Context, orgID int64) ([]
 		}
 	}
 	return hits, nil
+}
+
+// RetryProvision 幂等"重试开通"(42号 P1 修法①):对开通失败/隔离(bootstrap failed/quarantined)的成员,
+// org_admin/运营方自助救活——典型场景:新组织金库未充值先开成员→全员 quarantined,金库补钱后走此端点。
+// 复用随机新名重建 saga(旧孤儿 user 保持 disable 原样弃置,34 §3-③ 不变量;新 uid/凭证覆盖成员行);
+// per-member 锁防并发双建;已 done 直接幂等成功。首笔划账额=成员当前档位 AmountRaw。
+func (s *Service) RetryProvision(ctx context.Context, c session.Claims, orgID, memberID int64) error {
+	if err := assertOrgScope(c, orgID); err != nil {
+		return err
+	}
+	if err := assertRole(c, session.RoleOperator, session.RoleOrgAdmin); err != nil {
+		return err
+	}
+	org, err := s.store.GetOrganization(ctx, orgID)
+	if err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	if org.Status == model.OrgStatusHardStopped {
+		return apperr.New(apperr.CodeForbidden, 403, "组织已被运维硬停,管理操作暂不可用(解除后恢复)")
+	}
+	release, lerr := s.quotaLocker.Acquire(ctx, memberCredLockKey(memberID))
+	if lerr != nil {
+		return apperr.Internal("").WithCause(lerr)
+	}
+	defer release()
+	m, err := s.store.GetMember(ctx, orgID, memberID)
+	if errors.Is(err, repo.ErrNotFound) {
+		return apperr.NotFound("成员不存在")
+	}
+	if err != nil {
+		return apperr.Internal("").WithCause(err)
+	}
+	if m.BootstrapState == model.BootstrapDone {
+		return nil // 幂等:已开通(并发重试/重复点击)
+	}
+	if m.BootstrapState != model.BootstrapQuarantined && m.BootstrapState != model.BootstrapFailed {
+		return apperr.New(apperr.CodeInvalidParam, 409, "该成员不在开通失败/隔离状态,无需重试")
+	}
+	if m.TierID == nil {
+		return apperr.InvalidParam("成员未关联档位,无法确定初始额度;请先在成员管理设置档位")
+	}
+	tier, terr := s.store.GetTier(ctx, orgID, *m.TierID)
+	if errors.Is(terr, repo.ErrNotFound) {
+		return apperr.InvalidParam("成员档位已不存在,请先改绑有效档位")
+	}
+	if terr != nil {
+		return apperr.Internal("").WithCause(terr)
+	}
+	if tier.AmountRaw == nil || *tier.AmountRaw <= 0 {
+		return apperr.InvalidParam("该档位未配置有效额度(amount_raw 须为正数)")
+	}
+	grp := resolveTokenGroup(tier, org)
+	if m.NewapiUserID != nil {
+		s.audit(ctx, c, orgID, "retry_provision", "member", &memberID, map[string]any{
+			"orphan_uid": *m.NewapiUserID, "note": "旧孤儿弃置(保持disable),saga重建新号"})
+	}
+	if _, perr := s.ProvisionMemberServiceAccount(ctx, orgID, memberID, grp, *tier.AmountRaw, actorOf(c)); perr != nil {
+		return perr // 再失败=新孤儿隔离(saga 内),如实报错,可继续重试
+	}
+	if aerr := s.store.ActivatePlatformAccount(ctx, orgID, memberID); aerr != nil {
+		return apperr.Internal("").WithCause(aerr)
+	}
+	s.audit(ctx, c, orgID, "retry_provision", "member", &memberID, map[string]any{"result": "ok", "amount_raw": *tier.AmountRaw})
+	return nil
 }

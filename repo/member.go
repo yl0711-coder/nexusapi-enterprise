@@ -89,6 +89,13 @@ func (s *Store) FinalizeBootstrap(ctx context.Context, m *model.Member, tokenNam
 	})
 }
 
+// GetMemberByOrgEmail 按组织+登录邮箱查成员(42号 P1:撞邮箱重开时判定旧行是否失败/隔离终态可让位;
+// 含软删行也查不到——uk 冲突只可能来自未软删行,故不带 deleted_at 条件之外的过滤)。
+func (s *Store) GetMemberByOrgEmail(ctx context.Context, orgID int64, email string) (*model.Member, error) {
+	row := s.db.QueryRowContext(ctx, memberSelect+` WHERE org_id = ? AND login_email = ? AND deleted_at IS NULL`, orgID, email)
+	return scanMember(row)
+}
+
 // MarkBootstrapFailedAndRelease 标 bootstrap 失败,并把 login_email 墓碑改写(前缀 failed-{id}-,LEFT 截到列宽 191)
 // 以释放 uk_member_org_email 占用、允许同邮箱重开(GZ-03 缺陷3)。
 // 模型2:member 不映射 new-api 用户,开通失败=员工 token 未建成——**无孤儿用户**(org user 共享、不动;残留 token 靠
@@ -99,7 +106,7 @@ func (s *Store) MarkBootstrapFailedAndRelease(ctx context.Context, orgID, member
 		    SET bootstrap_state = ?, status = ?,
 		        login_email = LEFT(CONCAT('failed-', id, '-', login_email), 191)
 		  WHERE id = ? AND org_id = ?`,
-		model.BootstrapFailed, model.MemberStatusProvisioning, memberID, orgID)
+		model.BootstrapFailed, model.MemberStatusProvisionFailed, memberID, orgID) // 42号:终态,不再冒充 provisioning
 	return err
 }
 

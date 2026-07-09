@@ -150,6 +150,18 @@ func (s *Service) OpenMember(ctx context.Context, c session.Claims, orgID int64,
 	}
 	memberID, err := s.store.CreateMemberProvisional(ctx, prov)
 	if errors.Is(err, repo.ErrConflict) {
+		// 42号 P1 修法③:撞邮箱且旧行是开通失败/隔离终态 → 自动墓碑化旧行(改写 login_email 释放
+		// uk_member_org_email,孤儿 uid 留行审计、保持 disable)后重试一次——"同邮箱重开"对失败行安全可行。
+		if old, gerr := s.store.GetMemberByOrgEmail(ctx, orgID, email); gerr == nil &&
+			(old.BootstrapState == model.BootstrapQuarantined || old.BootstrapState == model.BootstrapFailed) {
+			if terr := s.store.MarkBootstrapFailedAndRelease(ctx, orgID, old.ID); terr != nil {
+				return nil, apperr.Internal("").WithCause(terr)
+			}
+			s.audit(ctx, c, orgID, "open_member", "member", &old.ID, map[string]any{"note": "失败旧行墓碑让位,同邮箱重开"})
+			memberID, err = s.store.CreateMemberProvisional(ctx, prov)
+		}
+	}
+	if errors.Is(err, repo.ErrConflict) {
 		return nil, apperr.Conflict("该邮箱在本组织已存在")
 	}
 	if err != nil {

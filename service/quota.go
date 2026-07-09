@@ -208,32 +208,47 @@ func (s *Service) RestoreMember(ctx context.Context, c session.Claims, orgID, me
 	}
 	grp := resolveTokenGroup(tier, org)
 
+	// 42号 P1 重写:全成或全败 + 绝不违规 enable 孤儿。
+	//   分支判定:无服务账号 **或 bootstrap 是 quarantined/failed(孤儿/半成品,绝不复用)** → saga 如新建
+	//   (孤儿 user 保持 disable 原样弃置,34 §3-③ 不变量);只有健康账号(bootstrap=done)才走 enable+grant。
+	//   写序铁律:上游动作全部成功后才写平台行(中途失败=平台行保持 offboarded,可幂等重试);
+	//   健康分支 grant 在 enable **之前**(grant 失败时 user 仍 disabled=天然全败零补偿;enable 失败时钱已到但
+	//   user 仍 disabled 花不出,重试同键幂等不双划)——杜绝"enable 了却没充上钱"的再激活。
+	if m.NewapiUserID == nil || m.BootstrapState == model.BootstrapQuarantined || m.BootstrapState == model.BootstrapFailed {
+		// saga 如新建(建号/组/wallet_only/首笔划账;失败=新孤儿隔离,如实报错可重试;旧孤儿保持 disable)。
+		if m.NewapiUserID != nil {
+			s.audit(ctx, c, orgID, "restore_member", "member", &memberID, map[string]any{
+				"orphan_uid": *m.NewapiUserID, "note": "旧孤儿弃置(保持disable),saga重建新号"})
+		}
+		if _, perr := s.ProvisionMemberServiceAccount(ctx, orgID, memberID, grp, *tier.AmountRaw, actorOf(c)); perr != nil {
+			return perr
+		}
+	} else {
+		// ① 分组按新档位重设(admin 侧,disabled user 可改;漏一环成员发请求当场 403,31-ADR §5)。
+		if gerr := s.upstream.SetUserGroup(ctx, int(*m.NewapiUserID), grp); gerr != nil {
+			return mapUpstream(gerr)
+		}
+		// ② 先划账(user 仍 disabled,钱到账也花不出=安全)。幂等键绑 SessionEpoch:每轮离职都会 bump epoch,
+		//    故同一轮恢复的重试同键幂等(不双划),下一轮离职→恢复自然换新键(真划)。
+		idem := fmt.Sprintf("restore:%d:%d:%d", orgID, memberID, m.SessionEpoch)
+		if terr := s.GrantMemberQuota(ctx, c, orgID, memberID, *tier.AmountRaw, "restore 重新分配", idem); terr != nil {
+			return terr // user 未 enable、平台行未动:干净失败,重试安全
+		}
+		// ③ 钱到位后才 enable。失败=钱在但 disabled(花不出),重试:②同键幂等 → ③再 enable。
+		if serr := s.upstream.SetUserStatus(ctx, int(*m.NewapiUserID), true); serr != nil {
+			s.log.Error("恢复入职:额度已到位但 enable 失败(user 仍 disabled 花不出,重试本操作即可,幂等不双划)", "member_id", memberID, "err", serr)
+			return mapUpstream(serr)
+		}
+	}
+	// ④ 上游全部成功,写平台行(软删复活 + 档位/分组 + 置 active/done;任一失败=重试全幂等)。
 	if err := s.store.RestoreOffboardedMember(ctx, orgID, memberID); err != nil {
 		return apperr.Internal("").WithCause(err)
 	}
 	if err := s.store.UpdateMemberTierGroup(ctx, orgID, memberID, tierID, grp); err != nil {
 		return apperr.Internal("").WithCause(err)
 	}
-
-	if m.NewapiUserID == nil {
-		// 无服务账号:如新建走 Provision saga(含建号/组/wallet_only/首笔划账;失败=隔离,如实报错可重试)。
-		if _, perr := s.ProvisionMemberServiceAccount(ctx, orgID, memberID, grp, *tier.AmountRaw, actorOf(c)); perr != nil {
-			return perr
-		}
-	} else {
-		if serr := s.upstream.SetUserStatus(ctx, int(*m.NewapiUserID), true); serr != nil {
-			return mapUpstream(serr)
-		}
-		// 分组按新档位重设(×N 配置护栏,31-ADR §5:漏一环成员发请求当场 403)。
-		if gerr := s.upstream.SetUserGroup(ctx, int(*m.NewapiUserID), grp); gerr != nil {
-			return mapUpstream(gerr)
-		}
-		// 如新建重新分配(BE② 契约:GrantMemberQuota 走 Transfer,金库不足即失败;成员已 enable 但额度 0=令牌不可花,可重试)。
-		idem := fmt.Sprintf("restore:%d:%d", memberID, s.now().Unix())
-		if terr := s.GrantMemberQuota(ctx, c, orgID, memberID, *tier.AmountRaw, "restore 重新分配", idem); terr != nil {
-			s.log.Error("恢复入职:重新分配额度失败(成员已 enable、额度未到位,可重试恢复或走追加划账)", "member_id", memberID, "err", terr)
-			return terr
-		}
+	if err := s.store.ActivatePlatformAccount(ctx, orgID, memberID); err != nil {
+		return apperr.Internal("").WithCause(err)
 	}
 	s.audit(ctx, c, orgID, "restore_member", "member", &memberID, map[string]any{"tier_id": tierID, "amount_raw": *tier.AmountRaw})
 	return nil

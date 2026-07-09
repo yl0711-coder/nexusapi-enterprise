@@ -47,6 +47,7 @@ func (h *Handler) Routes() http.Handler {
 
 	// 认证。
 	mux.HandleFunc("POST /api/v1/auth/login", h.handleLogin)
+	mux.HandleFunc("GET /api/v1/branding", h.handleBranding) // 公开品牌信息(免鉴权,登录页用;42号样式-3)
 	mux.HandleFunc("GET /api/v1/me", h.requireAuth(h.handleMe))
 	mux.HandleFunc("POST /api/v1/me/password", h.requireAuth(h.handleChangePassword)) // 个人设置·自助改密
 	mux.HandleFunc("PATCH /api/v1/me", h.requireAuth(h.handleUpdateMe))               // 个人设置·改显示名
@@ -106,7 +107,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/members/{id}/password:reset", h.requireAuth(h.memberSelfGuard(h.handleResetMemberPassword))) // C22 重置成员登录密码
 	mux.HandleFunc("POST /api/v1/members/{id}/status", h.requireAuth(h.memberSelfGuard(h.handleSetMemberStatus)))
 	mux.HandleFunc("POST /api/v1/members/{id}/offboard", h.requireAuth(h.memberSelfGuard(h.handleOffboardMember))) // 离职(disable→静默→退额)
-	mux.HandleFunc("POST /api/v1/members/{id}/restore", h.requireAuth(h.memberSelfGuard(h.handleRestoreMember)))   // 恢复(enable+如新建重新分配,{tier_id})
+	mux.HandleFunc("POST /api/v1/members/{id}/restore", h.requireAuth(h.memberSelfGuard(h.handleRestoreMember)))
+	mux.HandleFunc("POST /api/v1/members/{id}/provision:retry", h.requireAuth(h.memberSelfGuard(h.handleRetryProvision))) // 42号 P1:重试开通   // 恢复(enable+如新建重新分配,{tier_id})
 	mux.HandleFunc("GET /api/v1/organizations/{id}/members/offboarded", h.requireAuth(h.handleListOffboarded))     // 离职列表
 
 	// 余额/账本(架构B BE③,只读):读求和余额 + 分配账本三级可见(31-ADR §15)。

@@ -228,10 +228,15 @@ func (s *Service) RestoreMember(ctx context.Context, c session.Claims, orgID, me
 		if gerr := s.upstream.SetUserGroup(ctx, int(*m.NewapiUserID), grp); gerr != nil {
 			return mapUpstream(gerr)
 		}
-		// ② 先划账(user 仍 disabled,钱到账也花不出=安全)。幂等键绑 SessionEpoch:每轮离职都会 bump epoch,
-		//    故同一轮恢复的重试同键幂等(不双划),下一轮离职→恢复自然换新键(真划)。
+		// ② 先划账(user 仍 disabled,钱到账也花不出=安全)。直调 Transfer(saga 首笔同款,金库→成员):
+		//    不能走 GrantMemberQuota——其内部 GetMember 只查活行,而本序平台行(软删)最后才复活。
+		//    幂等键绑 SessionEpoch:每轮离职都会 bump epoch,同一轮恢复的重试同键幂等(不双划),
+		//    下一轮离职→恢复自然换新键(真划)。金库不足由 Transfer 内校验拒 → 干净失败。
+		if org.NewapiUserID == nil {
+			return apperr.New(apperr.CodeInvalidParam, 409, "组织金库尚未开通")
+		}
 		idem := fmt.Sprintf("restore:%d:%d:%d", orgID, memberID, m.SessionEpoch)
-		if terr := s.GrantMemberQuota(ctx, c, orgID, memberID, *tier.AmountRaw, "restore 重新分配", idem); terr != nil {
+		if terr := s.Transfer(ctx, orgID, int(*org.NewapiUserID), int(*m.NewapiUserID), memberID, *tier.AmountRaw, ReasonTopup, idem, actorOf(c)); terr != nil {
 			return terr // user 未 enable、平台行未动:干净失败,重试安全
 		}
 		// ③ 钱到位后才 enable。失败=钱在但 disabled(花不出),重试:②同键幂等 → ③再 enable。

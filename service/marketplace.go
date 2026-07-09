@@ -149,7 +149,8 @@ func (s *Service) UpdatePlatformSettings(ctx context.Context, c session.Claims, 
 	if err := assertRole(c, session.RoleOperator); err != nil {
 		return nil, err
 	}
-	if in.MoneyFreeze == nil && in.MemberTokenLimit == nil && in.MemberQuotaCapRaw == nil && in.TreasuryLowWatermarkRaw == nil {
+	if in.MoneyFreeze == nil && in.MemberTokenLimit == nil && in.MemberQuotaCapRaw == nil && in.TreasuryLowWatermarkRaw == nil &&
+		in.BrandProductName == nil && in.BrandCompanyName == nil && in.BrandSupportEmail == nil && in.BrandDocURL == nil {
 		return nil, apperr.InvalidParam("没有可更新的字段(quota_per_unit 为只读)")
 	}
 	actor := actorOf(c)

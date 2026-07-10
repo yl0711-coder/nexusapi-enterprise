@@ -159,8 +159,6 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/organizations/{id}/usage/timeseries", h.requireAuth(h.handleOrgUsageTimeSeries)) // M2 折线图(day/week/month)
 	mux.HandleFunc("GET /api/v1/organizations/{id}/usage/detail", h.requireAuth(h.handleOrgUsageDetail))         // M2 下钻逐条明细
 	mux.HandleFunc("GET /api/v1/organizations/{id}/budget-ref", h.requireAuth(h.handleBudgetRef))                // #4 额度参考条(已用$/预付$)
-	mux.HandleFunc("GET /api/v1/organizations/{id}/escrow-balance", h.requireAuth(h.handleEscrowBalance))        // R3 读穿余额(窗口+托管)
-	mux.HandleFunc("POST /api/v1/organizations/{id}/escrow/refill", h.requireAuth(h.handleEscrowRefill))         // R3 手工续充
 	mux.HandleFunc("GET /api/v1/members/{id}/usage", h.requireAuth(h.memberSelfGuard(h.handleMemberUsage)))
 	mux.HandleFunc("GET /api/v1/members/{id}/usage/timeseries", h.requireAuth(h.memberSelfGuard(h.handleMemberUsageTimeSeries))) // M2 成员折线图
 	mux.HandleFunc("GET /api/v1/members/{id}/usage/detail", h.requireAuth(h.memberSelfGuard(h.handleMemberUsageDetail)))         // M2 成员下钻逐条明细

@@ -593,10 +593,11 @@ func (h *Handler) handleListMembers(w http.ResponseWriter, r *http.Request) {
 	}
 	page, size, offset := parsePaging(r, 20)
 	f := repo.MemberFilter{
-		Q:      r.URL.Query().Get("q"),
-		Status: r.URL.Query().Get("status"),
-		Limit:  size,
-		Offset: offset,
+		Q:            r.URL.Query().Get("q"),
+		Status:       r.URL.Query().Get("status"),
+		ExcludeAdmin: r.URL.Query().Get("exclude_admin") == "1", // 45号 P3-13:API 使用成员口径
+		Limit:        size,
+		Offset:       offset,
 	}
 	if tid := r.URL.Query().Get("team_id"); tid != "" {
 		if n := atoiDefault(tid, 0); n > 0 {

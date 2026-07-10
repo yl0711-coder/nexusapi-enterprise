@@ -7,14 +7,18 @@ package integration
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nexusapi-platform/enterprise/adapter/newapi"
+	"github.com/nexusapi-platform/enterprise/handler"
 	"github.com/nexusapi-platform/enterprise/model"
 	"github.com/nexusapi-platform/enterprise/pkg/session"
 	"github.com/nexusapi-platform/enterprise/repo"
@@ -286,8 +290,10 @@ func TestIntegration_SubscriptionWalletOnly(t *testing.T) {
 	t.Logf("订阅口径真账 ok: 门A 开通即 wallet_only(new-api 侧读回确认);订阅组织余额显示'订阅计费'不回数")
 }
 
-// escrow 休眠(20-§9):v1 生产形态(funding 关)下充值/续充端点 404、worker 静默、escrow_bucket 无写入。
-func TestIntegration_EscrowDormant(t *testing.T) {
+// TestIntegration_EscrowRetired 防复活守卫(45号 14/15,总监裁定:退役要有测试钉死——门B 事故的教训):
+// 职责从"验证机器休眠"改为"防止机器悄悄复活"。断言:①两个 escrow HTTP 端点已摘(404);
+// ②记账侧 Recharge 仍被 fundingEnabled 闸住(v1 恒 404);③全流程 escrow_bucket 恒零写入。
+func TestIntegration_EscrowRetired(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	svc, store, _ := v1Svc(t, ctx, "nexus_v1dor", true)
@@ -300,23 +306,33 @@ func TestIntegration_EscrowDormant(t *testing.T) {
 	}
 	opc := session.Claims{Role: session.RoleOperator, OrgID: orgID}
 	if _, err := svc.Recharge(ctx, opc, orgID, service.RechargeInput{AmountQuota: 1_000_000, TransferNo: "dor-1"}); err == nil {
-		t.Fatalf("🔴v1 充值端点应 404(escrow 休眠)")
+		t.Fatalf("🔴记账侧 Recharge 应被 fundingEnabled 闸 404(v1 休眠)")
 	}
-	if _, err := svc.RefillWindow(ctx, opc, orgID); err == nil {
-		t.Fatalf("🔴v1 续充端点应 404")
+	// ① 分桶下发侧两端点必须已摘:路由层 404(不是 405/403——429 兜底那套已保证未注册 API 统一 404)。
+	signer, _ := session.NewSigner([]byte("integration-test-session-key-32b!!"), time.Hour)
+	ts := httptest.NewServer(handler.New(svc, signer, nil, "it").Routes())
+	defer ts.Close()
+	for _, ep := range []struct{ m, p string }{
+		{"GET", fmt.Sprintf("/api/v1/organizations/%d/escrow-balance", orgID)},
+		{"POST", fmt.Sprintf("/api/v1/organizations/%d/escrow/refill", orgID)},
+	} {
+		req, _ := http.NewRequest(ep.m, ts.URL+ep.p, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", ep.m, ep.p, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("🔴escrow 端点 %s %s 应已摘(404),实 %d——分桶下发侧不得复活", ep.m, ep.p, resp.StatusCode)
+		}
 	}
-	if err := svc.AutoRefill(ctx); err != nil {
-		t.Fatalf("AutoRefill 应静默 no-op,实错: %v", err)
-	}
-	if err := svc.ReconcileEscrow(ctx); err != nil {
-		t.Fatalf("ReconcileEscrow 应静默 no-op,实错: %v", err)
-	}
+	// ② escrow_bucket 恒零写入(退役后无任何可达写入方)。
 	var buckets int
 	_ = store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM escrow_bucket`).Scan(&buckets)
 	if buckets != 0 {
-		t.Fatalf("🔴v1 全流程 escrow_bucket 应无写入,实 %d 行", buckets)
+		t.Fatalf("🔴escrow_bucket 应恒零写入,实 %d 行(疑分桶机器复活)", buckets)
 	}
-	t.Logf("escrow 休眠真账 ok: 充值/续充 404 + worker 静默 no-op + escrow_bucket 零写入")
+	t.Logf("escrow 防复活守卫 ok: 两端点 404 + Recharge 休眠闸 404 + escrow_bucket 零写入")
 }
 
 // M3 补漏扫描:迟提交行(id≤水位、created_at 在已结算窗口、不在 detail)被下一轮补入,不永久漏。

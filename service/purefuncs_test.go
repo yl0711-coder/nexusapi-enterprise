@@ -43,25 +43,8 @@ func utf8ValidString(s string) bool {
 	return true
 }
 
-func TestUnit_ComputeAutoThreshold(t *testing.T) {
-	// 历史<7天 → DEFAULT_NEW,不 overCeil。
-	if got, over := computeAutoThreshold(999, 999, false); got != escrowDefaultNew || over {
-		t.Fatalf("无历史应=DEFAULT_NEW(%d,false),得(%d,%v)", escrowDefaultNew, got, over)
-	}
-	// 有历史、raw 低于地板 → FLOOR。
-	if got, over := computeAutoThreshold(0, 0, true); got != escrowFloor || over {
-		t.Fatalf("raw 低于地板应 clamp 到 FLOOR(%d,false),得(%d,%v)", escrowFloor, got, over)
-	}
-	// 有历史、raw 在区间 → raw(=peak×0.75 + maxSingle)。
-	// peak=100_000_000 → int64(1e8×0.5×1.5)=75_000_000;+ maxSingle 50_000_000 = 125_000_000。
-	if got, over := computeAutoThreshold(100_000_000, 50_000_000, true); got != 125_000_000 || over {
-		t.Fatalf("区间内应=raw(125000000,false),得(%d,%v)", got, over)
-	}
-	// 有历史、raw 超上限 → CEIL + overCeil=true(超重度组织告警)。
-	if got, over := computeAutoThreshold(10_000_000_000, 0, true); got != escrowCeil || !over {
-		t.Fatalf("raw 超上限应 clamp 到 CEIL(%d,true),得(%d,%v)", escrowCeil, got, over)
-	}
-}
+// TestUnit_ComputeAutoThreshold 已随 computeAutoThreshold(escrow 阈值,下发侧)退役删除(45号 14/15)。
+
 
 // TestUnit_PeriodBoundary / TestUnit_DurationToExpiry 已随 periodBoundary(周期重置机器)、
 // durationToExpiry(临时 grant 时长)退役而删除(33 §12-4)。

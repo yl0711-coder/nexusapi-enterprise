@@ -178,7 +178,6 @@ func (s *Store) ListLogMirrorSources(ctx context.Context, limit int) ([]LogMirro
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT o.id, o.newapi_user_id, COALESCE(o.newapi_username, b.newapi_username, '') AS username
 		   FROM organization o
-		   LEFT JOIN org_backfill_job b ON b.org_id = o.id
 		   LEFT JOIN org_newapi_log_cursor c ON c.org_id = o.id
 		  WHERE o.deleted_at IS NULL AND o.newapi_user_id IS NOT NULL
 		  ORDER BY COALESCE(c.last_run_at, '1970-01-01') ASC, o.id ASC

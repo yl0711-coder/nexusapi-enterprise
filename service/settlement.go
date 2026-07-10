@@ -461,13 +461,7 @@ func (s *Service) ReconcileBilling(ctx context.Context) error {
 	return nil
 }
 
-// ReconcileBalanceLedger 已退役(架构B,33 §5/§12-9,BE③ 拆除):它对账的是 company_balance 第二账
-// (total_consumed ↔ SUM(usage_ledger)),第二账已随扣款分支砍掉,余额=读求和派生(金库+Σ成员,实时读 new-api),
-// 无本地余额账可对。划账守恒对账走 BE② 的 ReconcileTransfers(账本读-核-补环,33 §3.1)。
-// 恒 no-op 保留签名:worker 调用点由 BE② 同批接手摘除,阶段2 组长合入对齐后连同本函数删除。
-func (s *Service) ReconcileBalanceLedger(ctx context.Context) error {
-	return nil
-}
+// ReconcileBalanceLedger(company_balance 第二账对账)空壳已删(45号-18;第二账 33 §5 退役,对账无对象)。
 
 // PurgeOldUsageDetail 清理超过保留期的逐条明细;reconcile worker 周期调用。只删本库,不碰 new-api。
 // 保留期可配(24-§6,NEXUS_USAGE_DETAIL_RETENTION_DAYS):**默认 0 = 永久保留(直接跳过,不删)** ——

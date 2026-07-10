@@ -174,6 +174,7 @@ const esc = s => String(s == null ? "" : s).replace(/[&<>"'`]/g, c => ({ "&": "&
 const jsstr = s => String(s == null ? "" : s).replace(/[^a-zA-Z0-9_]/g, c => { const n = c.charCodeAt(0); return n < 256 ? "\\x" + n.toString(16).padStart(2, "0") : "\\u" + n.toString(16).padStart(4, "0"); });
 const roleCN = r => ({ operator: "运营方", org_admin: "组织管理员", team_leader: "团队负责人", member: "成员" }[r] || r);
 const memberStatusCN = s => ({ active: "启用", disabled: "停用", offboarded: "离职", provisioning: "开通中", quarantined: "开通异常", provision_failed: "开通失败" }[s] || s || "-");
+const orgStatusCN = s => ({ active: "正常", low: "余额偏低", stopped: "欠费停用", hard_stopped: "已硬停" }[s] || s || "-"); // 45号 P3-9:组织状态中文化
 // D2(28):计费模式中文化,不再对客户/运营直出英文枚举。
 const billingModeCN = s => ({ wallet: "余额钱包", prepaid: "预充值", postpaid: "后付费", subscription: "订阅" }[s] || s || "-");
 
@@ -414,7 +415,7 @@ VIEWS.orgs = async () => {
   const maxPage = Math.max(1, Math.ceil(total / size));
   const rows = list.map(o => `<tr>
     <td><span class="lk" style="display:inline-block;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle" title="${esc(o.name)}" onclick="enterOrg(${o.id},'${jsstr(o.name)}')">${esc(o.name)}</span><div class="mini">${esc(o.slug)}</div></td>
-    <td>${pill(o.status, o.status === "active" ? "ok" : o.status === "low" ? "warn" : "bad")}${o.archived ? ' <span class="tag">已归档</span>' : ''}</td>
+    <td>${pill(orgStatusCN(o.status), o.status === "active" ? "ok" : o.status === "low" ? "warn" : "bad")}${o.archived ? ' <span class="tag">已归档</span>' : ''}</td>
     <td>${esc(o.timezone)}</td><td>${esc(billingModeCN(o.billing_mode))}</td>
     <td class="right"><span class="btn sm" onclick="openOrgTreasury(${o.id},'${jsstr(o.name)}')">金库</span> <span class="btn sm" onclick="enterOrg(${o.id},'${jsstr(o.name)}')">进入</span> ${o.archived
       ? `<span class="btn sm" onclick="doArchiveOrg(${o.id},'${jsstr(o.name)}',false)">取消归档</span>`
@@ -517,7 +518,7 @@ async function enterOrg(id, name) {
     api("GET", "/organizations/" + id, null),
     api("GET", "/orgs/" + id + "/balance", null).catch(() => ({ __err: true })),
   ]);
-  const mem = await api("GET", "/organizations/" + id + "/members?page=1&page_size=20", null);
+  const mem = await api("GET", "/organizations/" + id + "/members?page=1&page_size=20&exclude_admin=1", null);
   const main = document.getElementById("main");
   const hardStopped = org.status === "hard_stopped";
   S.orgDetail = { org, eb, mem };
@@ -529,11 +530,11 @@ async function enterOrg(id, name) {
         <div class="org-title">${esc(name)}</div>
         <div class="org-meta">组织 ID ${id} · ${esc(billingModeCN(org.billing_mode || "wallet"))} · ${esc(org.timezone || "Asia/Shanghai")}</div>
       </div>
-      <div class="org-status">${pill(org.status, org.status === "active" ? "ok" : hardStopped ? "bad" : "warn")}</div>
+      <div class="org-status">${pill(orgStatusCN(org.status), org.status === "active" ? "ok" : hardStopped ? "bad" : "warn")}</div>
     </div>
     <div class="cards">
-      ${kpi("金库余额", balMoney(eb), "组织金库实时余额(读求和走 DB)")}
-      ${kpi("组织状态", pill(org.status, org.status === "active" ? "ok" : hardStopped ? "bad" : "warn"), hardStopped ? "组织级硬停中" : "正常服务中")}
+      ${kpi("金库余额", balMoney(eb), "组织金库实时余额")}
+      ${kpi("组织状态", pill(orgStatusCN(org.status), org.status === "active" ? "ok" : hardStopped ? "bad" : "warn"), hardStopped ? "组织级硬停中" : "正常服务中")}
       ${kpi("成员数", (mem.pagination || {}).total || (mem.list || []).length || 0, "API 使用成员")}
     </div>
     <div class="tabs org-tabs">
@@ -565,7 +566,7 @@ async function renderOrgCurrentTab() {
         const [org, eb, mem] = await Promise.all([
           api("GET", "/organizations/" + S.orgId, null),
           api("GET", "/orgs/" + S.orgId + "/balance", null).catch(() => ({ __err: true })),
-          api("GET", "/organizations/" + S.orgId + "/members?page=1&page_size=20", null),
+          api("GET", "/organizations/" + S.orgId + "/members?page=1&page_size=20&exclude_admin=1", null) // 45号 P3-13:成员数KPI/概览表=API使用成员口径,
         ]);
         S.orgDetail = { org, eb, mem };
       }
@@ -601,7 +602,7 @@ function renderOrgOverviewPanel(org, eb, mem) {
       <div class="pb">
         <table class="kvtable">
           <tr><td class="k">金库余额</td><td><b>${balMoney(eb)}</b></td></tr>
-          <tr><td class="k">组织状态</td><td>${pill(org.status, org.status === "active" ? "ok" : hardStopped ? "bad" : "warn")}</td></tr>
+          <tr><td class="k">组织状态</td><td>${pill(orgStatusCN(org.status), org.status === "active" ? "ok" : hardStopped ? "bad" : "warn")}</td></tr>
           <tr><td class="k">成员数</td><td>${memberTotal}</td></tr>
           <tr><td class="k">计费方式</td><td>${esc(billingModeCN(org.billing_mode || "-"))}</td></tr>
           <tr><td class="k">时区</td><td>${esc(org.timezone || "-")}</td></tr>
@@ -863,10 +864,11 @@ async function renderNewapiLogs() {
         org: `<td><span class="cell-clip org-cell" title="${esc(x.org_name || ("组织#" + x.org_id))}">${esc(x.org_name || ("组织#" + x.org_id))}</span><span class="cell-sub">ID ${x.org_id}</span></td>`,
         type: `<td>${pill(logTypeName(x.log_type), isErr ? "bad" : Number(x.log_type) === 2 ? "ok" : "mut")}</td>`,
         member: `<td><span class="cell-clip member-cell" title="${esc(memberName)}">${esc(memberName)}</span>${memberSub ? `<span class="cell-sub" title="${esc(memberSub)}">${esc(memberSub)}</span>` : ""}</td>`,
-        token: `<td class="mini"><span class="log-token" title="${esc(token)}">${esc(token)}</span>${copyBtn(token, "令牌名")}</td>`,
-        model: `<td class="mini"><span class="model-badge" title="${esc(x.model_name || "-")}">${esc(x.model_name || "-")}</span>${x.model_name ? copyBtn(x.model_name, "模型名") : ""}</td>`,
-        channel: `<td class="mini"><span class="channel-badge">${channelID || "-"}</span>${x.channel_name ? `<span class="cell-sub" title="${esc(x.channel_name)}">${esc(x.channel_name)}</span>` : ""}</td>`,
-        group: `<td class="mini"><span class="group-badge" title="${esc(x.group_name || "-")}">${esc(x.group_name || "-")}</span></td>`,
+        // 45号 P3-7:空值(N/A)不渲染彩色胶囊、不给复制钮——"–"当色块+复制空串是噪声(四处日志表同源此处)。
+        token: `<td class="mini">${token && token !== "-" ? `<span class="log-token" title="${esc(token)}">${esc(token)}</span>${copyBtn(token, "令牌名")}` : '<span class="mini">-</span>'}</td>`,
+        model: `<td class="mini">${x.model_name ? `<span class="model-badge" title="${esc(x.model_name)}">${esc(x.model_name)}</span>${copyBtn(x.model_name, "模型名")}` : '<span class="mini">-</span>'}</td>`,
+        channel: `<td class="mini">${channelID ? `<span class="channel-badge">${channelID}</span>` : '<span class="mini">-</span>'}${x.channel_name ? `<span class="cell-sub" title="${esc(x.channel_name)}">${esc(x.channel_name)}</span>` : ""}</td>`,
+        group: `<td class="mini">${x.group_name ? `<span class="group-badge" title="${esc(x.group_name)}">${esc(x.group_name)}</span>` : '<span class="mini">-</span>'}</td>`,
         prompt: `<td class="right mini">${promptTokens.toLocaleString()}</td>`,
         completion: `<td class="right mini">${completionTokens.toLocaleString()}</td>`,
         cost: `<td class="right">${money(x.quota || 0)}</td>`,
@@ -904,7 +906,7 @@ async function renderNewapiLogs() {
         ${memberSelf ? "" : `<input id="nl_group" class="fsel" value="${esc(st.group || "")}" placeholder="模型分组">`}
         <select class="fsel" id="nl_type"><option value="">全部类型</option>${typeOptions}</select>
         ${memberSelf ? "" : `<input id="nl_token" class="fsel" value="${esc(st.token || "")}" placeholder="令牌名">
-        <input id="nl_member" class="fsel" value="${esc(st.member || "")}" placeholder="member_id">`}
+        <input id="nl_member" class="fsel" value="${esc(st.member || "")}" placeholder="成员 ID">`}
         ${global ? `<input id="nl_channel" class="fsel" value="${esc(st.channel || "")}" placeholder="渠道 ID">` : ""}
         <input id="nl_req" class="fsel req-filter" value="${esc(st.request || "")}" placeholder="Request ID">
         <button class="btn sm" onclick="applyNewapiLogFilter()">筛选</button>
@@ -1150,30 +1152,25 @@ VIEWS.employees = async () => {
   const total = (d.pagination || {}).total || list.length;
   const maxPage = Math.max(1, Math.ceil(total / 50));
   // B3(28):管理类角色过滤已下沉后端 SQL,total 与可见行一致,前端不再二次过滤(否则计数/翻页错位)。
+  // 45号 P2-D 方案a:裁成**身份定位视图**(组织/员工/团队/状态/分组+入口)——Key/token_id 读 1:1 旧列
+  // 架构B 下恒空、月额度读 0032 废字段、剩余没查、"已用"口径与成员页分裂,全部裁掉;
+  // Key 排障走组织详情"API Key 归属"页(数据正确),额度管理走各组织成员页。跨组织按 Key 搜留 v-future。
   const rows = list.map(m => {
-    const key = m.key_masked || "-";
-    const limit = m.monthly_limit_quota == null ? "未设置" : money(m.monthly_limit_quota);
-    const remain = m.remaining_quota == null ? "未设置" : money(m.remaining_quota);
     return `<tr>
       <td><span class="cell-clip org-cell" title="${esc(m.org_name)}">${esc(m.org_name)}</span><span class="cell-sub">ID ${m.org_id}</span></td>
       <td><span class="cell-clip" title="${esc(m.display_name || m.login_email)}">${esc(m.display_name || m.login_email)}</span><span class="cell-sub">${esc(m.login_email)}</span></td>
       <td><span class="cell-clip" title="${esc(m.team_name || "未分组")}">${esc(m.team_name || "未分组")}</span></td>
       <td>${pill(memberStatusCN(m.status), m.status === "active" ? "ok" : "mut")}</td>
-      <td class="mini"><span class="cell-clip" title="${esc(key)}">${esc(key)}</span></td>
-      <td class="mini">${m.newapi_token_id || "-"}</td>
       <td><span class="cell-clip" title="${esc(m.newapi_group || "-")}">${esc(m.newapi_group || "-")}</span></td>
-      <td class="right">${money(m.consumed_quota || 0)}</td>
-      <td class="right mini">${limit}</td>
-      <td class="right mini">${remain}</td>
       <td class="right table-actions">
         <span class="btn sm" onclick="S.logMirror=newGlobalLogState();S.logMirror.member='${m.id}';go('oplogs')">日志</span>
         <span class="btn sm" onclick="enterOrg(${m.org_id},'${jsstr(m.org_name)}')">进组织</span>
       </td>
     </tr>`;
   }).join("");
-  return head("员工管理", "运营方全局员工和 API Key 视图,用于跨客户排障和维护")
+  return head("员工管理", "运营方全局员工目录:跨客户定位人与组织;Key 排障请进组织详情「API Key 归属」,额度管理在各组织成员页")
     + `<div class="toolbar log-filter" style="gap:8px;flex-wrap:wrap">
-      <input id="ef_q" class="fsel" value="${esc(f.q || "")}" placeholder="姓名 / 登录名 / Key / 公司">
+      <input id="ef_q" class="fsel" value="${esc(f.q || "")}" placeholder="姓名 / 登录名 / 公司">
       <input id="ef_org" class="fsel" value="${esc(f.org || "")}" placeholder="组织 ID">
       <input id="ef_team" class="fsel" value="${esc(f.team || "")}" placeholder="团队 ID">
       <select id="ef_status" class="fsel"><option value="">全部状态</option><option value="active"${f.status === "active" ? " selected" : ""}>启用</option><option value="disabled"${f.status === "disabled" ? " selected" : ""}>禁用</option><option value="provisioning"${f.status === "provisioning" ? " selected" : ""}>开通中</option></select>
@@ -1181,7 +1178,7 @@ VIEWS.employees = async () => {
       <button class="btn sm" onclick="resetEmployeeFilter()">重置</button>
     </div>
     <div class="panel"><div class="ph">全局员工列表</div><div class="pb">
-      <div class="table-scroll"><table class="kvtable employee-table"><colgroup><col class="e-org"><col class="e-member"><col class="e-team"><col class="e-status"><col class="e-key"><col class="e-tokenid"><col class="e-group"><col class="e-used"><col class="e-limit"><col class="e-remain"><col class="e-actions"></colgroup><tr><td class="k">客户组织</td><td class="k">员工</td><td class="k">部门/团队</td><td class="k">状态</td><td class="k">Key(脱敏)</td><td class="k" title="new-api 侧令牌的内部编号,排障时对照 new-api 后台用">token_id</td><td class="k">模型分组</td><td class="right k">已用额度</td><td class="right k">月额度</td><td class="right k">剩余额度</td><td></td></tr>${rows || `<tr><td colspan="11">${emptyState("☷", "还没有员工", "各客户组织开通员工后会汇总在这里", "", "")}</td></tr>`}</table></div>
+      <div class="table-scroll"><table class="kvtable employee-table"><colgroup><col class="e-org"><col class="e-member"><col class="e-team"><col class="e-status"><col class="e-group"><col class="e-actions"></colgroup><tr><td class="k">客户组织</td><td class="k">员工</td><td class="k">部门/团队</td><td class="k">状态</td><td class="k">模型分组</td><td></td></tr>${rows || `<tr><td colspan="6">${emptyState("☷", "还没有员工", "各客户组织开通员工后会汇总在这里", "", "")}</td></tr>`}</table></div>
       <div class="pager" style="justify-content:flex-end;margin-top:10px"><span class="mini">共 ${total} 名 · 第 ${page}/${maxPage} 页</span>
         <button onclick="gotoEmployeePage(${page - 1})" ${page <= 1 ? "disabled" : ""}>上一页</button>
         <button onclick="gotoEmployeePage(${page + 1})" ${page >= maxPage ? "disabled" : ""}>下一页</button></div>
@@ -1307,7 +1304,7 @@ async function doGrant(mid) {
 }
 function openRename(mid, cur) {
   modal("修改成员显示名", `<div class="fld"><label>显示名</label><input id="rn_n" value="${esc(cur)}" placeholder="张三"></div>
-    <div class="note">导入/随机名可改成真实姓名,报表与列表随之更新(19-F2)。</div>`,
+    <div class="note">随机名可改成真实姓名,报表与列表随之更新。</div>`,
     `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doRename(${mid})">保存</button>`);
 }
 async function doRename(mid) {
@@ -1450,8 +1447,8 @@ VIEWS.tiers = async () => {
     const sub = t.quota_type === "subscription";
     return `<tr><td>${esc(t.name)}${t.is_default ? ' <span class="tag">默认</span>' : ""}</td>
       <td>${sub ? pill("订阅 · " + periodCN(t.reset_period), "ok") : pill("固定/单次", "mut")}</td>
-      <td class="right"><b>${money(rawOf(t, "amount_raw") || 0)}</b>${sub ? `<div class="mini">每${periodCN(t.reset_period)}补满到该值</div>` : ""}</td>
-      <td>${t.group ? `<span class="group-badge" title="${esc(t.group)}">${esc(t.group)}</span>` : '<span class="mini">-</span>'}</td>
+      <td class="right"><b>${money(rawOf(t, "amount_raw") || 0)}</b>${sub ? `<div class="mini">${periodCN(t.reset_period)}补满到该值</div>` : ""}</td>
+      <td>${t.newapi_group ? `<span class="group-badge" title="${esc(t.newapi_group)}">${esc(t.newapi_group)}</span>` : '<span class="mini">-</span>'}</td>
       <td>${(t.model_limits || t.model_set || []).map(m => `<span class="mcap">${esc(m)}</span>`).join("") || '<span class="mini">分组内全部模型</span>'}</td>
       <td>${grantChips(t)}</td>
       <td class="right table-actions">
@@ -1473,7 +1470,7 @@ function tierFormHTML(p, t) {
   const sub = t.quota_type === "subscription";
   const amtRaw = rawOf(t, "amount_raw");
   const gopts = [`<option value="">${S.orgGroupsErr ? "(分组加载失败,请刷新页面重试)" : "(请选择分组)"}</option>`].concat(
-    (S.orgGroups || []).map(g => `<option value="${esc(g.group)}"${g.group === (t.group || "") ? " selected" : ""}>${esc(g.group)}${g.ratio != null ? `(倍率 ${esc(String(g.ratio))})` : ""}</option>`)).join("");
+    (S.orgGroups || []).map(g => `<option value="${esc(g.group)}"${g.group === (t.newapi_group || "") ? " selected" : ""}>${esc(g.group)}${g.ratio != null ? `(倍率 ${esc(String(g.ratio))})` : ""}</option>`)).join("");
   return `<div class="fld"><label>档位名称</label><input id="${p}_n" value="${esc(t.name || "")}" placeholder="标准档"></div>
     <div class="fld"><label>额度型(二选一,无“无上限”)</label><select id="${p}_qt" onchange="document.getElementById('${p}_rpwrap').style.display=this.value==='subscription'?'':'none'">
       <option value="fixed"${!sub ? " selected" : ""}>固定/单次(用完组织再给)</option>
@@ -1482,7 +1479,7 @@ function tierFormHTML(p, t) {
     <div id="${p}_rpwrap" style="display:${sub ? "" : "none"}"><div class="fld"><label>重置周期(自然边界,按组织时区)</label><select id="${p}_rp">
       ${["daily", "weekly", "monthly"].map(x => `<option value="${x}"${(t.reset_period || "monthly") === x ? " selected" : ""}>${periodCN(x)}</option>`).join("")}</select></div></div>
     <div class="fld"><label>分组(决定计价档与可用模型范围)</label><select id="${p}_g">${gopts}</select></div>
-    <div class="fld"><label>可用模型(逗号分隔,留空=分组内全部模型)</label><input id="${p}_m" value="${esc((t.model_limits || t.model_set || []).join(","))}" placeholder="gpt-4o,claude-sonnet-4-5"></div>
+    <div class="fld"><label>可用模型(逗号分隔,留空=分组内全部模型)</label><input id="${p}_m" value="${esc((t.model_set || []).join(","))}" placeholder="gpt-4o,claude-sonnet-4-5"></div>
     <div class="errline" id="${p}_err"></div>`;
 }
 function readTierForm(p) {
@@ -1492,9 +1489,9 @@ function readTierForm(p) {
   const g = val(p + "_g");
   if (!g) return { err: "请选择分组" };
   const qt = val(p + "_qt");
-  const body = {
-    name: val(p + "_n").trim(), quota_type: qt, amount_raw: usd2raw(usd), group: g,
-    model_limits: val(p + "_m").split(",").map(s => s.trim()).filter(Boolean),
+  const body = { // 45号 P1-1:字段名=后端契约 newapi_group/model_set(曾提交 group/model_limits 必 400)
+    name: val(p + "_n").trim(), quota_type: qt, amount_raw: usd2raw(usd), newapi_group: g,
+    model_set: val(p + "_m").split(",").map(s => s.trim()).filter(Boolean),
   };
   if (qt === "subscription") body.reset_period = val(p + "_rp");
   return { body };
@@ -1535,7 +1532,7 @@ async function openTierGrants(tid, name) {
   if (!teams.length) { try { teams = (await api("GET", "/organizations/" + S.orgId + "/teams", null)) || []; } catch (e) {} }
   const grants = t.grants || [];
   const cur = grants.length
-    ? grants.map(g => `<span class="tag">${esc(grantLabel(g, members, teams))} <span class="lk" onclick="doDeleteGrant(${tid},${Number(g.id) || 0},'${jsstr(g.target_type || g.type || "")}',${Number(g.target_id) || 0})" title="取消该授权">×</span></span>`).join(" ")
+    ? grants.map(g => `<span class="tag">${esc(grantLabel(g, members, teams))} <span class="lk" onclick="doDeleteGrant(${tid},${Number(g.grant_id) || 0})" title="取消该授权">×</span></span>`).join(" ")
     : '<span class="mini">尚未授权;未被授权的成员不能被配到此档位、也选不到它的分组</span>';
   const mopts = members.filter(m => m.status !== "offboarded" && m.role !== "org_admin" && m.role !== "operator").map(m => `<option value="${m.id}">${esc(m.display_name || m.login_email)}</option>`).join("");
   const topts = (teams || []).filter(x => x.status !== "archived").map(x => `<option value="${x.id}">${esc(x.name)}</option>`).join("");
@@ -1558,9 +1555,9 @@ async function doAddGrant(tid) {
   try { await api("POST", "/tiers/" + tid + "/grants", body); closeM(); toast("已授权"); renderView(); }
   catch (e) { setErr("tg_err", e.message); }
 }
-async function doDeleteGrant(tid, gid, type, targetId) {
-  const body = gid > 0 ? { grant_id: gid } : { target_type: type, target_id: targetId };
-  try { await api("DELETE", "/tiers/" + tid + "/grants", body); closeM(); toast("已取消授权"); renderView(); }
+async function doDeleteGrant(tid, gid) { // 45号 P1-2:后端契约=grant_id(曾读 g.id 恒 0 落兜底 body 必 400)
+  if (!(gid > 0)) { toast("授权记录缺 grant_id,请刷新后重试"); return; }
+  try { await api("DELETE", "/tiers/" + tid + "/grants", { grant_id: gid }); closeM(); toast("已取消授权"); renderView(); }
   catch (e) { toast(e.message); }
 }
 /* ---------- 架构B 余额与账本(31-ADR §15):金库 + 各成员额度 + 划拨流水;方向绿=金库→成员入账、橙=退额 ---------- */
@@ -1571,9 +1568,12 @@ function ledgerReasonCN(r) {
     restore: "恢复分配", restore_grant: "恢复分配", reconcile: "对账补齐",
   })[String(r || "").toLowerCase()] || (r || "-");
 }
-// 方向推断:优先 direction 字段;否则按 reason 语义 / 金额符号(契约 0031 未明写方向字段,缺口见交付说明)。
+// 方向:后端权威枚举 credit(金库→成员 入账)/ debit(成员→金库 退额),45号 P2-3 修正
+// (曾不认 debit → 离职退额画成绿色入账);枚举已补进 33号契约。空串才走 reason 兜底。
 function ledgerDir(x) {
   const d = String(x.direction || "").toLowerCase();
+  if (d === "credit") return "in";
+  if (d === "debit") return "out";
   if (d) return (d === "refund" || d === "out" || d === "member_to_org" || d === "to_treasury") ? "out" : "in";
   const r = String(x.reason || "").toLowerCase();
   if (r.indexOf("refund") >= 0 || r.indexOf("offboard") >= 0 || r.indexOf("退") >= 0) return "out";

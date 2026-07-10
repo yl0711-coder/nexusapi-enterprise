@@ -13,7 +13,7 @@ import (
 //     修复写受 money_freeze 管、检测告警恒开)+ 交叉恒等式扫描(内部限频,只告警不自动修);
 //   - ReconcileDiscounts:折扣倍率漂移告警(只读,observe 短路已拆);
 //   - ReconcileBilling:logs↔usage_ledger 真账对账(少收告警);
-//   - ReconcileBackfillLedger / ReassertWalletOnly / PurgeOldUsageDetail:安全网与 housekeeping。
+//   - ReassertWalletOnly / PurgeOldUsageDetail / CheckTreasuryLowWatermarks:安全网与 housekeeping。
 //
 // 架构B 退役停调(33 §5 + 组长裁定 33-§12-9/17,函数保留待删、不再入口可达):
 //   - ReconcileBalanceLedger:对账对象 company_balance 第二账已砍(余额=读求和,单一真相=账本+new-api);

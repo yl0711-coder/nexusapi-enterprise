@@ -9,6 +9,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/nexusapi-platform/enterprise/model"
 	"github.com/nexusapi-platform/enterprise/pkg/apperr"
 	"github.com/nexusapi-platform/enterprise/pkg/session"
 	"github.com/nexusapi-platform/enterprise/repo"
@@ -26,6 +27,8 @@ type LedgerEntryView struct {
 	OrgID          int64      `json:"org_id"`
 	MemberID       int64      `json:"member_id,omitempty"`
 	Direction      string     `json:"direction"` // credit / debit(相对金库派生;金库不明时空串)
+	MemberName     string     `json:"member_name,omitempty"` // 成员显示名(离职标注"(已离职)";45号 P2-4)
+	OrgName        string     `json:"org_name,omitempty"`    // 组织名(平台视角=运营方全平台账本页;45号 P2-4)
 	AmountRaw      int64      `json:"amount_raw"`
 	Status         string     `json:"status"` // pending / applied / failed
 	Reason         string     `json:"reason"`
@@ -98,20 +101,48 @@ func (s *Service) ListAllLedger(ctx context.Context, c session.Claims, orgID int
 	return views, total, err
 }
 
-// ledgerViews 账本行→视图:派生 direction(相对金库 uid)+ 按角色脱敏。金库 uid 按 org 缓存一轮。
+// ledgerViews 账本行→视图:派生 direction(相对金库 uid)+ 按角色脱敏 + 姓名富化(45号 P2-4:
+// member_name 各视角都给——满屏"成员#18"不可用;org_name 仅运营方全平台页;离职成员标注"(已离职)";
+// 富化查询按行缓存,读失败置空 fail-open 不挂列表)。
 func (s *Service) ledgerViews(ctx context.Context, role session.Role, rows []*repo.LedgerTransfer) ([]LedgerEntryView, error) {
-	treasury := map[int64]int64{} // orgID -> 金库 newapi_user_id(0=未知)
+	treasury := map[int64]int64{}  // orgID -> 金库 newapi_user_id(0=未知)
+	orgNames := map[int64]string{} // orgID -> 组织名
+	memNames := map[int64]string{} // memberID -> 显示名(含离职标注)
 	out := make([]LedgerEntryView, 0, len(rows))
 	for _, t := range rows {
 		uid, ok := treasury[t.OrgID]
 		if !ok {
 			uid = 0
-			if org, err := s.store.GetOrganization(ctx, t.OrgID); err == nil && org.NewapiUserID != nil {
-				uid = *org.NewapiUserID
+			if org, err := s.store.GetOrganization(ctx, t.OrgID); err == nil {
+				if org.NewapiUserID != nil {
+					uid = *org.NewapiUserID
+				}
+				orgNames[t.OrgID] = org.Name
 			}
 			treasury[t.OrgID] = uid
 		}
-		out = append(out, ledgerEntryView(t, uid, role))
+		v := ledgerEntryView(t, uid, role)
+		if t.MemberID != 0 {
+			nm, ok := memNames[t.MemberID]
+			if !ok {
+				if m, err := s.store.GetMemberAny(ctx, t.OrgID, t.MemberID); err == nil {
+					if m.DisplayName != nil && *m.DisplayName != "" {
+						nm = *m.DisplayName
+					} else {
+						nm = m.LoginEmail
+					}
+					if m.Status == model.MemberStatusOffboarded {
+						nm += "(已离职)"
+					}
+				}
+				memNames[t.MemberID] = nm
+			}
+			v.MemberName = nm
+		}
+		if role == session.RoleOperator {
+			v.OrgName = orgNames[t.OrgID]
+		}
+		out = append(out, v)
 	}
 	return out, nil
 }

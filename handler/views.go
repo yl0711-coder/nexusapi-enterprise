@@ -22,7 +22,7 @@ type orgView struct {
 	DefaultTierID *int64 `json:"default_tier_id"`
 	BillingMode   string `json:"billing_mode"`
 	Archived      bool   `json:"archived"` // T12:是否已归档
-	// v1 正交属性(0022,只暴露非敏感位):门A/门B(前端"重新导入"按钮判断)+ 计费口径(订阅显示)。
+	// 正交属性(0022,非敏感位):created_by_platform(门B 已退役,恒 true,读兼容保留)+ 计费口径。
 	CreatedByPlatform bool   `json:"newapi_created_by_platform"`
 	BillingKind       string `json:"billing_kind"`
 	CreatedAt         string `json:"created_at"`

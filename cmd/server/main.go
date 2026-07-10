@@ -147,7 +147,7 @@ func run(log *slog.Logger) error {
 		}
 	}
 
-	// quota-worker(leader 单写者:扫 grant 到期反向,03 §3.4)。MVP 单实例默认开。
+	// quota-worker(leader 单写者:订阅补满;grant 反向机器已随架构B 退役)。单节点默认开。
 	// GZ-02 修复2:worker 在 WaitGroup 下启动,关闭时先 cancel + 等当前 tick 收尾、再 drain HTTP。
 	// defer workerCancel() 仅作早退路径(worker 启动后到信号等待之间若异常 return)的兜底;
 	// 正常关闭由下方信号处理段显式 workerCancel() 保证「先于 srv.Shutdown」的正确顺序。

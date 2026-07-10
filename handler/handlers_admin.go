@@ -31,18 +31,12 @@ func (h *Handler) handleUpdateOrg(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, r, http.StatusOK, toOrgView(o))
 }
 
-// GET/PUT /organizations/{id}/approval-rules — 审批阈值(E13)。
-type approvalRulesReq struct {
-	AutoMaxQuota *int64 `json:"auto_max_quota"`
-	AutoMaxDays  *int   `json:"auto_max_days"`
-	L1MaxQuota   *int64 `json:"l1_max_quota"`
-}
 
 // PATCH /members/{id} — 改团队/层级。
 type updateMemberReq struct {
 	TeamID      *int64  `json:"team_id"`
 	TierID      *int64  `json:"tier_id"`
-	DisplayName *string `json:"display_name"` // v1 19-F2:管理员改成员显示名(导入名/随机名可改)
+	DisplayName *string `json:"display_name"` // 管理员改成员显示名(随机名可改;"导入名"语义已随门B退役)
 }
 
 func (h *Handler) handleUpdateMember(w http.ResponseWriter, r *http.Request) {

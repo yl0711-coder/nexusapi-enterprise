@@ -240,7 +240,7 @@ table td b,table td .money,td.num{white-space:nowrap;font-variant-numeric:tabula
 .member-table .m-name{width:210px}.member-table .m-team{width:110px}.member-table .m-tier{width:120px}
 .member-table .m-granted{width:100px}.member-table .m-used{width:96px}.member-table .m-remain{width:132px}
 .member-table .m-actions{width:312px}
-.employee-table{min-width:1560px}
+.employee-table{min-width:980px} /* 45号方案a裁列后收窄(身份定位视图六列) */
 .member-table th:last-child,.member-table td:last-child,
 .employee-table th:last-child,.employee-table td:last-child,
 .token-self-table th:last-child,.token-self-table td:last-child{
@@ -253,3 +253,7 @@ table td b,table td .money,td.num{white-space:nowrap;font-variant-numeric:tabula
   .member-table th:nth-child(3),.member-table td:nth-child(3){display:none}
   .member-table{min-width:940px}
 }
+/* 45号 P3-8:档位表操作列 sticky 钉右(1280 下"授权"曾被截成"授…"),对齐成员表做法 */
+.tier-table th:last-child,.tier-table td:last-child{position:sticky;right:0;background:#fff;box-shadow:-8px 0 8px -8px rgba(15,23,42,.12)}
+.tier-table th:last-child{background:#fafbfe;z-index:1}
+.tier-table tbody tr:hover td:last-child{background:#fafbff}

@@ -90,14 +90,8 @@ func (s *Service) CreateTier(ctx context.Context, c session.Claims, orgID int64,
 	if err != nil {
 		return nil, err
 	}
-	s.redactTierMoney(c, t)
 	return t, nil
 }
-
-// redactTierMoney:藏价机制已废除(架构B,33 §12-7,ADR §9 镜像可见性——额度/倍率对成员可见,
-// 镜像 new-api 普通用户),恒为无操作。函数与各调用点保留形状,组长阶段2 连同 rbac.go 的
-// mvpPriceHidden/mvpHidePrice 定义统一删除(防跨文件连锁编译断裂,BE③ 只清本文件语义)。
-func (s *Service) redactTierMoney(c session.Claims, tiers ...*model.Tier) {}
 
 // UpdateTierInput 改层级入参(T10;nil 字段=不改;架构B 0032 增额度型/额度值/周期/可见性)。
 type UpdateTierInput struct {
@@ -186,7 +180,6 @@ func (s *Service) UpdateTier(ctx context.Context, c session.Claims, orgID, tierI
 	if err != nil {
 		return nil, err
 	}
-	s.redactTierMoney(c, out)
 	return out, nil
 }
 
@@ -279,7 +272,6 @@ func (s *Service) ListTiers(ctx context.Context, c session.Claims, orgID int64) 
 	if err != nil {
 		return nil, err
 	}
-	s.redactTierMoney(c, tiers...) // MVP 藏价:客户直连不见月额度(控制字段);运营方/支持态保留
 	return tiers, nil
 }
 

@@ -178,8 +178,6 @@ var assistWriteAllow = []string{
 	"PATCH /api/v1/organizations/*",
 	"POST /api/v1/organizations/*/archive",
 	"POST /api/v1/organizations/*/unarchive",
-	"POST /api/v1/organizations/*/import-tokens",
-	"POST /api/v1/organizations/*/backfill/requeue",
 	"POST /api/v1/organizations/*/teams",
 	"PATCH /api/v1/organizations/*/teams/*",
 	"POST /api/v1/organizations/*/teams/*/archive",

@@ -11,12 +11,13 @@ import (
 
 // MemberFilter 是成员列表的过滤条件(10 §1.5;对应原型 members 页 _mq/_mteam/_mstatus)。
 type MemberFilter struct {
-	Q      string // 关键词:匹配 display_name / login_email / key_masked
-	OrgID  *int64
-	TeamID *int64
-	Status string
-	Limit  int
-	Offset int
+	Q            string // 关键词:匹配 display_name / login_email / key_masked
+	OrgID        *int64
+	TeamID       *int64
+	Status       string
+	ExcludeAdmin bool // 45号 P3-13:只算"API 使用成员"(剔 org_admin/operator;组织详情成员数 KPI/概览表口径)
+	Limit        int
+	Offset       int
 }
 
 type MemberOverview struct {
@@ -336,6 +337,9 @@ func (s *Store) ListMembers(ctx context.Context, orgID int64, f MemberFilter) ([
 	if f.Status != "" {
 		where = append(where, "status = ?")
 		args = append(args, f.Status)
+	}
+	if f.ExcludeAdmin {
+		where = append(where, "role NOT IN ('org_admin','operator')") // 45号 P3-13:API 使用成员口径
 	}
 	cond := strings.Join(where, " AND ")
 

@@ -80,8 +80,8 @@ func (s *Service) SetOrgDefaultTokenGroup(ctx context.Context, c session.Claims,
 // 审批阈值(Get/SetApprovalRules)与配额策略(List/SetQuotaPolicy)service 方法已随
 // 审批/周期重置机器退役删除(33 §12-4;handler/路由已先行摘除,此处清扫残留)。
 
-// UpdateMember 改成员团队/层级/显示名(PATCH /members/:id,A/L)。改层级会重算 override 下发。
-// v1 加 displayName(19-F2:导入/开通的成员管理员可随时改名)。
+// UpdateMember 改成员团队/层级/显示名(PATCH /members/:id,A/L)。架构B:改档只改关联,不回溯下发
+// (override 机器已退役);调额走显式 quota:grant。displayName 管理员可随时改。
 func (s *Service) UpdateMember(ctx context.Context, c session.Claims, orgID, memberID int64, teamID, tierID *int64, displayName *string) (*model.Member, error) {
 	m, err := s.loadManageableMember(ctx, c, orgID, memberID)
 	if err != nil {

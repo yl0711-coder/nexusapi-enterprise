@@ -189,37 +189,7 @@ func (h *Handler) handleMemberUsageDetail(w http.ResponseWriter, r *http.Request
 	writeOK(w, r, http.StatusOK, pg)
 }
 
-// GET /organizations/{id}/escrow-balance — 模型2 读穿余额(窗口=桶1读穿 newapi + 托管之和,O/A)。
-func (h *Handler) handleEscrowBalance(w http.ResponseWriter, r *http.Request) {
-	c, _ := claimsFrom(r.Context())
-	orgID, err := pathInt64(r, "id")
-	if err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	bal, err := h.svc.GetDerivedBalance(r.Context(), c, orgID)
-	if err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	writeOK(w, r, http.StatusOK, bal)
-}
-
-// POST /organizations/{id}/escrow/refill — 手工续充:把一个托管桶并入桶1 可花窗口(运营方,v1 无自动 worker)。
-func (h *Handler) handleEscrowRefill(w http.ResponseWriter, r *http.Request) {
-	c, _ := claimsFrom(r.Context())
-	orgID, err := pathInt64(r, "id")
-	if err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	bal, err := h.svc.RefillWindow(r.Context(), c, orgID)
-	if err != nil {
-		writeErr(w, r, err)
-		return
-	}
-	writeOK(w, r, http.StatusOK, bal)
-}
+// handleEscrowBalance/handleEscrowRefill 已随 escrow 分桶下发侧退役删除(45号 14/15,33 §5)。
 
 // GET /organizations/{id}/budget-ref — 额度参考条(#4:已用/当前余额,O/A)。
 // 架构B(BE③):预付口径改读求和(balance_raw=金库+Σ成员),company_balance 第二账退役(33 §5)。

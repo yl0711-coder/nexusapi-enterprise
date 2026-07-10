@@ -627,8 +627,9 @@ function renderOrgOverviewPanel(org, eb, mem) {
   </div>`;
 }
 function renderOrgMembersPanel(mem) {
+  // 45号 P2-D 连带:Key(脱敏)列删除——m.key_masked 是 1:1 时代死字段(1:N 后恒空),Key 归属看「API Key 归属」tab。
   const rows = (mem.list || []).map(m => `<tr><td>${esc(m.display_name || m.login_email)}</td>
-    <td>${pill(memberStatusCN(m.status), m.status === "active" ? "ok" : "mut")}</td><td class="mini">${esc(m.key_masked || "-")}</td></tr>`).join("");
+    <td>${pill(memberStatusCN(m.status), m.status === "active" ? "ok" : "mut")}</td></tr>`).join("");
   // A2(28-§阻断):成员 Tab 分页——>50 成员时显示总数 + 上/下页,消除"page_size=20 静默截断致运营看不到人"。
   const total = (mem.pagination || {}).total || (mem.list || []).length || 0;
   const page = S.orgMemPage || 1, pages = Math.max(1, Math.ceil(total / 50));
@@ -637,7 +638,7 @@ function renderOrgMembersPanel(mem) {
         <button onclick="goOrgMemPage(-1)" ${page <= 1 ? "disabled" : ""}>上一页</button>
         <button onclick="goOrgMemPage(1)" ${page >= pages ? "disabled" : ""}>下一页</button></div>`
     : `<div class="mini" style="text-align:right;margin-top:8px">共 ${total} 人</div>`;
-  return `<div class="panel"><div class="ph">成员</div><div class="pb"><div class="table-scroll"><table><thead><tr><th>成员</th><th>状态</th><th>Key(脱敏)</th></tr></thead><tbody>${rows || `<tr><td colspan="3">${emptyState("☷", "该组织还没有成员", "开通员工后会显示在这里", "", "")}</td></tr>`}</tbody></table></div>${pager}</div></div>`;
+  return `<div class="panel"><div class="ph">成员</div><div class="pb"><div class="table-scroll"><table><thead><tr><th>成员</th><th>状态</th></tr></thead><tbody>${rows || `<tr><td colspan="2">${emptyState("☷", "该组织还没有成员", "开通员工后会显示在这里", "", "")}</td></tr>`}</tbody></table></div>${pager}</div></div>`;
 }
 function goOrgMemPage(delta) {
   S.orgMemPage = Math.max(1, (S.orgMemPage || 1) + delta);

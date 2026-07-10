@@ -478,37 +478,25 @@ async function downloadUsageCsv() {
     toast("已导出 CSV"); // 28-建议批:成功反馈,不再无声
   } catch (e) { toast(e.message); }
 }
-// v1 组织入网两个门(19-F1):门A 新建(平台建 new-api 用户)/ 门B 关联现有(录入企业 user + access token,
-// 导入其令牌为成员)。进来后同一种组织。
+// 架构B 组织入网 = 只有门A 新建(平台建金库 new-api 用户)。门B"关联现有用户"已整体退役
+// (总监裁定 2026-07-07/ADR §11):后端 Associate 字段已删、import-tokens 端点已摘,前端此弹窗
+// 曾残留门B 选项致提交带 associate 字段被严格 JSON 解析拒(生产报"请求体格式非法"),本次清净。
 function openCreateOrg() {
-  modal("组织入网", `<div class="fld"><label>接入方式</label><select id="co_mode" onchange="document.getElementById('co_assoc').style.display=this.value==='associate'?'':'none'">
-      <option value="create">新建(平台自动创建 new-api 用户)</option>
-      <option value="associate">关联现有 new-api 用户(企业已在用)</option></select></div>
-    <div class="fld"><label>组织名称</label><input id="co_n" placeholder="Acme 科技"></div>
+  modal("组织入网", `<div class="fld"><label>组织名称</label><input id="co_n" placeholder="Acme 科技"></div>
     <div class="fld"><label>唯一标识 slug</label><input id="co_s" placeholder="acme"></div>
     <div class="fld"><label>管理员邮箱</label><input id="co_e" placeholder="admin@acme.com"></div>
     <div class="fld"><label>new-api 用户分组</label><input id="co_g" placeholder="org_acme"></div>
-    <div id="co_assoc" style="display:none">
-      <div class="fld"><label>企业 new-api 用户 ID</label><input id="co_uid" type="number" placeholder="123"></div>
-      <div class="fld"><label>该用户的 access token</label><input id="co_tok" placeholder="企业在 new-api 个人设置里生成后粘入"></div>
-      <div class="fld"><label>导入成员显示名</label><select id="co_np"><option value="inherit">继承令牌名(可改)</option><option value="random">随机串(可改)</option></select></div>
-      <div class="note">关联要求:token 必须属<b>普通用户</b>(拒管理员);建议企业为组织专门建一个普通用户再生成 token。
-        关联后其名下全部令牌导入为成员,员工继续用旧 key;分组须与该用户在 new-api 的分组一致。</div>
-    </div>
+    <div class="note">平台将自动创建该组织的金库 new-api 用户(门A);组织的钱由运营方向金库代充,再由管理员划拨给成员。</div>
     <div class="note">new-api 用户分组须先在 new-api 配好(挂模型分组 group_special_usable_group),否则建组织会被拒。一个分组只绑一个组织。管理员初始密码本次回显一次。</div>`,
     `<button class="btn" onclick="closeM()">取消</button><button class="btn pri" onclick="doCreateOrg()">创建</button>`);
 }
 async function doCreateOrg() {
   try {
     const body = { name: val("co_n"), slug: val("co_s"), admin_email: val("co_e"), newapi_user_group: val("co_g") };
-    if (val("co_mode") === "associate") {
-      body.associate = { newapi_user_id: parseInt(val("co_uid"), 10) || 0, access_token: val("co_tok"), name_policy: val("co_np") };
-    }
     const d = await api("POST", "/organizations", body);
-    const impLine = body.associate ? `<tr><td class="k">导入成员</td><td>${d.imported_members || 0} 个${d.import_failed ? `(失败 ${d.import_failed} 个,可在组织页"重新导入"补齐)` : ""}</td></tr>` : "";
     modal("已创建", `<div class="note">组织已创建。请把管理员初始凭证交付客户(仅显示一次):</div>
       <table class="kvtable"><tr><td class="k">管理员邮箱</td><td>${esc(d.admin_email)}</td></tr>
-      <tr><td class="k">初始密码</td><td><b>${esc(d.admin_initial_password)}</b></td></tr>${impLine}</table>`,
+      <tr><td class="k">初始密码</td><td><b>${esc(d.admin_initial_password)}</b></td></tr></table>`,
       `<button class="btn pri" onclick="closeM();renderView()">完成</button>`);
   } catch (e) { toast(e.message); }
 }
@@ -525,15 +513,14 @@ async function enterOrg(id, name) {
          <div class="panel"><div class="pb"><div class="empty">正在载入「${esc(name)}」…</div></div></div>`;
   }
   // 架构B:金库余额走 /orgs/:id/balance(读求和,escrow 已退役);充值仍在 new-api 侧对金库 user 代充。
-  const [org, eb, bf] = await Promise.all([
+  const [org, eb] = await Promise.all([
     api("GET", "/organizations/" + id, null),
     api("GET", "/orgs/" + id + "/balance", null).catch(() => ({ __err: true })),
-    api("GET", "/organizations/" + id + "/backfill", null).catch(() => ({ status: "none" })),
   ]);
   const mem = await api("GET", "/organizations/" + id + "/members?page=1&page_size=20", null);
   const main = document.getElementById("main");
   const hardStopped = org.status === "hard_stopped";
-  S.orgDetail = { org, eb, bf, mem };
+  S.orgDetail = { org, eb, mem };
   main.innerHTML = head("客户组织详情", "运营方支持视角 · 客户概览 / 成员排障 / 使用日志 / 风险控制") // C10:head() 内部已 esc,勿双重转义
     + `<div class="crumb"><span class="lk" onclick="go('orgs')">客户组织</span><span class="sep">/</span><b>${esc(name)}</b></div>
     ${hardStopped ? `<div class="note" style="color:#c00">该组织处于运维硬停中:全部 key 已 403,平台管理操作暂不可用,解除后恢复。</div>` : ""}
@@ -549,7 +536,6 @@ async function enterOrg(id, name) {
       ${kpi("组织状态", pill(org.status, org.status === "active" ? "ok" : hardStopped ? "bad" : "warn"), hardStopped ? "组织级硬停中" : "正常服务中")}
       ${kpi("成员数", (mem.pagination || {}).total || (mem.list || []).length || 0, "API 使用成员")}
     </div>
-    ${bf && bf.status && bf.status !== "none" ? `<div class="panel"><div class="ph">历史用量回填</div><div class="pb">${backfillLine(bf)}</div></div>` : ""}
     <div class="tabs org-tabs">
       ${orgTabButton("overview", "概览")}
       ${orgTabButton("members", "成员")}
@@ -558,7 +544,7 @@ async function enterOrg(id, name) {
       ${orgTabButton("support", "支持会话")}
       ${orgTabButton("risk", "风险控制")}
     </div>
-    <div id="orgTabBody">${renderOrgOverviewPanel(org, eb, bf, mem)}</div>`;
+    <div id="orgTabBody">${renderOrgOverviewPanel(org, eb, mem)}</div>`;
   if (S.orgTab !== "overview") renderOrgCurrentTab();
 }
 function orgTabButton(tab, label) {
@@ -576,15 +562,14 @@ async function renderOrgCurrentTab() {
   try {
     if (S.orgTab === "overview") {
       if (!S.orgDetail) {
-        const [org, eb, bf, mem] = await Promise.all([
+        const [org, eb, mem] = await Promise.all([
           api("GET", "/organizations/" + S.orgId, null),
           api("GET", "/orgs/" + S.orgId + "/balance", null).catch(() => ({ __err: true })),
-          api("GET", "/organizations/" + S.orgId + "/backfill", null).catch(() => ({ status: "none" })),
           api("GET", "/organizations/" + S.orgId + "/members?page=1&page_size=20", null),
         ]);
-        S.orgDetail = { org, eb, bf, mem };
+        S.orgDetail = { org, eb, mem };
       }
-      box.innerHTML = renderOrgOverviewPanel(S.orgDetail.org, S.orgDetail.eb, S.orgDetail.bf, S.orgDetail.mem);
+      box.innerHTML = renderOrgOverviewPanel(S.orgDetail.org, S.orgDetail.eb, S.orgDetail.mem);
     } else if (S.orgTab === "members") {
       const mem = await api("GET", "/organizations/" + S.orgId + "/members?page=" + (S.orgMemPage || 1) + "&page_size=50", null);
       box.innerHTML = renderOrgMembersPanel(mem);
@@ -606,16 +591,10 @@ async function renderOrgCurrentTab() {
     box.innerHTML = `<div class="panel"><div class="pb">${emptyx("加载失败", e.message)}</div></div>`;
   }
 }
-function renderOrgOverviewPanel(org, eb, bf, mem) {
+function renderOrgOverviewPanel(org, eb, mem) {
   const id = S.orgId;
   const hardStopped = org.status === "hard_stopped";
   const memberTotal = (mem.pagination || {}).total || (mem.list || []).length || 0;
-  const reimport = org.newapi_created_by_platform === false
-    ? `<button class="btn" onclick="doReimport(${id})">重新导入令牌</button>`
-    : `<span class="mini">平台自动创建组织,无需令牌导入</span>`;
-  const backfill = bf && bf.status && bf.status !== "none"
-    ? `<button class="btn" onclick="doRequeueBackfill(${id})">重新回填历史用量</button>`
-    : `<span class="mini">暂无历史回填任务</span>`;
   return `<div class="row2">
     <div class="panel">
       <div class="ph">组织概览</div>
@@ -635,13 +614,6 @@ function renderOrgOverviewPanel(org, eb, bf, mem) {
         <div class="action-row"><div><b>API Key 归属</b><div class="mini">排查 token_id 属于哪位成员</div></div><button class="btn sm" onclick="switchOrgTab('tokens')">查看</button></div>
         <div class="action-row"><div><b>使用日志</b><div class="mini">按 Request ID、成员、类型排查调用</div></div><button class="btn sm" onclick="switchOrgTab('logs')">查看</button></div>
         <div class="action-row"><div><b>支持会话</b><div class="mini">以受控身份进入客户组织协助排障</div></div><button class="btn sm" onclick="switchOrgTab('support')">进入</button></div>
-      </div>
-    </div>
-    <div class="panel">
-      <div class="ph">维护任务</div>
-      <div class="pb action-list">
-        <div class="action-row"><div><b>令牌导入</b><div class="mini">仅关联现有 new-api 用户的组织需要</div></div>${reimport}</div>
-        <div class="action-row"><div><b>历史用量回填</b><div class="mini">用于补齐迁移前后的历史记录</div></div>${backfill}</div>
       </div>
     </div>
     <div class="panel ${hardStopped ? "risk-card" : ""}">
@@ -692,24 +664,7 @@ function renderRiskPanel(org) {
     </div>
   </div>`;
 }
-// 历史回填状态行(24-§9):回填中 / 已同步·起点 / 失败·重跑。
-function backfillLine(bf) {
-  if (bf.status === "done") {
-    const s = bf.earliest_seen_ts ? new Date(bf.earliest_seen_ts * 1000).toLocaleDateString() : "-";
-    return `${pill("已同步", "ok")} 历史用量已全部回填,起点 ${s}(逐条 ${bf.rows_ingested || 0} 条,可在成员用量下钻查全历史)。`;
-  }
-  if (bf.status === "failed") {
-    return `${pill("回填失败", "warn")} ${esc(bf.last_error || "")} —— 点"重新回填"重试(幂等,不会重复计)。`;
-  }
-  return `${pill("回填中", "mut")} 正在同步该企业历史用量…(已灌 ${bf.rows_ingested || 0} 条,通常秒级完成,可刷新查看)。`;
-}
-// 运营方重新回填(幂等):后台从边界重跑,detail 幂等不双算。
-async function doRequeueBackfill(id) {
-  try {
-    await api("POST", "/organizations/" + id + "/backfill/requeue", null);
-    toast("已触发重新回填(幂等,后台执行)"); enterOrg(id, S.org.name);
-  } catch (e) { toast(e.message); }
-}
+// 门B 令牌导入 / 历史回填 UI 已随机器退役删除(总监裁定;后端端点已摘,v2 收编按 doc24 重建)。
 // v1 硬停(20-§4,风控):禁用该组织的 new-api 用户,近实时 403 全部令牌(有钱也停:欠费纠纷/风控);可解除。
 function confirmHardStop(id) {
   dangerConfirm("确认硬停整个组织?", `<p>硬停作用于<b>整个客户组织</b>,不是单个员工。</p>
@@ -720,13 +675,6 @@ async function doHardStop(id, stop) {
   try {
     await api("POST", "/organizations/" + id + (stop ? "/hard-stop" : "/hard-stop-release"), null);
     closeM(); toast(stop ? "已硬停(全部 key 已 403)" : "已解除硬停"); enterOrg(id, S.org.name);
-  } catch (e) { toast(e.message); }
-}
-// 门B 重新导入(幂等):补齐导入失败/企业后来在 new-api 新建的令牌。
-async function doReimport(id) {
-  try {
-    const d = await api("POST", "/organizations/" + id + "/import-tokens", null);
-    toast(`重新导入完成:新导入 ${d.imported || 0} 个,已存在 ${d.skipped || 0} 个,失败 ${d.failed || 0} 个`); enterOrg(id, S.org.name);
   } catch (e) { toast(e.message); }
 }
 async function openTokenMappings(id) {
@@ -1059,15 +1007,7 @@ async function doSupport(id) {
 /* ===================== 组织管理员 / 团队负责人 ===================== */
 VIEWS.dash = async () => {
   const id = S.orgId;
-  // 门B 回填历史常远早于默认窗(近7天)→ 首次进入该组织若有更早的已回填历史,自动切"全部历史",
-  // 免客户第一眼以为没数据(24 验收·产品建议)。仅首次自动一次;之后用户手动改窗不再被覆盖。
-  if (S._dashWideFor !== id) {
-    S._dashWideFor = id;
-    const bf = await api("GET", "/organizations/" + id + "/backfill", null).catch(() => ({ status: "none" }));
-    if (bf.status === "done" && bf.earliest_seen_ts && (Date.now() / 1000 - bf.earliest_seen_ts) > S.win * 3600) {
-      S.win = WIN_ALL;
-    }
-  }
+  // (门B 历史回填的"自动切全部历史"逻辑已随机器退役删除;架构B 组织都是新建,默认近 7 天窗即可。)
   const win = S.win, wl = winLabel(win);
   const reqs = [api("GET", "/organizations/" + id + "/usage?since_hours=" + win, null)];
   // 架构B(31-ADR §2):组织余额 = 金库 + Σ成员,读求和走 /orgs/:id/balance;概览 KPI 展示金库余额。

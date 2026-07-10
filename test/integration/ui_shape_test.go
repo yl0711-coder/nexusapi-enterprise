@@ -94,13 +94,12 @@ func TestIntegration_UIShapeTierAndGrantBodies(t *testing.T) {
 		t.Fatalf("🔴UI 形 body 档位授权应成功,实 code=%d", code)
 	}
 	// 取 grant_id(前端从 tier.grants[].grant_id 读——响应字段名同步验证)。
-	var tiersResp struct {
-		List []struct {
-			ID     int64 `json:"id"`
-			Grants []struct {
-				GrantID int64 `json:"grant_id"`
-			} `json:"grants"`
-		} `json:"list"`
+	// tiers 响应=裸数组(与前端 normList 兼容口径一致)。
+	var tiersResp []struct {
+		ID     int64 `json:"id"`
+		Grants []struct {
+			GrantID int64 `json:"grant_id"`
+		} `json:"grants"`
 	}
 	req, _ := http.NewRequest("GET", ts.URL+fmt.Sprintf("/api/v1/orgs/%d/tiers", orgID), nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
@@ -112,7 +111,7 @@ func TestIntegration_UIShapeTierAndGrantBodies(t *testing.T) {
 	resp.Body.Close()
 	_ = json.Unmarshal(env.Data, &tiersResp)
 	var gid int64
-	for _, tt := range tiersResp.List {
+	for _, tt := range tiersResp {
 		if tt.ID == tierID && len(tt.Grants) > 0 {
 			gid = tt.Grants[0].GrantID
 		}

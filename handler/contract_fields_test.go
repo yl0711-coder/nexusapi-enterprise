@@ -7,6 +7,8 @@ package handler
 import (
 	"encoding/json"
 	"os"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -102,6 +104,105 @@ func TestContract_FrontendFieldNames(t *testing.T) {
 	for _, want := range quotaFieldNames {
 		if !strings.Contains(js, `"`+want+`"`) {
 			t.Errorf("前端未引用统一契约字段 %q(疑似前端又换了名,与后端漂移)", want)
+		}
+	}
+}
+
+// ── 45号-19:契约测扩射程 ──────────────────────────────────────────────
+
+// TestContract_FrontendForbiddenMarkers 封杀 app.js 里已踩过雷的错名与退役标记:
+// tier 错名("group":/model_limits 曾致建档必 400,45号 P1-1)、门B/回填标记(曾致建组织 400)。
+func TestContract_FrontendForbiddenMarkers(t *testing.T) {
+	src, err := os.ReadFile("../web/app.js")
+	if err != nil {
+		t.Fatalf("读 web/app.js: %v", err)
+	}
+	js := string(src)
+	// 禁串(出现即红)。"group":合法场景=令牌维度(createMyTokenReq/PATCH me/tokens 有 group tag),
+	// 但 tier body 语境的 group 已在 P1-1 改 newapi_group——这里封杀曾出事的组合精确串。
+	forbidden := []string{
+		`model_limits:`, `"model_limits"`, // tier 错名(后端只认 model_set)
+		`co_mode`, `body.associate`, `"associate"`, // 门B 标记
+		`/backfill`, `doReimport`, `import-tokens`, // 回填/导入退役端点
+	}
+	for _, f := range forbidden {
+		if idx := strings.Index(js, f); idx >= 0 {
+			line := 1 + strings.Count(js[:idx], "\n")
+			t.Errorf("前端出现已封杀标记 %q(app.js:%d)——tier 错名/门B/回填残留回流即红(45号-19)", f, line)
+		}
+	}
+	// direction 枚举:前端必须认后端权威 credit/debit(45号 P2-3;曾不认 debit 把退额画成入账)。
+	for _, must := range []string{`d === "credit"`, `d === "debit"`} {
+		if !strings.Contains(js, must) {
+			t.Errorf("前端 ledgerDir 缺权威枚举判断 %q(direction 只认 credit/debit)", must)
+		}
+	}
+}
+
+// TestContract_FrontendBodyFieldsSubsetOfBackendTags 45号-19 核心:前端提交 body 的字段名
+// 必须 ⊆ 后端写端点 input struct 的 json tag 并集——根治"前端起个后端不认识的名,严格解析必 400"
+// (P1-1/P1-2/门B associate 三次同根事故)。提取规则:app.js 中 `const body = {`/`body = {` 起
+// 到首个 `};` 段内的 `key:` 形态键。后端并集=handler 包内全部写端点 req structs 反射(含嵌套指针)。
+func TestContract_FrontendBodyFieldsSubsetOfBackendTags(t *testing.T) {
+	// 后端合法键并集(写端点 req structs;handler 包内可反射未导出类型)。
+	legal := map[string]bool{}
+	collect := func(v any) {
+		rt := reflect.TypeOf(v)
+		for i := 0; i < rt.NumField(); i++ {
+			tag := strings.Split(rt.Field(i).Tag.Get("json"), ",")[0]
+			if tag != "" && tag != "-" {
+				legal[tag] = true
+			}
+		}
+	}
+	collect(loginReq{})
+	collect(changePasswordReq{})
+	collect(updateMeReq{})
+	collect(createOrgReq{})
+	collect(createTierReq{})
+	collect(updateTierReq{})
+	collect(createMyTokenReq{})
+	collect(updateMyTokenReq{})
+	collect(service.UpdatePlatformSettingsInput{})
+	// 零散写端点的 inline 键(grep handler 各 decodeJSON 匿名/小结构;漂移时此表跟着后端改)。
+	for _, k := range []string{"name", "team_id", "tier_id", "email", "enabled", "role", "amount_raw", "reason",
+		"idempotency_key", "grant_id", "target_type", "target_id", "scope", "grant_type", "ttl_seconds",
+		"note", "group", "mode", "default_token_group", "display_name", "timezone", "default_tier_id",
+		"emails", "member_ids", "quota_raw", "allow_ips", "reset_period", "model_set", "model_cap",
+		"quota_type", "visibility", "newapi_user_group", "newapi_group", "admin_email", "admin_password", "slug"} {
+		legal[k] = true
+	}
+	src, err := os.ReadFile("../web/app.js")
+	if err != nil {
+		t.Fatalf("读 web/app.js: %v", err)
+	}
+	lines := strings.Split(string(src), "\n")
+	keyRe := regexp.MustCompile(`^\s*([a-z][a-z0-9_]*)\s*:`)
+	inBody := false
+	for n, ln := range lines {
+		if strings.Contains(ln, "body = {") || strings.Contains(ln, "const body = {") {
+			inBody = true
+			// 同行 inline 键
+			for _, m := range regexp.MustCompile(`[{,]\s*([a-z][a-z0-9_]*)\s*:`).FindAllStringSubmatch(ln, -1) {
+				if !legal[m[1]] {
+					t.Errorf("前端 body 字段 %q(app.js:%d)不在后端任何写端点 json tag 里——提交必 400(45号-19)", m[1], n+1)
+				}
+			}
+			if strings.Contains(ln, "};") || (strings.Contains(ln, "}") && strings.Count(ln, "{") <= strings.Count(ln, "}")) {
+				inBody = false
+			}
+			continue
+		}
+		if inBody {
+			if strings.Contains(ln, "};") {
+				inBody = false
+				continue
+			}
+			if m := keyRe.FindStringSubmatch(ln); m != nil {
+				if !legal[m[1]] {
+					t.Errorf("前端 body 字段 %q(app.js:%d)不在后端任何写端点 json tag 里——提交必 400(45号-19)", m[1], n+1)
+				}
+			}
 		}
 	}
 }

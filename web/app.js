@@ -480,7 +480,7 @@ async function downloadUsageCsv() {
   } catch (e) { toast(e.message); }
 }
 // 架构B 组织入网 = 只有门A 新建(平台建金库 new-api 用户)。门B"关联现有用户"已整体退役
-// (总监裁定 2026-07-07/ADR §11):后端 Associate 字段已删、import-tokens 端点已摘,前端此弹窗
+// (总监裁定 2026-07-07/ADR §11):后端关联字段已删、导入端点已摘,前端此弹窗
 // 曾残留门B 选项致提交带 associate 字段被严格 JSON 解析拒(生产报"请求体格式非法"),本次清净。
 function openCreateOrg() {
   modal("组织入网", `<div class="fld"><label>组织名称</label><input id="co_n" placeholder="Acme 科技"></div>

@@ -8,7 +8,7 @@ import (
 )
 
 // LogMirrorSource 是完整日志镜像的最小上游读取锚点。
-// username 来自 organization.newapi_username 或门B关联时留下的 backfill username。
+// username 来自 organization.newapi_username(门B 已退役,不再有 backfill 来源)。
 type LogMirrorSource struct {
 	OrgID        int64
 	NewapiUserID int64
@@ -176,7 +176,7 @@ func (s *Store) ListLogMirrorSources(ctx context.Context, limit int) ([]LogMirro
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT o.id, o.newapi_user_id, COALESCE(o.newapi_username, b.newapi_username, '') AS username
+		`SELECT o.id, o.newapi_user_id, COALESCE(o.newapi_username, '') AS username
 		   FROM organization o
 		   LEFT JOIN org_newapi_log_cursor c ON c.org_id = o.id
 		  WHERE o.deleted_at IS NULL AND o.newapi_user_id IS NOT NULL
